@@ -1,0 +1,15 @@
+node_modules/
+dist/
+dist-electron/
+.vite/
+.cache/
+.venv/
+.venv-ai/
+.venv-powerpaint/
+__pycache__/
+.pytest_cache/
+*.pyc
+*.log
+.DS_Store
+service/.projects/
+service/.models/
