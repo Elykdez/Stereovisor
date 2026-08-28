@@ -39,6 +39,18 @@ def snapshot_ready(path: Path, required_files: tuple[str, ...] = ()) -> bool:
     return (path / ".stereovisor-ready").is_file() and all((path / name).is_file() for name in required_files)
 
 
+def powerpaint_snapshot_ready(path: Path) -> bool:
+    required_files = (
+        "PowerPaint_Brushnet/diffusion_pytorch_model.safetensors",
+        "PowerPaint_Brushnet/pytorch_model.bin",
+    )
+    unet_variants = (
+        "realisticVisionV60B1_v51VAE/unet/diffusion_pytorch_model.bin",
+        "realisticVisionV60B1_v51VAE/unet/diffusion_pytorch_model.safetensors",
+    )
+    return snapshot_ready(path, required_files) and any((path / name).is_file() for name in unet_variants)
+
+
 def dependency_status(module: str, label: str) -> DependencyStatus:
     available = importlib.util.find_spec(module) is not None
     detail = "Installed" if available else f"Missing {label}"
@@ -60,14 +72,7 @@ def ai_dependencies() -> dict[str, DependencyStatus]:
     qwen_model = MODEL_ROOT / "qwen3-vl-2b-instruct"
     powerpaint_runtime = POWERPAINT_PYTHON.is_file() and POWERPAINT_VENDOR.is_dir()
     qwen_ready = snapshot_ready(qwen_model, ("model.safetensors",))
-    powerpaint_ready = snapshot_ready(
-        powerpaint_model,
-        (
-            "PowerPaint_Brushnet/diffusion_pytorch_model.safetensors",
-            "PowerPaint_Brushnet/pytorch_model.bin",
-            "realisticVisionV60B1_v51VAE/unet/diffusion_pytorch_model.safetensors",
-        ),
-    )
+    powerpaint_ready = powerpaint_snapshot_ready(powerpaint_model)
     return {
         "segmentation": model_dependency_status(
             "transformers",

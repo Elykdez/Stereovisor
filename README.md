@@ -24,7 +24,7 @@ Development starts with the explicitly labeled preview engine. Use the bundled s
 
 - `Project file` writes a portable `.stereovisor` package containing `manifest.json` and every processed source, mask, cutout, depth, union-mask, and background PNG.
 - `Import project` loads that package into a fresh local workspace and restores camera and layer editing state.
-- `Demo WebM` renders a four-second parallax preview at up to 1280 pixels. It uses Electron's bundled Chromium encoder, so FFmpeg is not required.
+- `Demo MP4` renders a four-second H.264 parallax preview at up to 1280 pixels for playback in standard system video players. It uses Electron's bundled Chromium encoder, so FFmpeg is not required; WebM remains a fallback on runtimes without MP4 recording support.
 - `PNG` exports the current composited frame at source resolution.
 
 Generated samples are available as [a reloadable project](docs/media/sample-project.stereovisor) and [its parallax WebM](docs/media/sample-parallax-demo.webm).

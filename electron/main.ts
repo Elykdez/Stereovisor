@@ -1,10 +1,11 @@
-import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, Menu, shell, type MenuItemConstructorOptions } from "electron";
 import { spawn, type ChildProcess } from "node:child_process";
 import { readFile, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 let mainWindow: BrowserWindow | null = null;
 let serviceProcess: ChildProcess | null = null;
+const hasSingleInstanceLock = app.requestSingleInstanceLock();
 
 function projectRoot(): string {
   return path.resolve(__dirname, "..");
@@ -26,6 +27,34 @@ function startService(): void {
     }
   );
   serviceProcess.on("error", (error) => console.error("Local service failed to start", error));
+}
+
+function installApplicationMenu(): void {
+  const template: MenuItemConstructorOptions[] = [
+    ...(process.platform === "darwin" ? [{ role: "appMenu" as const }] : []),
+    { role: "fileMenu" },
+    { role: "editMenu" },
+    {
+      label: "View",
+      submenu: [
+        { role: "reload" },
+        { role: "forceReload" },
+        { type: "separator" },
+        {
+          role: "toggleDevTools",
+          accelerator: process.platform === "darwin" ? "Alt+Command+I" : "Control+Shift+I"
+        },
+        { type: "separator" },
+        { role: "resetZoom" },
+        { role: "zoomIn" },
+        { role: "zoomOut" },
+        { type: "separator" },
+        { role: "togglefullscreen" }
+      ]
+    },
+    { role: "windowMenu" }
+  ];
+  Menu.setApplicationMenu(Menu.buildFromTemplate(template));
 }
 
 function createWindow(): void {
@@ -93,9 +122,10 @@ ipcMain.handle("stereovisor:save-project", async (_event, data: ArrayBuffer, sug
   saveBinary(data, suggestedName, "Stereovisor project", "stereovisor")
 );
 
-ipcMain.handle("stereovisor:save-video", async (_event, data: ArrayBuffer, suggestedName: string) =>
-  saveBinary(data, suggestedName, "WebM video", "webm")
-);
+ipcMain.handle("stereovisor:save-video", async (_event, data: ArrayBuffer, suggestedName: string) => {
+  const extension = path.extname(suggestedName).toLowerCase() === ".mp4" ? "mp4" : "webm";
+  return saveBinary(data, suggestedName, extension === "mp4" ? "MP4 video" : "WebM video", extension);
+});
 
 ipcMain.handle("stereovisor:open-project", async () => {
   const result = await dialog.showOpenDialog({
@@ -110,18 +140,30 @@ ipcMain.handle("stereovisor:open-project", async () => {
   return Uint8Array.from(data).buffer;
 });
 
-app.whenReady().then(() => {
-  startService();
-  createWindow();
-  app.on("activate", () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow();
+if (!hasSingleInstanceLock) {
+  app.quit();
+} else {
+  app.on("second-instance", () => {
+    if (!mainWindow) return;
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.show();
+    mainWindow.focus();
   });
-});
 
-app.on("window-all-closed", () => {
-  if (process.platform !== "darwin") app.quit();
-});
+  app.whenReady().then(() => {
+    startService();
+    installApplicationMenu();
+    createWindow();
+    app.on("activate", () => {
+      if (BrowserWindow.getAllWindows().length === 0) createWindow();
+    });
+  });
 
-app.on("before-quit", () => {
-  serviceProcess?.kill();
-});
+  app.on("window-all-closed", () => {
+    if (process.platform !== "darwin") app.quit();
+  });
+
+  app.on("before-quit", () => {
+    serviceProcess?.kill();
+  });
+}

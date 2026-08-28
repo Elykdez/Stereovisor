@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import time
 from pathlib import Path
+from typing import Callable
 
 from PIL import Image
 
@@ -16,7 +18,7 @@ from .ai_models import (
     resolve_device,
     verify_vram_peak,
 )
-from .config import POWERPAINT_PYTHON, POWERPAINT_VENDOR, WORKSPACE_ROOT, snapshot_ready
+from .config import POWERPAINT_PYTHON, POWERPAINT_VENDOR, WORKSPACE_ROOT, powerpaint_snapshot_ready, snapshot_ready
 
 
 def generate_background_prompt(image: Image.Image) -> tuple[str, int]:
@@ -80,14 +82,10 @@ def powerpaint_inpaint(
     mask_path: Path,
     output_path: Path,
     prompt: str,
+    progress: Callable[[int, int], None] | None = None,
 ) -> int:
     runner = WORKSPACE_ROOT / "scripts" / "powerpaint-runner.py"
-    required = (
-        "PowerPaint_Brushnet/diffusion_pytorch_model.safetensors",
-        "PowerPaint_Brushnet/pytorch_model.bin",
-        "realisticVisionV60B1_v51VAE/unet/diffusion_pytorch_model.safetensors",
-    )
-    if not POWERPAINT_PYTHON.is_file() or not POWERPAINT_VENDOR.is_dir() or not snapshot_ready(POWERPAINT_PATH, required):
+    if not POWERPAINT_PYTHON.is_file() or not POWERPAINT_VENDOR.is_dir() or not powerpaint_snapshot_ready(POWERPAINT_PATH):
         raise RuntimeError("PowerPaint v2.1 is not installed. Run scripts/ensure-ready.ps1.")
     environment = os.environ.copy()
     environment.update({
@@ -96,6 +94,10 @@ def powerpaint_inpaint(
         "DIFFUSERS_OFFLINE": "1",
         "PYTORCH_ALLOC_CONF": "expandable_segments:True",
     })
+    progress_path = output_path.with_name(".powerpaint-progress.json")
+    log_path = output_path.with_name(".powerpaint-runner.log")
+    progress_path.unlink(missing_ok=True)
+    log_path.unlink(missing_ok=True)
     command = [
         str(POWERPAINT_PYTHON),
         str(runner),
@@ -105,22 +107,52 @@ def powerpaint_inpaint(
         "--prompt", prompt,
         "--checkpoint", str(POWERPAINT_PATH),
         "--vendor", str(POWERPAINT_VENDOR),
+        "--progress", str(progress_path),
     ]
-    completed = subprocess.run(
-        command,
-        check=False,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        env=environment,
-        timeout=900,
-    )
-    if completed.returncode != 0:
-        detail = (completed.stderr or completed.stdout).strip().splitlines()[-1:]
-        raise RuntimeError(f"PowerPaint failed: {detail[0] if detail else 'unknown local runtime error'}")
     try:
-        payload = json.loads(completed.stdout.strip().splitlines()[-1])
-        return verify_vram_peak("PowerPaint", int(payload.get("peak_vram_mb", 0)))
-    except (IndexError, TypeError, ValueError, json.JSONDecodeError) as error:
-        raise RuntimeError("PowerPaint completed without a valid runtime report") from error
+        with log_path.open("w", encoding="utf-8", errors="replace") as log:
+            process = subprocess.Popen(
+                command,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                env=environment,
+            )
+            deadline = time.monotonic() + 900
+            reported_step = 0
+            while process.poll() is None:
+                if time.monotonic() >= deadline:
+                    process.kill()
+                    process.wait()
+                    raise RuntimeError("PowerPaint timed out after 15 minutes")
+                if progress is not None and progress_path.is_file():
+                    try:
+                        report = json.loads(progress_path.read_text(encoding="utf-8"))
+                        step = int(report["step"])
+                        total = int(report["total"])
+                        if step > reported_step:
+                            progress(step, total)
+                            reported_step = step
+                    except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError):
+                        pass
+                time.sleep(0.2)
+            return_code = process.returncode
+
+        output = log_path.read_text(encoding="utf-8", errors="replace")
+        lines = output.strip().splitlines()
+        if return_code != 0:
+            detail = lines[-1] if lines else "unknown local runtime error"
+            raise RuntimeError(f"PowerPaint failed: {detail}")
+        for line in reversed(lines):
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if "peak_vram_mb" in payload:
+                return verify_vram_peak("PowerPaint", int(payload["peak_vram_mb"]))
+        raise RuntimeError("PowerPaint completed without a valid runtime report")
+    finally:
+        progress_path.unlink(missing_ok=True)
+        log_path.unlink(missing_ok=True)

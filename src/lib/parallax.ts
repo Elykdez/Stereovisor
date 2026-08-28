@@ -26,7 +26,8 @@ export function layerTransform(
 }
 
 export function backgroundTransform(camera: CameraState): LayerTransform {
-  const overscan = 1 + camera.strength * 0.0007;
+  const displacement = Math.max(Math.abs(camera.x), Math.abs(camera.y));
+  const overscan = 1 + camera.strength * 0.0007 * displacement;
   return {
     x: camera.x * camera.strength * 0.00012,
     y: camera.y * camera.strength * 0.00012,
@@ -53,4 +54,15 @@ export function demoCameraAt(camera: CameraState, progress: number): CameraState
 export function fitVideoDimensions(width: number, height: number, maximumEdge = 1280): [number, number] {
   const scale = Math.min(1, maximumEdge / Math.max(width, height));
   return [Math.max(2, Math.floor(width * scale / 2) * 2), Math.max(2, Math.floor(height * scale / 2) * 2)];
+}
+
+export function fitCanvasDimensions(
+  containerWidth: number,
+  containerHeight: number,
+  imageWidth: number,
+  imageHeight: number
+): [number, number] {
+  if (containerWidth <= 0 || containerHeight <= 0 || imageWidth <= 0 || imageHeight <= 0) return [0, 0];
+  const scale = Math.min(containerWidth / imageWidth, containerHeight / imageHeight);
+  return [imageWidth * scale, imageHeight * scale];
 }

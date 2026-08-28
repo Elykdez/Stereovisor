@@ -16,7 +16,7 @@ React renderer  <---- HTTP/JSON ---->  FastAPI vision service
   - layer list                        - Grounded instance proposals
   - Canvas 2D compositor              - DINO-T + SAM 2.1 instances
   - camera controls                   - InSPyReNet + DA3 layers
-  - PNG/WebM export                   - LaMa / Qwen + PowerPaint
+  - PNG/MP4 export                    - LaMa / Qwen + PowerPaint
   - project load/export               - validated package import/export
 ```
 
@@ -125,7 +125,7 @@ The interface has three stable zones:
 - Left rail: upload/sample action and workflow status.
 - Center stage: the composited image, direct camera dragging, and a compact camera toolbar.
 - Right inspector: foreground selection during analysis, then visibility/depth controls in the editor.
-- Top actions: load a project at any time; export the portable project whenever a scene exists; export PNG/WebM after the background is built.
+- Top actions: load a project at any time; export the portable project whenever a scene exists; export PNG/MP4 after the background is built.
 
 The visual language is a dark graphite workspace with warm ivory text and a restrained acid-lime accent. This keeps the image dominant and avoids a generic dashboard appearance. Dense controls use a monospace label style while titles remain editorial.
 
@@ -151,4 +151,4 @@ The visual language is a dark graphite workspace with warm ivory text and a rest
 
 ## 8. Packaging Plan
 
-Version 0.3 runs from source. `Run Stereovisor.cmd` creates the main and PowerPaint virtual environments, pins the upstream DA3 and PowerPaint source revisions, and downloads all model weights on first launch. Later launches validate and reuse these assets. WebM export uses Electron's bundled Chromium encoder, so FFmpeg is not installed or distributed. Packaging and signing remain separate.
+Version 0.3 runs from source. `Run Stereovisor.cmd` creates the main and PowerPaint virtual environments, pins the upstream DA3 and PowerPaint source revisions, and downloads all model weights on first launch. Later launches validate and reuse these assets. H.264 MP4 export uses Electron's bundled Chromium encoder, with WebM fallback, so FFmpeg is not installed or distributed. Packaging and signing remain separate.

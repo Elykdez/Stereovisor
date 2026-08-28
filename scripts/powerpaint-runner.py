@@ -7,7 +7,10 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from PIL import Image
+from PIL import Image, ImageChops, ImageFilter
+
+
+DEFAULT_INFERENCE_STEPS = 25
 
 
 def fit_size(size: tuple[int, int]) -> tuple[int, int]:
@@ -20,7 +23,9 @@ def fit_size(size: tuple[int, int]) -> tuple[int, int]:
 
 def composite_full_redraw(generated: Image.Image, source: Image.Image, mask: Image.Image) -> Image.Image:
     binary = mask.convert("L").point(lambda value: 255 if value > 0 else 0)
-    return Image.composite(generated, source, binary)
+    feather_radius = max(1, round(min(source.size) * 0.004))
+    feathered = ImageChops.lighter(binary, binary.filter(ImageFilter.GaussianBlur(feather_radius)))
+    return Image.composite(generated, source, feathered)
 
 
 def main() -> None:
@@ -31,11 +36,12 @@ def main() -> None:
     parser.add_argument("--prompt", required=True)
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--vendor", type=Path, required=True)
+    parser.add_argument("--progress", type=Path)
     args = parser.parse_args()
     sys.path.insert(0, str(args.vendor))
 
     from diffusers import UniPCMultistepScheduler
-    from safetensors.torch import load_model
+    from safetensors.torch import load_file
     from transformers import CLIPTextModel
 
     from powerpaint.models.BrushNet_CA import BrushNetModel
@@ -84,7 +90,9 @@ def main() -> None:
         initialize_tokens=["a", "a", "a"],
         num_vectors_per_token=10,
     )
-    load_model(pipe.brushnet, str(brush_checkpoint / "diffusion_pytorch_model.safetensors"))
+    brushnet_state = load_file(str(brush_checkpoint / "diffusion_pytorch_model.safetensors"), device="cpu")
+    pipe.brushnet.load_state_dict(brushnet_state, strict=True)
+    del brushnet_state
     pipe.text_encoder_brushnet.load_state_dict(
         torch.load(brush_checkpoint / "pytorch_model.bin", map_location="cpu", weights_only=True),
         strict=False,
@@ -105,6 +113,15 @@ def main() -> None:
     prompt = f"{args.prompt.strip()} empty scene blur".strip()
     negative = "people, person, character, object, text, logo, low quality, blurry artifacts"
     generator = torch.Generator(device="cuda").manual_seed(42)
+
+    def report_progress(_pipeline, step: int, _timestep, callback_kwargs):
+        if args.progress is not None:
+            args.progress.write_text(
+                json.dumps({"step": step + 1, "total": DEFAULT_INFERENCE_STEPS}),
+                encoding="utf-8",
+            )
+        return callback_kwargs
+
     result = pipe(
         promptA=" P_ctxt",
         promptB=" P_ctxt",
@@ -113,7 +130,7 @@ def main() -> None:
         tradoff_nag=1.0,
         image=conditioned,
         mask=mask_rgb,
-        num_inference_steps=45,
+        num_inference_steps=DEFAULT_INFERENCE_STEPS,
         generator=generator,
         brushnet_conditioning_scale=1.0,
         negative_promptA=f"{negative} P_obj",
@@ -122,6 +139,7 @@ def main() -> None:
         guidance_scale=7.5,
         width=working_size[0],
         height=working_size[1],
+        callback_on_step_end=report_progress,
     ).images[0]
     generated = result.resize(source.size, Image.Resampling.LANCZOS)
     final = composite_full_redraw(generated, source, mask_original)

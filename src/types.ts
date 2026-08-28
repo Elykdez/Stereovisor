@@ -21,6 +21,10 @@ export interface SceneLayer {
   name: string;
   cutoutUrl: string;
   maskUrl: string;
+  proposalMaskUrl: string | null;
+  refinementState: "rough" | "refined";
+  confirmed: boolean;
+  maskRevision: number;
   depth: number;
   order: number;
   selected: boolean;
@@ -37,6 +41,7 @@ export interface SceneProject {
   sourceUrl: string;
   backgroundUrl: string | null;
   unionMaskUrl: string | null;
+  extraMaskUrl?: string | null;
   depthMapUrl: string | null;
   backgroundPrompt: string | null;
   inpaintProvider: "preview" | "big-lama" | "powerpaint" | null;
@@ -55,6 +60,19 @@ export interface CameraState {
 export interface ImportedProject {
   project: SceneProject;
   camera: CameraState;
+}
+
+export interface ProcessingProgress {
+  state: "queued" | "running" | "completed" | "failed";
+  progress: number;
+  stage: string;
+  message: string;
+}
+
+export interface InpaintHistoryState {
+  targetId: string;
+  canUndo: boolean;
+  canRedo: boolean;
 }
 
 export type WorkflowPhase = "idle" | "analyzing" | "selecting" | "inpainting" | "editing";

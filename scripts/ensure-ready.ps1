@@ -33,7 +33,7 @@ function Test-PowerPaintRuntime {
     $PreviousErrorAction = $ErrorActionPreference
     try {
         $ErrorActionPreference = "SilentlyContinue"
-        & $PowerPaintPython -W ignore -c "import sys; import torch, diffusers, transformers, mmengine; sys.exit(0 if torch.cuda.is_available() else 2)" *> $null
+        & $PowerPaintPython -W ignore -c "import sys; import torch, diffusers, transformers, mmengine; from accelerate.utils.memory import clear_device_cache; from peft import PeftModel; sys.exit(0 if torch.cuda.is_available() else 2)" *> $null
         $ProbeExitCode = $LASTEXITCODE
     }
     finally {

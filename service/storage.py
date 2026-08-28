@@ -99,12 +99,14 @@ class ProjectStore:
                 "sourceUrl": _asset_name(project.sourceUrl),
                 "backgroundUrl": _asset_name(project.backgroundUrl),
                 "unionMaskUrl": _asset_name(project.unionMaskUrl),
+                "extraMaskUrl": _asset_name(project.extraMaskUrl),
                 "depthMapUrl": _asset_name(project.depthMapUrl),
                 "layers": [
                     layer.model_copy(
                         update={
                             "cutoutUrl": _asset_name(layer.cutoutUrl),
                             "maskUrl": _asset_name(layer.maskUrl),
+                            "proposalMaskUrl": _asset_name(layer.proposalMaskUrl),
                         }
                     )
                     for layer in layers
@@ -192,9 +194,11 @@ class ProjectStore:
                     _asset_name(portable.sourceUrl),
                     _asset_name(portable.backgroundUrl),
                     _asset_name(portable.unionMaskUrl),
+                    _asset_name(portable.extraMaskUrl),
                     _asset_name(portable.depthMapUrl),
                     *(_asset_name(layer.cutoutUrl) for layer in portable.layers),
                     *(_asset_name(layer.maskUrl) for layer in portable.layers),
+                    *(_asset_name(layer.proposalMaskUrl) for layer in portable.layers),
                 )
                 if name
             }
@@ -245,12 +249,14 @@ class ProjectStore:
                         "sourceUrl": restored_url(portable.sourceUrl),
                         "backgroundUrl": restored_url(portable.backgroundUrl),
                         "unionMaskUrl": restored_url(portable.unionMaskUrl),
+                        "extraMaskUrl": restored_url(portable.extraMaskUrl),
                         "depthMapUrl": restored_url(portable.depthMapUrl),
                         "layers": [
                             layer.model_copy(
                                 update={
                                     "cutoutUrl": restored_url(layer.cutoutUrl),
                                     "maskUrl": restored_url(layer.maskUrl),
+                                    "proposalMaskUrl": restored_url(layer.proposalMaskUrl),
                                 }
                             )
                             for layer in portable.layers

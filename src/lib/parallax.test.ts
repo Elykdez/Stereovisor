@@ -1,4 +1,4 @@
-import { backgroundTransform, clamp, demoCameraAt, fitVideoDimensions, layerTransform, visibleLayers } from "./parallax";
+import { backgroundTransform, clamp, demoCameraAt, fitCanvasDimensions, fitVideoDimensions, layerTransform, visibleLayers } from "./parallax";
 
 describe("parallax transforms", () => {
   const camera = { x: 0.5, y: -0.25, zoom: 1.1, strength: 80 };
@@ -14,6 +14,10 @@ describe("parallax transforms", () => {
 
   it("keeps the background overscanned", () => {
     expect(backgroundTransform(camera).scale).toBeGreaterThan(camera.zoom);
+  });
+
+  it("shows the whole background before the camera moves", () => {
+    expect(backgroundTransform({ ...camera, x: 0, y: 0, zoom: 1 }).scale).toBe(1);
   });
 
   it("clamps direct camera input", () => {
@@ -40,5 +44,15 @@ describe("parallax transforms", () => {
     expect(fitVideoDimensions(4000, 3000)).toEqual([1280, 960]);
     expect(fitVideoDimensions(601, 901)).toEqual([600, 900]);
     expect(fitVideoDimensions(640, 480)).toEqual([640, 480]);
+  });
+
+  it("contains a portrait canvas within both stage dimensions", () => {
+    const [width, height] = fitCanvasDimensions(858, 707, 720, 1080);
+
+    expect(width).toBeCloseTo(471.333, 3);
+    expect(height).toBeCloseTo(707, 3);
+    expect(width).toBeLessThanOrEqual(858);
+    expect(height).toBeLessThanOrEqual(707);
+    expect(width / height).toBeCloseTo(720 / 1080, 6);
   });
 });

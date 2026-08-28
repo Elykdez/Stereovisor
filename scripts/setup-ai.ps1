@@ -38,7 +38,7 @@ $PowerPaintPackages = Join-Path $PowerPaintVenv "Lib\site-packages"
 $RuntimePackages = & $PythonPath -c "import sys; print('\n'.join(path for path in sys.path if path.lower().endswith('site-packages')))"
 $RuntimePackages | Set-Content -LiteralPath (Join-Path $PowerPaintPackages "stereovisor-ai-runtime.pth") -Encoding Ascii
 & $PowerPaintPython -m pip install --upgrade pip
-& $PowerPaintPython -m pip install --no-deps "diffusers==0.27.0" "transformers==4.38.2" "huggingface-hub==0.25.2" "accelerate==0.30.1" "mmengine==0.10.7" "numpy==1.26.4" "opencv-python==4.10.0.84" "safetensors==0.6.2" "pillow==11.3.0" "tokenizers==0.15.2" "importlib-metadata>=8,<9" "rich>=13,<15" "termcolor>=2,<4" "yapf>=0.40,<1"
+& $PowerPaintPython -m pip install --no-deps "diffusers==0.27.0" "transformers==4.38.2" "huggingface-hub==0.25.2" "accelerate==0.34.2" "peft==0.9.0" "mmengine==0.10.7" "numpy==1.26.4" "opencv-python==4.10.0.84" "safetensors==0.6.2" "pillow==11.3.0" "tokenizers==0.15.2" "importlib-metadata>=8,<9" "rich>=13,<15" "termcolor>=2,<4" "yapf>=0.40,<1"
 if ($LASTEXITCODE -ne 0) {
     throw "Optional PowerPaint runtime installation failed."
 }

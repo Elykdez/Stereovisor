@@ -26,7 +26,7 @@ The primary user is a designer or content creator who wants a parallax still wit
 4. The application joins the selected alpha masks, expands the removal boundary, and inpaints a clean background plate.
 5. The scene opens in the parallax editor.
 6. The user changes camera position, zoom, parallax strength, layer visibility, and per-layer depth.
-7. The user exports the current view as a PNG or a short parallax WebM.
+7. The user exports the current view as a PNG or a short H.264 MP4 parallax video.
 8. The user can export a portable project and load it later with all processed images and editor state restored.
 
 ## 4. Functional Requirements
@@ -91,7 +91,7 @@ The primary user is a designer or content creator who wants a parallax still wit
 
 - Export the current composite at source resolution as PNG.
 - Preserve alpha only where the composition itself has transparency.
-- Export a four-second looping parallax demonstration as WebM at up to 1280 pixels on its longest edge.
+- Export a four-second looping parallax demonstration as H.264 MP4 at up to 1280 pixels on its longest edge, with WebM fallback when MP4 recording is unavailable.
 - Export a versioned `.stereovisor` project package containing every processed PNG and a JSON manifest.
 - Record current camera, layer depth, order, visibility, selection, bounds, engine, and inpainting metadata in the manifest.
 - Store each asset's byte length and SHA-256 checksum for import verification.
@@ -126,7 +126,7 @@ The primary user is a designer or content creator who wants a parallax still wit
 - No model inference or image decoding during an animation frame.
 - Reuse InSPyReNet across proposals within one job; release GPU models at stage boundaries.
 - Analyze and inpaint off the Electron renderer thread.
-- Encode demo video with Chromium's local WebM encoder; do not require FFmpeg or a cloud service.
+- Encode demo video with Chromium's local H.264 MP4 encoder, falling back to WebM when needed; do not require FFmpeg or a cloud service.
 
 ### Security
 
@@ -190,7 +190,7 @@ The primary user is a designer or content creator who wants a parallax still wit
 - Disabling a layer removes it from the composite without rerunning analysis.
 - PNG export produces a non-empty file at source resolution.
 - Project export followed by load restores every referenced image, current layer state, and camera state under a new local project ID.
-- Demo export produces a non-empty four-second WebM without installing FFmpeg.
+- Demo export produces a non-empty four-second H.264 MP4, or a WebM fallback, without installing FFmpeg.
 - The app clearly distinguishes production AI from preview processing.
 
 ## 9. Technical References

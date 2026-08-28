@@ -32,6 +32,10 @@ class LayerPayload(BaseModel):
     name: str
     cutoutUrl: str
     maskUrl: str
+    proposalMaskUrl: str | None = None
+    refinementState: Literal["rough", "refined"] = "rough"
+    confirmed: bool = True
+    maskRevision: int = Field(default=0, ge=0)
     depth: float
     order: int
     selected: bool = True
@@ -48,6 +52,7 @@ class ProjectPayload(BaseModel):
     sourceUrl: str
     backgroundUrl: str | None = None
     unionMaskUrl: str | None = None
+    extraMaskUrl: str | None = None
     depthMapUrl: str | None = None
     backgroundPrompt: str | None = None
     inpaintProvider: Literal["preview", "big-lama", "powerpaint"] | None = None
@@ -60,6 +65,12 @@ class InpaintRequest(BaseModel):
     layerIds: list[str] = Field(min_length=1)
     refinement: Literal["lama", "powerpaint"] = "lama"
     prompt: str | None = Field(default=None, max_length=500)
+
+
+class InpaintHistoryPayload(BaseModel):
+    targetId: str
+    canUndo: bool
+    canRedo: bool
 
 
 class CameraPayload(BaseModel):
@@ -85,3 +96,17 @@ class ProjectExportRequest(BaseModel):
 class ProjectImportPayload(BaseModel):
     project: ProjectPayload
     camera: CameraPayload
+
+
+class ProcessingJobStart(BaseModel):
+    jobId: str
+
+
+class ProcessingJobPayload(BaseModel):
+    jobId: str
+    kind: Literal["analyze", "refine", "inpaint"]
+    state: Literal["queued", "running", "completed", "failed"]
+    progress: int = Field(ge=0, le=100)
+    stage: str
+    message: str
+    result: ProjectPayload | None = None
