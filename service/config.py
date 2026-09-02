@@ -36,6 +36,8 @@ class DependencyStatus:
 
 
 def snapshot_ready(path: Path, required_files: tuple[str, ...] = ()) -> bool:
+    # The sentinel prevents a merely created model directory from being
+    # reported as ready; required files add a cheap, explicit integrity gate.
     return (path / ".stereovisor-ready").is_file() and all((path / name).is_file() for name in required_files)
 
 
@@ -68,6 +70,8 @@ def model_dependency_status(module: str, label: str, paths: tuple[Path, ...]) ->
 
 
 def ai_dependencies() -> dict[str, DependencyStatus]:
+    # Health reports module presence plus local model/sentinel presence. It does
+    # not instantiate models, keeping startup checks fast and side-effect free.
     powerpaint_model = MODEL_ROOT / "powerpaint-v2-1"
     qwen_model = MODEL_ROOT / "qwen3-vl-2b-instruct"
     powerpaint_runtime = POWERPAINT_PYTHON.is_file() and POWERPAINT_VENDOR.is_dir()
@@ -115,6 +119,8 @@ def production_available() -> bool:
 
 
 def active_engine() -> str:
+    # Explicit mode wins. Auto mode selects AI only when all core providers are
+    # ready; otherwise preview remains available with an honest health message.
     if MODE == "preview":
         return "preview"
     if MODE == "ai":

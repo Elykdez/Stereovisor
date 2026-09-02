@@ -6,6 +6,8 @@ interface MergeProjectOptions {
 }
 
 export function refreshedAssetUrl(url: string): string {
+  // Asset endpoints are no-store, but an explicit query revision also forces
+  // browser image elements to replace a previously decoded mask/cutout.
   return `${url.split("?")[0]}?v=${Date.now()}`;
 }
 
@@ -15,6 +17,8 @@ export function mergeProjectResult(
   { refreshLayerId = null, refreshExtra = false }: MergeProjectOptions = {}
 ): SceneProject {
   if (!current) return result;
+  // Server results carry authoritative generated assets while the renderer
+  // preserves local ordering/visibility edits made during the current phase.
   const localLayers = new Map(current.layers.map((layer) => [layer.id, layer]));
   return {
     ...result,

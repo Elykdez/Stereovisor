@@ -1,4 +1,4 @@
-import { backgroundTransform, clamp, demoCameraAt, fitCanvasDimensions, fitVideoDimensions, layerTransform, visibleLayers } from "./parallax";
+import { backgroundTransform, clamp, demoCameraAt, fitCanvasDimensions, fitVideoDimensions, layerTransform, visibleLayers } from "@/web/lib/parallax";
 
 describe("parallax transforms", () => {
   const camera = { x: 0.5, y: -0.25, zoom: 1.1, strength: 80 };

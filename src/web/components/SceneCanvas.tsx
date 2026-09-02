@@ -8,6 +8,8 @@ import {
   type MaskEditorTarget
 } from "./MaskEditorOverlay";
 import { resolveAssetUrl } from "../lib/api";
+import { appLog } from "../lib/logger";
+import { useAppTranslation } from "../i18n";
 import { backgroundTransform, clamp, demoCameraAt, fitCanvasDimensions, fitVideoDimensions, layerTransform, visibleLayers } from "../lib/parallax";
 import type { CameraState, SceneProject } from "../types";
 
@@ -77,6 +79,9 @@ export function drawScene(
   maskEditing = false,
   showCompositionWhileMaskEditing = false
 ): boolean {
+  // Rendering is deliberately a pure projection of the current project and
+  // camera state. Asset loading happens in the effect below, so a missing image
+  // simply keeps the previous frame rather than throwing from the render loop.
   const context = canvas.getContext("2d", { alpha: true });
   if (!context) return false;
   const backgroundPath = project.backgroundUrl ?? project.sourceUrl;
@@ -125,9 +130,9 @@ export function drawScene(
   const layers = project.backgroundUrl
     ? visibleLayers(project.layers)
     : project.layers
-        .filter((layer) => layer.selected)
-        .slice()
-        .sort((a, b) => a.depth - b.depth || a.order - b.order);
+      .filter((layer) => layer.selected)
+      .slice()
+      .sort((a, b) => a.depth - b.depth || a.order - b.order);
   for (const layer of layers) {
     const image = images.get(layer.cutoutUrl);
     if (!image) continue;
@@ -220,6 +225,7 @@ export const SceneCanvas = forwardRef<SceneCanvasHandle, Props>(function SceneCa
   },
   ref
 ) {
+  const { t, runtimeText, layerName } = useAppTranslation();
   const frameRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const maskEditorRef = useRef<MaskEditorHandle>(null);
@@ -260,6 +266,8 @@ export const SceneCanvas = forwardRef<SceneCanvasHandle, Props>(function SceneCa
   }, [camera, maskEditor, project, showCompositionWhileMaskEditing, showInpaintMask]);
 
   useEffect(() => {
+    // Cache by source plus mask revision. Edited masks keep the same URL, so
+    // the revision query is the explicit cache-busting boundary.
     let cancelled = false;
     setLoading(true);
     setLoadError(null);
@@ -290,10 +298,16 @@ export const SceneCanvas = forwardRef<SceneCanvasHandle, Props>(function SceneCa
       })
     )
       .then(() => {
-        if (!cancelled) setLoading(false);
+        if (!cancelled) {
+          setLoading(false);
+          appLog.info("scene.assets.loaded", { projectId: project.id, count: assets.length });
+        }
       })
       .catch((error: unknown) => {
-        if (!cancelled) setLoadError(error instanceof Error ? error.message : "Could not load scene assets.");
+        if (!cancelled) {
+          appLog.error("scene.assets.failed", error, { projectId: project.id, count: assets.length });
+          setLoadError(error instanceof Error ? error.message : "Could not load scene assets.");
+        }
       });
     return () => {
       cancelled = true;
@@ -310,14 +324,17 @@ export const SceneCanvas = forwardRef<SceneCanvasHandle, Props>(function SceneCa
       if (!canvas) return;
       render();
       const dataUrl = canvas.toDataURL("image/png");
+      appLog.info("workflow.png-export.started", { projectId: project.id });
       if (window.stereovisor?.savePng) {
         await window.stereovisor.savePng(dataUrl, `stereovisor-${project.id.slice(0, 8)}.png`);
+        appLog.info("workflow.png-export.completed", { projectId: project.id });
         return;
       }
       const blob = await new Promise<Blob>((resolve, reject) =>
         canvas.toBlob((result) => (result ? resolve(result) : reject(new Error("PNG export failed."))), "image/png")
       );
       downloadBlob(blob, `stereovisor-${project.id.slice(0, 8)}.png`);
+      appLog.info("workflow.png-export.completed", { projectId: project.id, bytes: blob.size });
     },
     exportVideo: async () => {
       if (loading) throw new Error("Wait for the scene images to finish loading.");
@@ -327,9 +344,11 @@ export const SceneCanvas = forwardRef<SceneCanvasHandle, Props>(function SceneCa
       const name = `stereovisor-${project.id.slice(0, 8)}-demo.${extension}`;
       if (window.stereovisor?.saveVideo) {
         await window.stereovisor.saveVideo(await blob.arrayBuffer(), name);
+        appLog.info("workflow.video-export.completed", { projectId: project.id, bytes: blob.size, type: blob.type });
         return;
       }
       downloadBlob(blob, name);
+      appLog.info("workflow.video-export.completed", { projectId: project.id, bytes: blob.size, type: blob.type });
     },
     exportComposition: async () => {
       if (loading) throw new Error("Wait for the scene images to finish loading.");
@@ -340,12 +359,14 @@ export const SceneCanvas = forwardRef<SceneCanvasHandle, Props>(function SceneCa
       if (!drawScene(output, project, { x: 0, y: 0, zoom: 1, strength: camera.strength }, imagesRef.current)) {
         throw new Error("The full scene composition is not ready.");
       }
-      return new Promise<Blob>((resolve, reject) =>
+      const blob = await new Promise<Blob>((resolve, reject) =>
         output.toBlob(
           (blob) => (blob ? resolve(blob) : reject(new Error("The composition could not be encoded."))),
           "image/png"
         )
       );
+      appLog.info("workflow.composition-export.completed", { projectId: project.id, bytes: blob.size });
+      return blob;
     },
     exportEditedMask: async () => {
       if (!maskEditorRef.current) throw new Error("Choose a mask before applying brush changes.");
@@ -391,12 +412,19 @@ export const SceneCanvas = forwardRef<SceneCanvasHandle, Props>(function SceneCa
         style={{ width: `${displaySize[0]}px`, height: `${displaySize[1]}px` }}
         aria-label={
           maskEditor
-            ? `${showCompositionWhileMaskEditing ? "Full composition" : project.backgroundUrl ? "Background plate" : "Original image"} under ${maskEditor.name} mask editor.`
+            ? t("scene.maskEditorLabel", {
+              surface: showCompositionWhileMaskEditing
+                ? t("scene.fullComposition")
+                : project.backgroundUrl
+                  ? t("scene.backgroundPlate")
+                  : t("scene.originalImage"),
+              name: layerName(maskEditor.name)
+            })
             : reviewingSource
-            ? "Original image stereo preview. Drag to test layer depth."
-            : interactive
-              ? "Parallax scene preview. Drag to move the camera."
-              : "Scene processing preview."
+              ? t("scene.originalPreviewLabel")
+              : interactive
+                ? t("scene.parallaxPreviewLabel")
+                : t("scene.processingPreviewLabel")
         }
         onPointerDown={pointerDown}
         onPointerMove={pointerMove}
@@ -419,17 +447,17 @@ export const SceneCanvas = forwardRef<SceneCanvasHandle, Props>(function SceneCa
           onError={onMaskError}
         />
       )}
-      {loading && <div className="stage-message">Loading layers...</div>}
-      {loadError && <div className="stage-message error-text">{loadError}</div>}
+      {loading && <div className="stage-message">{t("scene.loading")}</div>}
+      {loadError && <div className="stage-message error-text">{runtimeText(loadError)}</div>}
       {!loading && !loadError && (
         <div className="drag-hint">
           {maskEditor
-            ? `${brushMode === "add" ? "Add to" : "Erase from"} ${maskEditor.name}`
+            ? t(brushMode === "add" ? "scene.addTo" : "scene.eraseFrom", { name: layerName(maskEditor.name) })
             : reviewingSource
-            ? "Drag to preview depth - hover the build action to preview the mask"
-            : interactive
-              ? "Drag image to move camera"
-              : "Building the background plate"}
+              ? t("scene.reviewHint")
+              : interactive
+                ? t("scene.dragHint")
+                : t("scene.building")}
         </div>
       )}
     </div>

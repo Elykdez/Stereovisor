@@ -1,5 +1,5 @@
-import { mergeProjectResult } from "./projectAssets";
-import type { SceneProject } from "../types";
+import { mergeProjectResult } from "@/web/lib/projectAssets";
+import type { SceneProject } from "@/web/types";
 
 function scene(cutoutUrl: string, backgroundUrl: string | null): SceneProject {
   return {

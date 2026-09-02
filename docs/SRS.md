@@ -50,7 +50,11 @@ The primary user is a designer or content creator who wants a parallax still wit
 
 - Refine each accepted instance with InSPyReNet `base` to preserve soft edges where possible.
 - Intersect the refined alpha with the instance proposal so neighboring objects do not leak into a layer.
+- Preserve the user-edited proposal separately from the refined alpha and use it as stable guidance on every subsequent refine.
+- Never replace a stable proposal with a small salient fragment from an undesignated area; fall back to the proposal when refinement confidence collapses.
 - Preserve the SAM 2.1 instance mask when InSPyReNet cannot produce a usable salient-object matte for that crop.
+- Expose persisted `Sparse`, `Balanced`, and `Dense` segmentation density settings for controlling the detector vocabulary and proposal floor.
+- Keep a per-layer refinement history with undo/redo controls and `Ctrl+Z`/`Ctrl+Y` shortcuts during mask review.
 - Store each foreground layer as a full-canvas transparent PNG.
 
 ### FR-4 Depth Decomposition
@@ -66,6 +70,7 @@ The primary user is a designer or content creator who wants a parallax still wit
 - Join the selected layer alpha channels into one removal mask.
 - Dilate the joined mask to remove edge contamination before reconstruction.
 - Prefer local PowerPaint v2.1 with CPU offload when its validated checkpoint is installed.
+- Expose a persisted Inference setting for PowerPaint denoising steps, defaulting to 25 and clamped to 5-100.
 - PowerPaint shall start from pure noise for a full-redraw equivalent to denoise strength 1.0.
 - Discard every original pixel inside the expanded removal mask when compositing the PowerPaint result.
 - Retain Big LaMa as an explicitly labeled fast structural-fill option.
@@ -105,6 +110,7 @@ The primary user is a designer or content creator who wants a parallax still wit
 - The one-click runner shall install dependencies, pin model source revisions, download weights, and validate CUDA before opening the editor.
 - Never present preview processing as AI processing.
 - If production mode is explicitly requested and unavailable, fail with installation guidance.
+- While a local job is running, expose a Cancel action. Cancellation shall stop the worker at the next safe stage boundary, terminate an active PowerPaint subprocess, and leave the last saved project state intact.
 
 ### FR-10 Project Storage
 
@@ -140,6 +146,7 @@ The primary user is a designer or content creator who wants a parallax still wit
 
 - Generated project assets are immutable per processing stage.
 - A failed analysis or inpaint operation must leave the source usable for retry.
+- A cancelled job must report a distinct cancelled state and must not commit its in-progress result over the saved project.
 - Service errors include a machine-readable code and a human-readable message.
 
 ### Accessibility

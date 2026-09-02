@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import gc
+import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -9,6 +10,9 @@ import numpy as np
 from PIL import Image
 
 from .config import DEVICE, MODEL_ROOT
+
+
+logger = logging.getLogger(__name__)
 
 
 GROUNDING_DINO_ID = "IDEA-Research/grounding-dino-tiny"
@@ -23,14 +27,54 @@ QWEN_PATH = MODEL_ROOT / "qwen3-vl-2b-instruct"
 POWERPAINT_PATH = MODEL_ROOT / "powerpaint-v2-1"
 
 CUSTOM_OBJECT_LABELS = os.environ.get("STEREOVISOR_OBJECT_LABELS", "").strip()
+COMMON_OBJECT_LABELS = (
+    "person",
+    "animal",
+    "vehicle",
+    "furniture",
+    "plant",
+)
+DETAILED_OBJECT_LABELS = COMMON_OBJECT_LABELS + (
+    "computer",
+    "monitor",
+    "keyboard",
+    "headphones",
+    "cup",
+    "mug",
+    "book",
+    "bottle",
+    "phone",
+    "sword",
+    "glass",
+    "chair",
+    "table",
+    "foreground object",
+)
 DEFAULT_OBJECT_LABELS = tuple(
     label.strip()
-    for label in (CUSTOM_OBJECT_LABELS or "person").split(",")
+    for label in (CUSTOM_OBJECT_LABELS or ",".join(DETAILED_OBJECT_LABELS)).split(",")
     if label.strip()
 )
 FALLBACK_OBJECT_LABELS = ("animal", "character", "vehicle", "furniture", "plant", "foreground object")
 MAX_INSTANCE_LAYERS = 24
 VRAM_BUDGET_MB = 8192
+
+
+@dataclass(frozen=True)
+class SegmentationProfile:
+    labels: tuple[str, ...]
+    threshold: float
+    text_threshold: float
+    minimum_box_fraction: float
+    max_instances: int
+
+
+SEGMENTATION_PROFILES = {
+    "sparse": SegmentationProfile(COMMON_OBJECT_LABELS, 0.24, 0.15, 0.001, 12),
+    "balanced": SegmentationProfile(DETAILED_OBJECT_LABELS, 0.198, 0.15, 0.0008, MAX_INSTANCE_LAYERS),
+    "dense": SegmentationProfile(DETAILED_OBJECT_LABELS, 0.14, 0.12, 0.0004, MAX_INSTANCE_LAYERS),
+}
+DEFAULT_SEGMENTATION_DENSITY = "balanced"
 
 
 @dataclass(frozen=True)
@@ -41,10 +85,13 @@ class InstanceMask:
 
 
 def resolve_device(torch_module: object) -> str:
+    # DEVICE=auto prefers CUDA when available, while DEVICE=cpu is explicit.
+    # A forced CUDA request must fail loudly if the runtime cannot access it.
     cuda = getattr(torch_module, "cuda")
     if DEVICE == "cpu":
         return "cpu"
     if DEVICE == "cuda" and not cuda.is_available():
+        logger.warning("CUDA requested but unavailable")
         raise RuntimeError("CUDA was requested but the managed Torch runtime cannot access the GPU")
     return "cuda" if cuda.is_available() else "cpu"
 
@@ -71,12 +118,19 @@ def peak_vram_mb(torch_module: object) -> int:
 
 def verify_vram_peak(stage: str, peak_mb: int) -> int:
     if peak_mb > VRAM_BUDGET_MB:
+        logger.error("VRAM budget exceeded: stage=%s peak_mb=%s budget_mb=%s", stage, peak_mb, VRAM_BUDGET_MB)
         raise RuntimeError(f"{stage} exceeded the {VRAM_BUDGET_MB} MB VRAM budget ({peak_mb} MB)")
+    logger.info("VRAM peak verified: stage=%s peak_mb=%s", stage, peak_mb)
     return peak_mb
+
+
+def normalize_segmentation_density(value: str | None) -> str:
+    return value if value in SEGMENTATION_PROFILES else DEFAULT_SEGMENTATION_DENSITY
 
 
 def _require_model(path: Path, label: str) -> None:
     if not path.is_dir():
+        logger.warning("model unavailable: label=%s path=%s", label, path)
         raise RuntimeError(f"{label} weights are missing. Run scripts/ensure-ready.ps1.")
 
 
@@ -98,12 +152,26 @@ def _mask_iou(a: np.ndarray, b: np.ndarray) -> float:
     return intersection / union if union else 0.0
 
 
+def _box_overlap_over_smaller(a: np.ndarray, b: np.ndarray) -> float:
+    left = max(float(a[0]), float(b[0]))
+    top = max(float(a[1]), float(b[1]))
+    right = min(float(a[2]), float(b[2]))
+    bottom = min(float(a[3]), float(b[3]))
+    intersection = max(0.0, right - left) * max(0.0, bottom - top)
+    area_a = max(0.0, float(a[2] - a[0])) * max(0.0, float(a[3] - a[1]))
+    area_b = max(0.0, float(b[2] - b[0])) * max(0.0, float(b[3] - b[1]))
+    smaller = min(area_a, area_b)
+    return intersection / smaller if smaller else 0.0
+
+
 def _deduplicate_detections(
     boxes: np.ndarray,
     scores: np.ndarray,
     labels: list[str],
     width: int,
     height: int,
+    minimum_box_fraction: float,
+    max_instances: int,
 ) -> tuple[list[np.ndarray], list[float], list[str]]:
     image_area = width * height
     ranked = sorted(range(len(boxes)), key=lambda index: float(scores[index]), reverse=True)
@@ -115,19 +183,25 @@ def _deduplicate_detections(
         box[0::2] = np.clip(box[0::2], 0, width)
         box[1::2] = np.clip(box[1::2], 0, height)
         area = max(0.0, float(box[2] - box[0])) * max(0.0, float(box[3] - box[1]))
-        if area < image_area * 0.001 or area > image_area * 0.92:
+        if area < image_area * minimum_box_fraction or area > image_area * 0.92:
             continue
-        if any(_box_iou(box, existing) >= 0.84 for existing in accepted_boxes):
+        if any(
+            _box_iou(box, existing) >= 0.68 or _box_overlap_over_smaller(box, existing) >= 0.9
+            for existing in accepted_boxes
+        ):
             continue
         accepted_boxes.append(box)
         accepted_scores.append(float(scores[index]))
         accepted_labels.append(str(labels[index]).strip().lower() or "object")
-        if len(accepted_boxes) == MAX_INSTANCE_LAYERS:
+        if len(accepted_boxes) == max_instances:
             break
     return accepted_boxes, accepted_scores, accepted_labels
 
 
-def grounded_sam_instances(image: Image.Image) -> tuple[list[InstanceMask], dict[str, int]]:
+def grounded_sam_instances(
+    image: Image.Image,
+    density: str = DEFAULT_SEGMENTATION_DENSITY,
+) -> tuple[list[InstanceMask], dict[str, int]]:
     try:
         import torch
         from transformers import AutoModelForZeroShotObjectDetection, AutoProcessor, Sam2Model, Sam2Processor
@@ -137,6 +211,11 @@ def grounded_sam_instances(image: Image.Image) -> tuple[list[InstanceMask], dict
     _require_model(GROUNDING_DINO_PATH, "Grounding DINO-T")
     _require_model(SAM2_PATH, "SAM 2.1 Small")
     device = resolve_device(torch)
+    profile = SEGMENTATION_PROFILES[normalize_segmentation_density(density)]
+    label_set = DEFAULT_OBJECT_LABELS if CUSTOM_OBJECT_LABELS else profile.labels
+    # Models are loaded locally only; this summary makes density/profile and
+    # device decisions visible without logging image contents or detections.
+    logger.info("Grounding/SAM preflight: density=%s device=%s labels=%s", density, device, len(label_set))
     metrics: dict[str, int] = {}
 
     detector = None
@@ -167,8 +246,8 @@ def grounded_sam_instances(image: Image.Image) -> tuple[list[InstanceMask], dict
             result = detector_processor.post_process_grounded_object_detection(
                 outputs,
                 inputs.input_ids,
-                threshold=0.198,
-                text_threshold=0.15,
+                threshold=profile.threshold,
+                text_threshold=profile.text_threshold,
                 target_sizes=[image.size[::-1]],
                 text_labels=[list(label_set)],
             )[0]
@@ -179,17 +258,22 @@ def grounded_sam_instances(image: Image.Image) -> tuple[list[InstanceMask], dict
                 [str(label) for label in raw_labels],
                 image.width,
                 image.height,
+                profile.minimum_box_fraction,
+                profile.max_instances,
             )
 
-        boxes, scores, labels = detect(DEFAULT_OBJECT_LABELS)
+        boxes, scores, labels = detect(label_set)
         if not boxes and not CUSTOM_OBJECT_LABELS:
+            logger.info("Grounding DINO primary labels produced no boxes; retrying fallback labels")
             boxes, scores, labels = detect(FALLBACK_OBJECT_LABELS)
+        logger.info("Grounding DINO detections accepted: count=%s", len(boxes))
         metrics["groundingDino"] = verify_vram_peak("Grounding DINO-T", peak_vram_mb(torch))
     finally:
         del outputs, inputs, detector, detector_processor
         release_cuda(torch)
 
     if not boxes:
+        logger.warning("Grounding/SAM produced no candidate boxes")
         return [], metrics
 
     segmenter = None
@@ -228,6 +312,7 @@ def grounded_sam_instances(image: Image.Image) -> tuple[list[InstanceMask], dict
                 continue
             instances.append(InstanceMask(label=label, score=score, mask=mask))
         metrics["sam2"] = verify_vram_peak("SAM 2.1 Small", peak_vram_mb(torch))
+        logger.info("SAM segmentation completed: instances=%s metrics=%s", len(instances), metrics)
         return instances, metrics
     finally:
         del sam_outputs, sam_inputs, segmenter, segmenter_processor

@@ -2,12 +2,14 @@ import io
 import json
 from zipfile import ZipFile
 
+import pytest
 from fastapi.testclient import TestClient
 from PIL import Image, ImageDraw
 
 import service.app as service_module
 import service.pipeline as pipeline
 from service.app import app
+from service.jobs import JobCancelled, ProcessingJobStore
 from service.storage import ProjectStore
 
 
@@ -69,6 +71,47 @@ def test_processing_job_reports_completion() -> None:
     assert payload["result"]["layers"]
 
 
+def test_processing_job_can_be_cancelled_before_worker_starts() -> None:
+    job_id = service_module.jobs.create("analyze")
+
+    response = client.post(f"/api/jobs/{job_id}/cancel")
+    payload = response.json()
+
+    assert response.status_code == 200
+    assert payload["state"] == "cancelled"
+    assert payload["stage"] == "Cancelled"
+    assert client.get(f"/api/jobs/{job_id}").json()["state"] == "cancelled"
+
+
+def test_cancelled_job_rejects_later_worker_updates() -> None:
+    job_store = ProcessingJobStore()
+    job_id = job_store.create("inpaint")
+
+    cancelled = job_store.cancel(job_id)
+
+    assert cancelled.state == "cancelled"
+    with pytest.raises(JobCancelled):
+        job_store.ensure_active(job_id)
+    with pytest.raises(JobCancelled):
+        job_store.update(job_id, 50, "Working", "Should not run")
+
+
+def test_worker_honors_cancel_request_before_commit() -> None:
+    job_id = service_module.jobs.create("inpaint")
+
+    def operation(progress, cancelled):
+        progress(20, "Working", "Preparing a cancellable test.")
+        service_module.jobs.cancel(job_id)
+        cancelled()
+        raise AssertionError("cancelled worker continued past its cancellation check")
+
+    service_module._run_job(job_id, operation)
+
+    payload = service_module.jobs.read(job_id)
+    assert payload.state == "cancelled"
+    assert payload.result is None
+
+
 def test_inpaint_requires_confirmed_masks(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("STEREOVISOR_MODE", "preview")
     monkeypatch.setattr(service_module, "store", ProjectStore(tmp_path))
@@ -90,7 +133,7 @@ def test_refine_job_targets_one_layer(monkeypatch, tmp_path) -> None:
     target_id = project["layers"][0]["id"]
 
     class FakeRefiner:
-        def refine(self, payload, _directory, layer_id, progress=None):
+        def refine(self, payload, _directory, layer_id, progress=None, cancelled=None):
             assert layer_id == target_id
             if progress is not None:
                 progress(60, "Refining mask", "Testing one local layer.")
@@ -121,14 +164,15 @@ def test_target_inpaint_job_receives_composition_mask_and_target(monkeypatch, tm
     size = (project["width"], project["height"])
 
     class FakeTargetInpainter:
-        def inpaint_target(self, payload, _directory, target_id, composition, mask, prompt=None, progress=None):
+        def inpaint_target(self, _payload, _directory, target_id, composition, mask, prompt=None, progress=None, cancelled=None, steps=25):
             assert target_id == project["layers"][0]["id"]
             assert composition.size == size
             assert mask.size == size
             assert prompt == "new painted detail"
+            assert steps == 12
             if progress is not None:
                 progress(70, "Inpainting layer", "Testing target inpaint.")
-            return payload
+            return _payload
 
     monkeypatch.setattr(service_module, "_pipeline", lambda: FakeTargetInpainter())
     started = client.post(
@@ -137,7 +181,7 @@ def test_target_inpaint_job_receives_composition_mask_and_target(monkeypatch, tm
             "composition": ("composition.png", png_bytes(Image.new("RGB", size, "white")), "image/png"),
             "mask": ("mask.png", png_bytes(Image.new("L", size, 255)), "image/png"),
         },
-        data={"prompt": "new painted detail"},
+        data={"prompt": "new painted detail", "steps": "12"},
     )
     status = client.get(f"/api/jobs/{started.json()['jobId']}").json()
 

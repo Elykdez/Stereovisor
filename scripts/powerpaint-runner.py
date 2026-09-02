@@ -34,10 +34,12 @@ def main() -> None:
     parser.add_argument("--mask", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--prompt", required=True)
+    parser.add_argument("--steps", type=int, default=DEFAULT_INFERENCE_STEPS)
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--vendor", type=Path, required=True)
     parser.add_argument("--progress", type=Path)
     args = parser.parse_args()
+    inference_steps = max(5, min(100, args.steps))
     sys.path.insert(0, str(args.vendor))
 
     from diffusers import UniPCMultistepScheduler
@@ -117,7 +119,7 @@ def main() -> None:
     def report_progress(_pipeline, step: int, _timestep, callback_kwargs):
         if args.progress is not None:
             args.progress.write_text(
-                json.dumps({"step": step + 1, "total": DEFAULT_INFERENCE_STEPS}),
+                json.dumps({"step": step + 1, "total": inference_steps}),
                 encoding="utf-8",
             )
         return callback_kwargs
@@ -130,7 +132,7 @@ def main() -> None:
         tradoff_nag=1.0,
         image=conditioned,
         mask=mask_rgb,
-        num_inference_steps=DEFAULT_INFERENCE_STEPS,
+        num_inference_steps=inference_steps,
         generator=generator,
         brushnet_conditioning_scale=1.0,
         negative_promptA=f"{negative} P_obj",

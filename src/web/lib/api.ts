@@ -1,7 +1,17 @@
 import type { CameraState, HealthStatus, ImportedProject, InpaintHistoryState, InpaintRefinement, ProcessingProgress, SceneProject } from "../types";
+import type { SegmentationDensity } from "../settings";
+import { appLog } from "./logger";
 
 const SERVICE_ORIGIN = import.meta.env.DEV ? "" : "http://127.0.0.1:5179";
 export const JOB_POLL_INTERVAL_MS = 1000;
+let jobPollIntervalMs = JOB_POLL_INTERVAL_MS;
+
+export function setJobPollIntervalMs(value: number): void {
+  if (Number.isFinite(value)) {
+    jobPollIntervalMs = Math.min(5000, Math.max(250, Math.round(value / 50) * 50));
+    appLog.info("processing.poll-interval.updated", { intervalMs: jobPollIntervalMs });
+  }
+}
 
 interface ApiErrorBody {
   detail?: string | { code?: string; message?: string; detail?: string };
@@ -18,11 +28,19 @@ interface ProcessingJob extends ProcessingProgress {
   result: SceneProject | null;
 }
 
+export class ProcessingCancelledError extends Error {
+  constructor(message = "Processing cancelled by the user.") {
+    super(message);
+    this.name = "ProcessingCancelledError";
+  }
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${SERVICE_ORIGIN}${path}`, init);
   if (response.ok) {
     return (await response.json()) as T;
   }
+  appLog.warn("api.request.failed", { method: init?.method ?? "GET", path, status: response.status });
   let body: ApiErrorBody | undefined;
   try {
     body = (await response.json()) as ApiErrorBody;
@@ -42,8 +60,20 @@ export function resolveAssetUrl(path: string): string {
   return `${SERVICE_ORIGIN}${path}`;
 }
 
-export function getHealth(): Promise<HealthStatus> {
-  return retryHealth(12);
+export async function getHealth(): Promise<HealthStatus> {
+  appLog.info("health.check.started");
+  try {
+    const status = await retryHealth(12);
+    appLog.info("health.check.succeeded", {
+      engine: status.activeEngine,
+      device: status.device,
+      providers: Object.fromEntries(Object.entries(status.providers).map(([name, provider]) => [name, provider.available]))
+    });
+    return status;
+  } catch (error) {
+    appLog.error("health.check.failed", error);
+    throw error;
+  }
 }
 
 async function retryHealth(attempts: number): Promise<HealthStatus> {
@@ -53,6 +83,7 @@ async function retryHealth(attempts: number): Promise<HealthStatus> {
       return await request<HealthStatus>("/api/health");
     } catch (error) {
       lastError = error;
+      appLog.warn("health.check.retry", { attempt: attempt + 1, attempts, error: error instanceof Error ? error.message : error });
       if (attempt + 1 < attempts) {
         await new Promise((resolve) => window.setTimeout(resolve, 300));
       }
@@ -63,9 +94,16 @@ async function retryHealth(attempts: number): Promise<HealthStatus> {
 
 export async function waitForJob(
   jobId: string,
-  onProgress: (progress: ProcessingProgress) => void
+  onProgress: (progress: ProcessingProgress) => void,
+  onJobStarted?: (jobId: string) => void
 ): Promise<SceneProject> {
+  // The service owns the job; the renderer only observes state changes and
+  // turns terminal states into a resolved project or a user-facing error.
+  const startedAt = performance.now();
+  onJobStarted?.(jobId);
+  appLog.info("processing.job.started", { jobId });
   let previousProgress = "";
+  let previousStage = "";
   for (;;) {
     const job = await request<ProcessingJob>(`/api/jobs/${jobId}`);
     const progressKey = `${job.state}:${job.progress}:${job.stage}:${job.message}`;
@@ -73,28 +111,49 @@ export async function waitForJob(
       onProgress({ state: job.state, progress: job.progress, stage: job.stage, message: job.message });
       previousProgress = progressKey;
     }
+    if (job.stage !== previousStage) {
+      appLog.info("processing.job.stage", { jobId, state: job.state, progress: job.progress, stage: job.stage });
+      previousStage = job.stage;
+    }
     if (job.state === "completed") {
       if (!job.result) throw new Error("Local processing completed without a project result.");
+      appLog.info("processing.job.completed", { jobId, kind: job.kind, durationMs: Math.round(performance.now() - startedAt) });
       return job.result;
     }
-    if (job.state === "failed") throw new Error(job.message);
-    await new Promise((resolve) => window.setTimeout(resolve, JOB_POLL_INTERVAL_MS));
+    if (job.state === "cancelled") {
+      appLog.info("processing.job.cancelled", { jobId, message: job.message });
+      throw new ProcessingCancelledError(job.message);
+    }
+    if (job.state === "failed") {
+      appLog.error("processing.job.failed", job.message, { jobId, stage: job.stage });
+      throw new Error(job.message);
+    }
+    await new Promise((resolve) => window.setTimeout(resolve, jobPollIntervalMs));
   }
 }
 
 export async function analyzeImage(
   file: File,
-  onProgress: (progress: ProcessingProgress) => void
+  onProgress: (progress: ProcessingProgress) => void,
+  onJobStarted?: (jobId: string) => void,
+  density: SegmentationDensity = "balanced"
 ): Promise<SceneProject> {
+  appLog.info("workflow.analyze-image.started", { name: file.name, bytes: file.size, density });
   const form = new FormData();
   form.append("file", file);
+  form.append("segmentation_density", density);
   const job = await request<ProcessingJobStart>("/api/jobs/analyze", { method: "POST", body: form });
-  return waitForJob(job.jobId, onProgress);
+  return waitForJob(job.jobId, onProgress, onJobStarted);
 }
 
-export async function analyzeSample(onProgress: (progress: ProcessingProgress) => void): Promise<SceneProject> {
-  const job = await request<ProcessingJobStart>("/api/jobs/sample", { method: "POST" });
-  return waitForJob(job.jobId, onProgress);
+export async function analyzeSample(
+  onProgress: (progress: ProcessingProgress) => void,
+  onJobStarted?: (jobId: string) => void,
+  density: SegmentationDensity = "balanced"
+): Promise<SceneProject> {
+  appLog.info("workflow.analyze-sample.started", { density });
+  const job = await request<ProcessingJobStart>(`/api/jobs/sample?segmentation_density=${encodeURIComponent(density)}`, { method: "POST" });
+  return waitForJob(job.jobId, onProgress, onJobStarted);
 }
 
 export async function inpaintProject(
@@ -102,14 +161,17 @@ export async function inpaintProject(
   layerIds: string[],
   refinement: InpaintRefinement,
   prompt: string | undefined,
-  onProgress: (progress: ProcessingProgress) => void
+  onProgress: (progress: ProcessingProgress) => void,
+  onJobStarted?: (jobId: string) => void,
+  steps = 25
 ): Promise<SceneProject> {
+  appLog.info("workflow.inpaint.started", { projectId, layerCount: layerIds.length, refinement, steps, hasPrompt: Boolean(prompt?.trim()) });
   const job = await request<ProcessingJobStart>(`/api/jobs/projects/${projectId}/inpaint`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ layerIds, refinement, prompt: prompt?.trim() || null })
+    body: JSON.stringify({ layerIds, refinement, prompt: prompt?.trim() || null, steps })
   });
-  return waitForJob(job.jobId, onProgress);
+  return waitForJob(job.jobId, onProgress, onJobStarted);
 }
 
 export async function inpaintProjectTarget(
@@ -118,23 +180,36 @@ export async function inpaintProjectTarget(
   composition: Blob,
   mask: Blob,
   prompt: string | undefined,
-  onProgress: (progress: ProcessingProgress) => void
+  onProgress: (progress: ProcessingProgress) => void,
+  onJobStarted?: (jobId: string) => void,
+  steps = 25
 ): Promise<SceneProject> {
+  appLog.info("workflow.target-inpaint.started", { projectId, targetId: targetId ?? "background", steps, hasPrompt: Boolean(prompt?.trim()) });
   const form = new FormData();
   form.append("composition", composition, "composition.png");
   form.append("mask", mask, "inpaint-mask.png");
   form.append("prompt", prompt?.trim() ?? "");
+  form.append("steps", String(steps));
   const project = encodeURIComponent(projectId);
   const target = encodeURIComponent(targetId ?? "background");
   const job = await request<ProcessingJobStart>(`/api/jobs/projects/${project}/targets/${target}/inpaint`, {
     method: "POST",
     body: form
   });
-  return waitForJob(job.jobId, onProgress);
+  return waitForJob(job.jobId, onProgress, onJobStarted);
+}
+
+export function cancelProcessingJob(jobId: string): Promise<ProcessingProgress> {
+  appLog.info("processing.job.cancel.requested", { jobId });
+  return request<ProcessingProgress>(`/api/jobs/${encodeURIComponent(jobId)}/cancel`, { method: "POST" });
 }
 
 export function getInpaintHistory(projectId: string): Promise<InpaintHistoryState[]> {
   return request<InpaintHistoryState[]>(`/api/projects/${encodeURIComponent(projectId)}/inpaint-history`);
+}
+
+export function getMaskHistory(projectId: string): Promise<InpaintHistoryState[]> {
+  return request<InpaintHistoryState[]>(`/api/projects/${encodeURIComponent(projectId)}/mask-history`);
 }
 
 function restoreProjectTargetInpaint(projectId: string, targetId: string | null, action: "undo" | "redo"): Promise<SceneProject> {
@@ -151,17 +226,32 @@ export function redoProjectTargetInpaint(projectId: string, targetId: string | n
   return restoreProjectTargetInpaint(projectId, targetId, "redo");
 }
 
+function restoreProjectLayerRefine(projectId: string, layerId: string, action: "undo" | "redo"): Promise<SceneProject> {
+  const project = encodeURIComponent(projectId);
+  const layer = encodeURIComponent(layerId);
+  return request<SceneProject>(`/api/projects/${project}/layers/${layer}/${action}-refine`, { method: "POST" });
+}
+
+export function undoProjectLayerRefine(projectId: string, layerId: string): Promise<SceneProject> {
+  return restoreProjectLayerRefine(projectId, layerId, "undo");
+}
+
+export function redoProjectLayerRefine(projectId: string, layerId: string): Promise<SceneProject> {
+  return restoreProjectLayerRefine(projectId, layerId, "redo");
+}
+
 export async function refineProjectLayer(
   projectId: string,
   layerId: string,
-  onProgress: (progress: ProcessingProgress) => void
+  onProgress: (progress: ProcessingProgress) => void,
+  onJobStarted?: (jobId: string) => void
 ): Promise<SceneProject> {
   const project = encodeURIComponent(projectId);
   const layer = encodeURIComponent(layerId);
   const job = await request<ProcessingJobStart>(`/api/jobs/projects/${project}/layers/${layer}/refine`, {
     method: "POST"
   });
-  return waitForJob(job.jobId, onProgress);
+  return waitForJob(job.jobId, onProgress, onJobStarted);
 }
 
 export function confirmProjectLayer(projectId: string, layerId: string): Promise<SceneProject> {
@@ -182,6 +272,7 @@ export function updateProjectMask(projectId: string, layerId: string | null, mas
 }
 
 export async function exportProjectPackage(project: SceneProject, camera: CameraState): Promise<Blob> {
+  appLog.info("workflow.project-export.started", { projectId: project.id, layerCount: project.layers.length });
   const response = await fetch(`${SERVICE_ORIGIN}/api/projects/${project.id}/export`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -191,12 +282,16 @@ export async function exportProjectPackage(project: SceneProject, camera: Camera
     })
   });
   if (!response.ok) {
+    appLog.warn("workflow.project-export.failed", { projectId: project.id, status: response.status });
     await throwResponseError(response);
   }
-  return response.blob();
+  const blob = await response.blob();
+  appLog.info("workflow.project-export.completed", { projectId: project.id, bytes: blob.size });
+  return blob;
 }
 
 export function importProjectPackage(file: File): Promise<ImportedProject> {
+  appLog.info("workflow.project-import.started", { name: file.name, bytes: file.size });
   const form = new FormData();
   form.append("file", file);
   return request<ImportedProject>("/api/projects/import", { method: "POST", body: form });

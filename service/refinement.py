@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import subprocess
 import time
@@ -21,7 +22,13 @@ from .ai_models import (
 from .config import POWERPAINT_PYTHON, POWERPAINT_VENDOR, WORKSPACE_ROOT, powerpaint_snapshot_ready, snapshot_ready
 
 
+logger = logging.getLogger(__name__)
+
+
 def generate_background_prompt(image: Image.Image) -> tuple[str, int]:
+    # Captioning is local-only and optional: callers may supply a prompt when
+    # Qwen3-VL is unavailable, but never silently download or call a service.
+    logger.info("background prompt generation started: size=%sx%s", image.width, image.height)
     if not snapshot_ready(QWEN_PATH, ("model.safetensors",)):
         raise RuntimeError("Qwen3-VL weights are missing. Run scripts/ensure-ready.ps1.")
     try:
@@ -71,7 +78,9 @@ def generate_background_prompt(image: Image.Image) -> tuple[str, int]:
         prompt = processor.batch_decode(trimmed, skip_special_tokens=True)[0].strip()
         if not prompt:
             raise RuntimeError("Qwen3-VL returned an empty background prompt")
-        return prompt[:500], verify_vram_peak("Qwen3-VL", peak_vram_mb(torch))
+        peak = verify_vram_peak("Qwen3-VL", peak_vram_mb(torch))
+        logger.info("background prompt generation completed: length=%s peak_mb=%s", len(prompt[:500]), peak)
+        return prompt[:500], peak
     finally:
         del generated, inputs, processor, model
         release_cuda(torch)
@@ -83,7 +92,12 @@ def powerpaint_inpaint(
     output_path: Path,
     prompt: str,
     progress: Callable[[int, int], None] | None = None,
+    cancelled: Callable[[], None] | None = None,
+    steps: int = 25,
 ) -> int:
+    # PowerPaint runs in its pinned Python environment. The sidecar JSON is the
+    # only progress channel; the runner log remains temporary diagnostic data.
+    logger.info("PowerPaint preflight: steps=%s output=%s", steps, output_path.name)
     runner = WORKSPACE_ROOT / "scripts" / "powerpaint-runner.py"
     if not POWERPAINT_PYTHON.is_file() or not POWERPAINT_VENDOR.is_dir() or not powerpaint_snapshot_ready(POWERPAINT_PATH):
         raise RuntimeError("PowerPaint v2.1 is not installed. Run scripts/ensure-ready.ps1.")
@@ -105,10 +119,12 @@ def powerpaint_inpaint(
         "--mask", str(mask_path),
         "--output", str(output_path),
         "--prompt", prompt,
+        "--steps", str(max(5, min(100, int(steps)))),
         "--checkpoint", str(POWERPAINT_PATH),
         "--vendor", str(POWERPAINT_VENDOR),
         "--progress", str(progress_path),
     ]
+    process: subprocess.Popen[str] | None = None
     try:
         with log_path.open("w", encoding="utf-8", errors="replace") as log:
             process = subprocess.Popen(
@@ -120,9 +136,12 @@ def powerpaint_inpaint(
                 errors="replace",
                 env=environment,
             )
+            logger.info("PowerPaint process started: pid=%s", process.pid)
             deadline = time.monotonic() + 900
             reported_step = 0
             while process.poll() is None:
+                if cancelled is not None:
+                    cancelled()
                 if time.monotonic() >= deadline:
                     process.kill()
                     process.wait()
@@ -144,6 +163,7 @@ def powerpaint_inpaint(
         lines = output.strip().splitlines()
         if return_code != 0:
             detail = lines[-1] if lines else "unknown local runtime error"
+            logger.warning("PowerPaint process failed: return_code=%s", return_code)
             raise RuntimeError(f"PowerPaint failed: {detail}")
         for line in reversed(lines):
             try:
@@ -151,8 +171,13 @@ def powerpaint_inpaint(
             except json.JSONDecodeError:
                 continue
             if "peak_vram_mb" in payload:
-                return verify_vram_peak("PowerPaint", int(payload["peak_vram_mb"]))
+                peak = verify_vram_peak("PowerPaint", int(payload["peak_vram_mb"]))
+                logger.info("PowerPaint completed: peak_mb=%s", peak)
+                return peak
         raise RuntimeError("PowerPaint completed without a valid runtime report")
     finally:
+        if process is not None and process.poll() is None:
+            process.kill()
+            process.wait()
         progress_path.unlink(missing_ok=True)
         log_path.unlink(missing_ok=True)

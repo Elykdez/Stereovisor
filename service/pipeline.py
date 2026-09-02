@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import gc
 import hashlib
+import json
+import logging
 import math
 import os
 import shutil
@@ -17,18 +19,33 @@ from typing import Callable, Iterable
 import numpy as np
 from PIL import Image, ImageChops, ImageDraw, ImageEnhance, ImageFilter
 
-from .ai_models import InstanceMask, begin_vram_stage, grounded_sam_instances, peak_vram_mb, verify_vram_peak
+from .ai_models import (
+    DEFAULT_SEGMENTATION_DENSITY,
+    InstanceMask,
+    begin_vram_stage,
+    grounded_sam_instances,
+    normalize_segmentation_density,
+    peak_vram_mb,
+    verify_vram_peak,
+)
 from .config import DEVICE, MODEL_ROOT
 from .depth import depth_for_mask, depth_preview, estimate_near_map, foreground_depth_plane
+from .jobs import JobCancelled
 from .refinement import generate_background_prompt, powerpaint_inpaint
 from .schemas import InpaintHistoryPayload, LayerPayload, ProjectPayload
 from .storage import asset_url
 
 
+logger = logging.getLogger(__name__)
+
+
 PIPELINE_LOCK = threading.Lock()
 INPAINT_HISTORY_LOCK = threading.Lock()
+MASK_HISTORY_LOCK = threading.Lock()
 ProgressCallback = Callable[[int, str, str], None]
+CancellationCheck = Callable[[], None]
 INPAINT_HISTORY_LIMIT = 20
+MASK_HISTORY_LIMIT = 20
 LAMA_URL = "https://github.com/Sanster/models/releases/download/add_big_lama/big-lama.pt"
 LAMA_MD5 = "e3aa4aaa15225a33ec84f9f4bc47e500"
 INSPYRENET_MODEL_URL = "https://github.com/plemeri/transparent-background/releases/download/1.2.12/ckpt_base.pth"
@@ -46,6 +63,11 @@ class MatteRejected(PipelineError):
 def _report(progress: ProgressCallback | None, percent: int, stage: str, message: str) -> None:
     if progress is not None:
         progress(percent, stage, message)
+
+
+def _check_cancelled(cancelled: CancellationCheck | None) -> None:
+    if cancelled is not None:
+        cancelled()
 
 
 def _clamp(value: float, minimum: float, maximum: float) -> float:
@@ -115,9 +137,12 @@ def _clear_inpaint_history(directory: Path, target_id: str, stack: str) -> None:
 
 
 def record_inpaint_history(project: ProjectPayload, directory: Path, target_id: str) -> None:
+    # Snapshot before overwrite and clear redo: this is the same ordering users
+    # expect from a conventional undo stack.
     with INPAINT_HISTORY_LOCK:
         _push_inpaint_history(project, directory, target_id, "undo")
         _clear_inpaint_history(directory, target_id, "redo")
+    logger.info("inpaint history recorded: project=%s target=%s", project.id, target_id)
 
 
 def restore_inpaint_history(
@@ -127,6 +152,7 @@ def restore_inpaint_history(
     action: str,
 ) -> ProjectPayload:
     if action not in {"undo", "redo"}:
+        logger.warning("inpaint history rejected: project=%s target=%s action=%s", project.id, target_id, action)
         raise PipelineError("The inpaint history action is invalid")
     opposite = "redo" if action == "undo" else "undo"
     with INPAINT_HISTORY_LOCK:
@@ -138,6 +164,7 @@ def restore_inpaint_history(
         snapshot = entries[-1]
         shutil.copy2(snapshot, current)
         snapshot.unlink(missing_ok=True)
+    logger.info("inpaint history restored: project=%s target=%s action=%s", project.id, target_id, action)
     return project
 
 
@@ -150,6 +177,120 @@ def inpaint_history(project: ProjectPayload, directory: Path) -> list[InpaintHis
             canRedo=bool(_history_entries(directory, target_id, "redo")),
         )
         for target_id in target_ids
+    ]
+
+
+def _mask_history_stack(directory: Path, layer_id: str, stack: str) -> Path:
+    target_key = hashlib.sha256(layer_id.encode("utf-8")).hexdigest()
+    return directory / ".mask-history" / target_key / stack
+
+
+def _mask_history_entries(directory: Path, layer_id: str, stack: str) -> list[Path]:
+    stack_directory = _mask_history_stack(directory, layer_id, stack)
+    return sorted(stack_directory.glob("*.png")) if stack_directory.is_dir() else []
+
+
+def _layer_mask_path(project: ProjectPayload, directory: Path, layer_id: str) -> Path:
+    layer = next((candidate for candidate in project.layers if candidate.id == layer_id), None)
+    if layer is None:
+        raise PipelineError("The mask history selected an unknown layer")
+    return directory / Path(layer.maskUrl).name
+
+
+def _push_mask_history(project: ProjectPayload, directory: Path, layer_id: str, stack: str) -> None:
+    layer = next((candidate for candidate in project.layers if candidate.id == layer_id), None)
+    if layer is None:
+        raise PipelineError("The mask history selected an unknown layer")
+    source = _layer_mask_path(project, directory, layer_id)
+    if not source.is_file():
+        raise PipelineError("The layer mask is missing from this project")
+    stack_directory = _mask_history_stack(directory, layer_id, stack)
+    stack_directory.mkdir(parents=True, exist_ok=True)
+    snapshot = stack_directory / f"{time.time_ns():020d}-{uuid.uuid4().hex}.png"
+    shutil.copy2(source, snapshot)
+    snapshot.with_suffix(".json").write_text(
+        json.dumps({"refinementState": layer.refinementState, "confirmed": layer.confirmed}),
+        encoding="utf-8",
+    )
+    for stale in _mask_history_entries(directory, layer_id, stack)[:-MASK_HISTORY_LIMIT]:
+        stale.unlink(missing_ok=True)
+        stale.with_suffix(".json").unlink(missing_ok=True)
+
+
+def _clear_mask_history(directory: Path, layer_id: str, stack: str) -> None:
+    for entry in _mask_history_entries(directory, layer_id, stack):
+        entry.unlink(missing_ok=True)
+        entry.with_suffix(".json").unlink(missing_ok=True)
+
+
+def record_mask_refine_history(project: ProjectPayload, directory: Path, layer_id: str) -> None:
+    # Mask history stores metadata beside each alpha snapshot so undo restores
+    # both pixels and review state (rough/refined and confirmed).
+    with MASK_HISTORY_LOCK:
+        _push_mask_history(project, directory, layer_id, "undo")
+        _clear_mask_history(directory, layer_id, "redo")
+    logger.info("mask history recorded: project=%s layer=%s", project.id, layer_id)
+
+
+def restore_mask_history(
+    project: ProjectPayload,
+    directory: Path,
+    layer_id: str,
+    action: str,
+) -> ProjectPayload:
+    if action not in {"undo", "redo"}:
+        logger.warning("mask history rejected: project=%s layer=%s action=%s", project.id, layer_id, action)
+        raise PipelineError("The mask history action is invalid")
+    opposite = "redo" if action == "undo" else "undo"
+    with MASK_HISTORY_LOCK:
+        entries = _mask_history_entries(directory, layer_id, action)
+        if not entries:
+            raise PipelineError(f"There is no {action} mask state for this layer")
+        current = _layer_mask_path(project, directory, layer_id)
+        _push_mask_history(project, directory, layer_id, opposite)
+        snapshot = entries[-1]
+        shutil.copy2(snapshot, current)
+        metadata_path = snapshot.with_suffix(".json")
+        try:
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            metadata = {}
+        snapshot.unlink(missing_ok=True)
+        metadata_path.unlink(missing_ok=True)
+
+        alpha = Image.open(current).convert("L")
+        source = Image.open(directory / "source.png").convert("RGBA")
+        cutout_path = directory / Path(next(layer for layer in project.layers if layer.id == layer_id).cutoutUrl).name
+        source.putalpha(alpha)
+        source.save(cutout_path)
+        binary = np.where(np.asarray(alpha, dtype=np.uint8) > 8, 255, 0).astype(np.uint8)
+        restored_state = metadata.get("refinementState")
+        if restored_state not in {"rough", "refined"}:
+            restored_state = "rough"
+        restored_confirmed = bool(metadata.get("confirmed", False))
+        updated_layers = [
+            layer.model_copy(
+                update={
+                    "bounds": _bounds(binary),
+                    "refinementState": restored_state,
+                    "confirmed": restored_confirmed,
+                    "maskRevision": layer.maskRevision + 1,
+                }
+            ) if layer.id == layer_id else layer
+            for layer in project.layers
+        ]
+    logger.info("mask history restored: project=%s layer=%s action=%s", project.id, layer_id, action)
+    return project.model_copy(update={"layers": updated_layers})
+
+
+def mask_history(project: ProjectPayload, directory: Path) -> list[InpaintHistoryPayload]:
+    return [
+        InpaintHistoryPayload(
+            targetId=layer.id,
+            canUndo=bool(_mask_history_entries(directory, layer.id, "undo")),
+            canRedo=bool(_mask_history_entries(directory, layer.id, "redo")),
+        )
+        for layer in project.layers
     ]
 
 
@@ -195,22 +336,35 @@ def replace_layer_mask(
     directory: Path,
     layer_id: str,
     mask: Image.Image,
+    *,
+    update_proposal: bool = True,
+    clear_history: bool = True,
 ) -> ProjectPayload:
+    # Threshold only for bounds/validation; the original alpha is retained for
+    # soft edges in the cutout. A revision then tells the renderer to reload it.
     known = {layer.id: layer for layer in project.layers}
     if layer_id not in known:
+        logger.warning("mask replacement rejected: project=%s layer=%s unknown", project.id, layer_id)
         raise PipelineError("The mask editor selected an unknown layer")
     source = Image.open(directory / "source.png").convert("RGB")
     if mask.size != source.size:
+        logger.warning("mask replacement rejected: project=%s layer=%s size=%s expected=%s", project.id, layer_id, mask.size, source.size)
         raise PipelineError("The edited mask dimensions do not match the source image")
     alpha = np.asarray(mask.convert("L"), dtype=np.uint8)
     binary = np.where(alpha > 8, 255, 0).astype(np.uint8)
     if not np.count_nonzero(binary):
+        logger.warning("mask replacement rejected: project=%s layer=%s empty", project.id, layer_id)
         raise PipelineError("An object mask cannot be empty; disable the layer instead")
 
     layer = known[layer_id]
     mask_name = Path(layer.maskUrl).name
     cutout_name = Path(layer.cutoutUrl).name
     Image.fromarray(alpha).save(directory / mask_name)
+    proposal_url = layer.proposalMaskUrl
+    if update_proposal:
+        proposal_name = Path(proposal_url).name if proposal_url else f"{layer_id}-proposal-mask.png"
+        Image.fromarray(alpha).save(directory / proposal_name)
+        proposal_url = asset_url(project.id, proposal_name)
     cutout = source.convert("RGBA")
     cutout.putalpha(Image.fromarray(alpha))
     cutout.save(directory / cutout_name)
@@ -220,16 +374,26 @@ def replace_layer_mask(
                 "bounds": _bounds(binary),
                 "confirmed": False,
                 "maskRevision": candidate.maskRevision + 1,
+                "proposalMaskUrl": proposal_url,
             }
         ) if candidate.id == layer_id else candidate
         for candidate in project.layers
     ]
-    return _invalidate_background(project.model_copy(update={"layers": updated_layers}))
+    if clear_history:
+        with MASK_HISTORY_LOCK:
+            _clear_mask_history(directory, layer_id, "undo")
+            _clear_mask_history(directory, layer_id, "redo")
+    updated = _invalidate_background(project.model_copy(update={"layers": updated_layers}))
+    logger.info("mask replaced: project=%s layer=%s revision=%s pixels=%s", project.id, layer_id, known[layer_id].maskRevision + 1, int(np.count_nonzero(binary)))
+    return updated
 
 
 def confirm_layer_mask(project: ProjectPayload, layer_id: str) -> ProjectPayload:
     if layer_id not in {layer.id for layer in project.layers}:
+        logger.warning("mask confirmation rejected: project=%s layer=%s unknown", project.id, layer_id)
         raise PipelineError("The mask review selected an unknown layer")
+    # Confirmation changes review metadata only; image assets remain untouched.
+    logger.info("mask confirmed in pipeline: project=%s layer=%s", project.id, layer_id)
     return project.model_copy(
         update={
             "layers": [
@@ -340,16 +504,26 @@ class PreviewPipeline:
         image: Image.Image,
         directory: Path,
         project_id: str,
+        segmentation_density: str = DEFAULT_SEGMENTATION_DENSITY,
         progress: ProgressCallback | None = None,
+        cancelled: CancellationCheck | None = None,
     ) -> ProjectPayload:
+        # Preview segmentation is a deterministic color-region heuristic. It
+        # keeps the workflow usable without model weights, but is not a claim
+        # of production-quality semantic segmentation.
+        logger.info("preview analysis started: project=%s size=%sx%s", project_id, image.width, image.height)
+        _check_cancelled(cancelled)
         _report(progress, 12, "Segmenting objects", "Finding distinct foreground regions.")
         masks = _filter_masks(preview_masks(image), image.width, image.height)
+        _check_cancelled(cancelled)
         if not masks:
+            logger.warning("preview analysis produced no masks: project=%s", project_id)
             raise PipelineError(
                 "The preview engine found no distinct color regions. Install the local AI stack for arbitrary photographs."
             )
         _report(progress, 64, "Building layers", f"Creating {len(masks)} editable object layers.")
         layers = [_save_layer(image, mask, directory, project_id, index) for index, mask in enumerate(masks)]
+        _check_cancelled(cancelled)
         project = ProjectPayload(
             id=project_id,
             width=image.width,
@@ -358,6 +532,7 @@ class PreviewPipeline:
             engine=self.engine,
             layers=layers,
         )
+        logger.info("preview analysis completed: project=%s layers=%s", project_id, len(layers))
         return project
 
     def refine(
@@ -366,7 +541,9 @@ class PreviewPipeline:
         directory: Path,
         layer_id: str,
         progress: ProgressCallback | None = None,
+        cancelled: CancellationCheck | None = None,
     ) -> ProjectPayload:
+        _check_cancelled(cancelled)
         raise PipelineError("Mask refinement requires the Local AI engine and InSPyReNet")
 
     def inpaint(
@@ -377,7 +554,13 @@ class PreviewPipeline:
         refinement: str = "lama",
         prompt: str | None = None,
         progress: ProgressCallback | None = None,
+        cancelled: CancellationCheck | None = None,
+        steps: int = 25,
     ) -> ProjectPayload:
+        # The fallback rebuilds the union area with a blurred median-color plate;
+        # it intentionally mirrors the production contract and metadata shape.
+        logger.info("preview inpaint started: project=%s layers=%s", project.id, len(layer_ids))
+        _check_cancelled(cancelled)
         _report(progress, 12, "Joining masks", "Combining the selected foreground mattes.")
         source = Image.open(directory / "source.png").convert("RGB")
         union = build_union_mask(project, directory, layer_ids)
@@ -391,14 +574,17 @@ class PreviewPipeline:
         filled_input = Image.composite(Image.new("RGB", source.size, fill), inpaint_input, union)
         synthesized = filled_input.filter(ImageFilter.GaussianBlur(radius=radius))
         background = Image.composite(synthesized, source, union)
+        _check_cancelled(cancelled)
         background.save(directory / "background.png")
-        return project.model_copy(
+        updated = project.model_copy(
             update={
                 "backgroundUrl": asset_url(project.id, "background.png"),
                 "unionMaskUrl": asset_url(project.id, "union-mask.png"),
                 "inpaintProvider": "preview",
             }
         )
+        logger.info("preview inpaint completed: project=%s", project.id)
+        return updated
 
     def inpaint_target(
         self,
@@ -409,7 +595,10 @@ class PreviewPipeline:
         mask: Image.Image,
         prompt: str | None = None,
         progress: ProgressCallback | None = None,
+        cancelled: CancellationCheck | None = None,
+        steps: int = 25,
     ) -> ProjectPayload:
+        _check_cancelled(cancelled)
         raise PipelineError("Layer inpainting requires the Local AI engine and PowerPaint")
 
 
@@ -433,6 +622,9 @@ _inspyrenet_remover: object | None = None
 
 
 def _download_with_resume(url: str, target: Path, expected_md5: str) -> None:
+    # Resume through a .part file, then verify the complete checksum before the
+    # atomic rename. Partial or tampered model files never become loadable.
+    logger.info("model download started: target=%s", target.name)
     target.parent.mkdir(parents=True, exist_ok=True)
     partial = target.with_suffix(f"{target.suffix}.part")
     last_error: Exception | None = None
@@ -453,13 +645,16 @@ def _download_with_resume(url: str, target: Path, expected_md5: str) -> None:
                         output.write(chunk)
             digest = hashlib.md5(partial.read_bytes()).hexdigest()
             if digest != expected_md5:
+                logger.warning("model checksum mismatch: target=%s attempt=%s", target.name, attempt + 1)
                 raise PipelineError(f"Downloaded model failed its checksum: {target.name}")
             partial.replace(target)
+            logger.info("model download verified: target=%s bytes=%s", target.name, target.stat().st_size)
             return
         except PipelineError:
             raise
         except Exception as error:
             last_error = error
+            logger.warning("model download retry: target=%s attempt=%s error=%s", target.name, attempt + 1, error)
             if attempt < 7:
                 time.sleep(min(8, 2**attempt))
     raise PipelineError(f"Model download did not complete after retries: {target.name}") from last_error
@@ -471,6 +666,8 @@ def _ensure_inspyrenet_model() -> Path:
     model_path = model_directory / "ckpt_base.pth"
     if not model_path.is_file():
         _download_with_resume(INSPYRENET_MODEL_URL, model_path, INSPYRENET_MODEL_MD5)
+    else:
+        logger.info("InSPyReNet model cache hit: path=%s", model_path)
     return model_path
 
 
@@ -493,6 +690,7 @@ def _matte_mask(image: Image.Image, mask: np.ndarray) -> np.ndarray:
 
     x0, y0, x1, y1 = _bounds(mask)
     crop_box = (x0, y0, x1, y1)
+    # Background removal must see only the segmented object's AABB, not the full canvas.
     crop = image.crop(crop_box).convert("RGB")
     if _inspyrenet_remover is None:
         try:
@@ -518,6 +716,19 @@ def _matte_mask(image: Image.Image, mask: np.ndarray) -> np.ndarray:
     overlap = int(np.count_nonzero(candidate & proposal))
     if overlap < max(16, int(np.count_nonzero(proposal) * 0.02)):
         raise MatteRejected("InSPyReNet could not produce a usable alpha matte for a proposed object")
+    # The edited mask is the user's object selection. Keep InSPyReNet's soft
+    # edges, but never admit pixels outside the designated proposal.
+    guided = proposal
+    guided_matte = np.where(guided, matte, 0).astype(np.uint8)
+    proposal_area = int(np.count_nonzero(proposal))
+    guided_area = int(np.count_nonzero(guided_matte > 12))
+    guided_overlap = int(np.count_nonzero((guided_matte > 12) & proposal))
+    if guided_area < max(16, int(proposal_area * 0.25)) or guided_overlap < max(16, int(proposal_area * 0.25)):
+        # A repeated pass must not replace the user's selection with a tiny
+        # salient fragment. Keep the stable edited proposal when confidence is low.
+        matte = np.where(proposal, 255, 0).astype(np.uint8)
+    else:
+        matte = guided_matte
     full = np.zeros((image.height, image.width), dtype=np.uint8)
     left, top, right, bottom = crop_box
     full[top:bottom, left:right] = matte
@@ -553,6 +764,9 @@ def _guided_mask_refine(image: Image.Image, mask: np.ndarray) -> np.ndarray:
         refined = np.isin(trimap, (cv2.GC_FGD, cv2.GC_PR_FGD))
     except cv2.error:
         refined = binary > 0
+    # GrabCut may mark nearby pixels as probable foreground. The edited mask
+    # remains the hard boundary for this layer, just like InSPyReNet above.
+    refined &= binary > 0
     refined[eroded > 0] = True
 
     proposal_area = int(np.count_nonzero(binary))
@@ -560,8 +774,12 @@ def _guided_mask_refine(image: Image.Image, mask: np.ndarray) -> np.ndarray:
     overlap = int(np.count_nonzero(refined & (binary > 0)))
     if refined_area < proposal_area * 0.25 or overlap < proposal_area * 0.25:
         refined = binary > 0
-    alpha = Image.fromarray(refined.astype(np.uint8) * 255).filter(ImageFilter.GaussianBlur(radius=1.0))
-    return np.asarray(alpha, dtype=np.uint8)
+    alpha = np.asarray(
+        Image.fromarray(refined.astype(np.uint8) * 255).filter(ImageFilter.GaussianBlur(radius=1.0)),
+        dtype=np.uint8,
+    ).copy()
+    alpha[binary == 0] = 0
+    return alpha
 
 
 def _download_lama(target: Path) -> None:
@@ -617,14 +835,21 @@ class ProductionPipeline:
         image: Image.Image,
         directory: Path,
         project_id: str,
+        segmentation_density: str = DEFAULT_SEGMENTATION_DENSITY,
         progress: ProgressCallback | None = None,
+        cancelled: CancellationCheck | None = None,
     ) -> ProjectPayload:
+        logger.info("AI analysis started: project=%s density=%s size=%sx%s", project_id, segmentation_density, image.width, image.height)
+        _check_cancelled(cancelled)
+        # The lock serializes model loads and GPU allocations. Depth inference
+        # follows segmentation so peak VRAM metrics describe each stage clearly.
         with PIPELINE_LOCK:
             _report(progress, 8, "Segmenting objects", "Grounding DINO-T and SAM 2.1 are finding individual objects.")
             try:
-                instances, metrics = grounded_sam_instances(image)
+                instances, metrics = grounded_sam_instances(image, normalize_segmentation_density(segmentation_density))
             except RuntimeError as error:
                 raise PipelineError(str(error)) from error
+            _check_cancelled(cancelled)
             if not instances:
                 raise PipelineError(
                     "Grounding DINO-T found no supported foreground objects. "
@@ -635,9 +860,12 @@ class ProductionPipeline:
                 near_map, depth_peak = estimate_near_map(image)
             except RuntimeError as error:
                 raise PipelineError(str(error)) from error
+            _check_cancelled(cancelled)
             metrics["depthAnything3"] = depth_peak
+            logger.info("AI analysis inference complete: project=%s instances=%s metrics=%s", project_id, len(instances), metrics)
 
         _report(progress, 79, "Building layers", "Preparing depth ordering and transparent cutouts.")
+        _check_cancelled(cancelled)
         depth_preview(near_map).save(directory / "depth-map.png")
         layer_inputs: list[tuple[str, float, np.ndarray, str, float]] = []
         for instance in instances:
@@ -650,6 +878,7 @@ class ProductionPipeline:
             layer_inputs.append(
                 ("Foreground depth plane", depth_for_mask(near_map, depth_plane), depth_plane, "depth-plane", 1.0)
             )
+            logger.info("AI analysis added foreground depth plane: project=%s", project_id)
         layer_inputs.sort(key=lambda item: item[1])
         label_totals: dict[str, int] = {}
         for name, _, _, kind, _ in layer_inputs:
@@ -658,6 +887,7 @@ class ProductionPipeline:
         label_indices: dict[str, int] = {}
         layers: list[LayerPayload] = []
         for index, (name, depth, alpha, kind, confidence) in enumerate(layer_inputs):
+            _check_cancelled(cancelled)
             _report(
                 progress,
                 82 + round(index * 14 / max(1, len(layer_inputs))),
@@ -679,7 +909,7 @@ class ProductionPipeline:
                 kind=kind,
                 confidence=confidence,
             ))
-        return ProjectPayload(
+        result = ProjectPayload(
             id=project_id,
             width=image.width,
             height=image.height,
@@ -689,6 +919,8 @@ class ProductionPipeline:
             layers=layers,
             vramPeaksMb=metrics,
         )
+        logger.info("AI analysis completed: project=%s layers=%s metrics=%s", project_id, len(layers), metrics)
+        return result
 
     def refine(
         self,
@@ -696,7 +928,10 @@ class ProductionPipeline:
         directory: Path,
         layer_id: str,
         progress: ProgressCallback | None = None,
+        cancelled: CancellationCheck | None = None,
     ) -> ProjectPayload:
+        logger.info("AI refine started: project=%s layer=%s", project.id, layer_id)
+        _check_cancelled(cancelled)
         known = {layer.id: layer for layer in project.layers}
         layer = known.get(layer_id)
         if layer is None:
@@ -704,7 +939,28 @@ class ProductionPipeline:
 
         source = Image.open(directory / "source.png").convert("RGB")
         mask = np.asarray(Image.open(directory / Path(layer.maskUrl).name).convert("L"), dtype=np.uint8)
+        guidance_mask = mask
+        proposal_path = directory / Path(layer.proposalMaskUrl).name if layer.proposalMaskUrl else None
+        if proposal_path is not None and proposal_path.is_file():
+            guidance_mask = np.asarray(Image.open(proposal_path).convert("L"), dtype=np.uint8)
+        else:
+            # Projects created before stable proposals were introduced have no
+            # proposal asset. Preserve their current edited mask before the
+            # first refine so later passes cannot drift to another subject.
+            proposal_name = f"{layer_id}-proposal-mask.png"
+            Image.fromarray(guidance_mask).save(directory / proposal_name)
+            proposal_url = asset_url(project.id, proposal_name)
+            project = project.model_copy(update={
+                "layers": [
+                    candidate.model_copy(update={"proposalMaskUrl": proposal_url})
+                    if candidate.id == layer_id else candidate
+                    for candidate in project.layers
+                ]
+            })
+            layer = next(candidate for candidate in project.layers if candidate.id == layer_id)
+            logger.info("AI refine backfilled legacy proposal: project=%s layer=%s", project.id, layer_id)
         _report(progress, 12, "Preparing refinement", f"Cropping the original image around {layer.name}.")
+        _check_cancelled(cancelled)
         metrics = dict(project.vramPeaksMb)
         with PIPELINE_LOCK:
             if layer.kind == "instance":
@@ -715,23 +971,36 @@ class ProductionPipeline:
                     except ImportError:
                         torch = None
                     _report(progress, 36, "Refining mask", "InSPyReNet is removing the local background and resolving soft edges.")
-                    matte = _matte_mask(source, mask)
+                    matte = _matte_mask(source, guidance_mask)
+                    _check_cancelled(cancelled)
                     if torch is not None:
                         metrics["inspyrenet"] = verify_vram_peak("InSPyReNet", peak_vram_mb(torch))
                 finally:
                     _release_inspyrenet()
             else:
                 _report(progress, 36, "Refining mask", "Local mask-guided segmentation is aligning this foreground layer to image edges.")
-                matte = _guided_mask_refine(source, mask)
+                matte = _guided_mask_refine(source, guidance_mask)
+                _check_cancelled(cancelled)
 
         _report(progress, 84, "Saving refined mask", "Updating this layer's alpha and foreground cutout.")
-        updated = replace_layer_mask(project, directory, layer_id, Image.fromarray(matte))
+        _check_cancelled(cancelled)
+        record_mask_refine_history(project, directory, layer_id)
+        updated = replace_layer_mask(
+            project,
+            directory,
+            layer_id,
+            Image.fromarray(matte),
+            update_proposal=False,
+            clear_history=False,
+        )
         refined_layers = [
             candidate.model_copy(update={"refinementState": "refined"})
             if candidate.id == layer_id else candidate
             for candidate in updated.layers
         ]
-        return updated.model_copy(update={"layers": refined_layers, "vramPeaksMb": metrics})
+        result = updated.model_copy(update={"layers": refined_layers, "vramPeaksMb": metrics})
+        logger.info("AI refine completed: project=%s layer=%s metrics=%s", project.id, layer_id, metrics)
+        return result
 
     def inpaint(
         self,
@@ -741,7 +1010,11 @@ class ProductionPipeline:
         refinement: str = "lama",
         prompt: str | None = None,
         progress: ProgressCallback | None = None,
+        cancelled: CancellationCheck | None = None,
+        steps: int = 25,
     ) -> ProjectPayload:
+        logger.info("AI inpaint started: project=%s layers=%s refinement=%s steps=%s", project.id, len(layer_ids), refinement, steps)
+        _check_cancelled(cancelled)
         _report(progress, 10, "Joining masks", "Combining selected objects into the inpainting mask.")
         source = Image.open(directory / "source.png").convert("RGB")
         union = build_union_mask(project, directory, layer_ids)
@@ -752,6 +1025,7 @@ class ProductionPipeline:
         metrics = dict(project.vramPeaksMb)
         with PIPELINE_LOCK:
             if refinement == "powerpaint":
+                logger.info("AI inpaint provider selected: project=%s provider=powerpaint", project.id)
                 try:
                     background_prompt = (prompt or "").strip()
                     if not background_prompt:
@@ -769,27 +1043,34 @@ class ProductionPipeline:
                         directory / "union-mask.png",
                         directory / "background.png",
                         background_prompt,
+                        steps=steps,
                         progress=lambda step, total: _report(
                             progress,
                             42 + round(step * 50 / max(1, total)),
                             "Redrawing background",
                             f"PowerPaint denoising step {step} of {total}.",
                         ),
+                        cancelled=cancelled,
                     )
                     metrics["powerpaint"] = powerpaint_peak
+                except JobCancelled:
+                    raise
                 except RuntimeError as error:
                     raise PipelineError(str(error)) from error
                 provider = "powerpaint"
             else:
+                logger.info("AI inpaint provider selected: project=%s provider=big-lama", project.id)
                 background_prompt = None
                 _report(progress, 34, "Rebuilding background", "Big LaMa is filling the masked structure.")
                 generated, lama_peak = _lama_inpaint(inpaint_input, union)
+                _check_cancelled(cancelled)
                 background = Image.composite(generated, source, union)
                 background.save(directory / "background.png")
                 metrics["bigLama"] = lama_peak
                 provider = "big-lama"
         _report(progress, 94, "Finalizing plate", "Saving the rebuilt background and scene metadata.")
-        return project.model_copy(
+        _check_cancelled(cancelled)
+        result = project.model_copy(
             update={
                 "backgroundUrl": asset_url(project.id, "background.png"),
                 "unionMaskUrl": asset_url(project.id, "union-mask.png"),
@@ -798,6 +1079,8 @@ class ProductionPipeline:
                 "vramPeaksMb": metrics,
             }
         )
+        logger.info("AI inpaint completed: project=%s provider=%s metrics=%s", project.id, provider, metrics)
+        return result
 
     def inpaint_target(
         self,
@@ -808,17 +1091,24 @@ class ProductionPipeline:
         mask: Image.Image,
         prompt: str | None = None,
         progress: ProgressCallback | None = None,
+        cancelled: CancellationCheck | None = None,
+        steps: int = 25,
     ) -> ProjectPayload:
+        logger.info("AI target inpaint started: project=%s target=%s steps=%s", project.id, target_id, steps)
+        _check_cancelled(cancelled)
         if not project.backgroundUrl:
             raise PipelineError("Build the scene before inpainting an individual layer")
         known = {layer.id: layer for layer in project.layers}
         if target_id != "background" and target_id not in known:
+            logger.warning("AI target inpaint rejected: project=%s target=%s unknown", project.id, target_id)
             raise PipelineError("The layer inpaint request selected an unknown target")
         expected_size = (project.width, project.height)
         if composition.size != expected_size or mask.size != expected_size:
+            logger.warning("AI target inpaint rejected: project=%s target=%s dimensions", project.id, target_id)
             raise PipelineError("The composition and inpaint mask must match the project dimensions")
         alpha = mask.convert("L")
         if not np.count_nonzero(np.asarray(alpha, dtype=np.uint8) > 0):
+            logger.warning("AI target inpaint rejected: project=%s target=%s empty mask", project.id, target_id)
             raise PipelineError("Paint an inpaint area before running PowerPaint")
 
         source_path = directory / ".layer-inpaint-composition.png"
@@ -830,6 +1120,8 @@ class ProductionPipeline:
         resolved_prompt = (prompt or "").strip() or "seamless continuation of the surrounding composition"
         metrics = dict(project.vramPeaksMb)
         try:
+            # Temporary composition/mask/result files are private to this
+            # operation and are always removed in finally below.
             _report(progress, 18, "Preparing layer inpaint", f"Using the full composition as context for {target_name}.")
             with PIPELINE_LOCK:
                 _report(
@@ -844,25 +1136,32 @@ class ProductionPipeline:
                         mask_path,
                         output_path,
                         resolved_prompt,
+                        steps=steps,
                         progress=lambda step, total: _report(
                             progress,
                             42 + round(step * 50 / max(1, total)),
                             "Inpainting layer",
                             f"PowerPaint full-redraw step {step} of {total} for {target_name}.",
                         ),
+                        cancelled=cancelled,
                     )
+                except JobCancelled:
+                    raise
                 except RuntimeError as error:
                     raise PipelineError(str(error)) from error
             metrics["powerpaint"] = peak
+            _check_cancelled(cancelled)
             generated = Image.open(output_path).convert("RGB")
             if target_id == "background":
                 background_path = directory / Path(project.backgroundUrl).name
                 background = Image.open(background_path).convert("RGB")
                 record_inpaint_history(project, directory, target_id)
                 Image.composite(generated, background, alpha).save(background_path)
-                return project.model_copy(
+                result = project.model_copy(
                     update={"inpaintProvider": "powerpaint", "vramPeaksMb": metrics}
                 )
+                logger.info("AI target inpaint completed: project=%s target=background", project.id)
+                return result
 
             target = known[target_id]
             cutout_path = directory / Path(target.cutoutUrl).name
@@ -873,7 +1172,9 @@ class ProductionPipeline:
             updated_cutout.putalpha(updated_alpha)
             record_inpaint_history(project, directory, target_id)
             updated_cutout.save(cutout_path)
-            return project.model_copy(update={"vramPeaksMb": metrics})
+            result = project.model_copy(update={"vramPeaksMb": metrics})
+            logger.info("AI target inpaint completed: project=%s target=%s", project.id, target_id)
+            return result
         finally:
             source_path.unlink(missing_ok=True)
             mask_path.unlink(missing_ok=True)
@@ -881,11 +1182,15 @@ class ProductionPipeline:
 
 
 def build_union_mask(project: ProjectPayload, directory: Path, layer_ids: list[str]) -> Image.Image:
+    # Build masks only from known, confirmed layers and the optional extra mask.
+    # A small dilation closes edge gaps before the inpainting model sees them.
     known = {layer.id: layer for layer in project.layers}
     if any(layer_id not in known for layer_id in layer_ids):
+        logger.warning("union mask rejected: project=%s unknown layer", project.id)
         raise PipelineError("The inpaint request contains an unknown layer")
     unconfirmed = [known[layer_id].name for layer_id in layer_ids if not known[layer_id].confirmed]
     if unconfirmed:
+        logger.warning("union mask rejected: project=%s unconfirmed=%s", project.id, len(unconfirmed))
         raise PipelineError(f"Confirm every selected mask before inpainting: {', '.join(unconfirmed)}")
     arrays = [
         np.asarray(Image.open(directory / Path(known[layer_id].maskUrl).name).convert("L"), dtype=np.uint8)

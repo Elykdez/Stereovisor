@@ -16,6 +16,8 @@ export function layerTransform(
   width: number,
   height: number
 ): LayerTransform {
+  // Depth affects both lateral travel and a tiny scale correction; clamping
+  // keeps malformed imported layer values from producing runaway transforms.
   const normalizedDepth = clamp(depth, 0, 1);
   const travel = camera.strength * 0.0015 * normalizedDepth;
   return {
@@ -36,6 +38,8 @@ export function backgroundTransform(camera: CameraState): LayerTransform {
 }
 
 export function visibleLayers<T extends { visible: boolean; depth: number; order: number }>(layers: T[]): T[] {
+  // Stable depth/order sorting determines the painter's order for the final
+  // composition and is shared by the interactive canvas and video export.
   return layers
     .filter((layer) => layer.visible)
     .slice()
@@ -52,6 +56,8 @@ export function demoCameraAt(camera: CameraState, progress: number): CameraState
 }
 
 export function fitVideoDimensions(width: number, height: number, maximumEdge = 1280): [number, number] {
+  // Video encoders commonly require even dimensions. Downscale only when the
+  // source exceeds the requested edge; never upscale a small source.
   const scale = Math.min(1, maximumEdge / Math.max(width, height));
   return [Math.max(2, Math.floor(width * scale / 2) * 2), Math.max(2, Math.floor(height * scale / 2) * 2)];
 }

@@ -37,6 +37,46 @@ function Test-StereovisorService {
     }
 }
 
+function Stop-OrphanedStereovisorService {
+    if (Test-StereovisorRenderer) { return $false }
+    $serviceScript = (Join-Path $ProjectRoot "scripts\run-service.py").ToLowerInvariant()
+    $managedProcessIds = @()
+    $listeners = @(Get-NetTCPConnection -State Listen -LocalPort 5179 -ErrorAction SilentlyContinue)
+    foreach ($listener in $listeners) {
+        $process = Get-CimInstance Win32_Process -Filter "ProcessId = $($listener.OwningProcess)"
+        if (-not $process -or -not $process.CommandLine -or -not $process.CommandLine.ToLowerInvariant().Contains($serviceScript)) {
+            continue
+        }
+        $current = $process
+        while ($current -and $current.CommandLine -and (
+                $current.CommandLine.ToLowerInvariant().Contains($serviceScript) -or
+                $current.CommandLine.ToLowerInvariant().Contains((Join-Path $ProjectRoot "scripts\start-service.ps1").ToLowerInvariant())
+            )) {
+            $managedProcessIds += $current.ProcessId
+            if (-not $current.ParentProcessId) { break }
+            $current = Get-CimInstance Win32_Process -Filter "ProcessId = $($current.ParentProcessId)"
+        }
+    }
+    # Stop the listener first, then its project-owned parent wrappers.
+    $managedProcessIds = @($managedProcessIds | Select-Object -Unique)
+    if (-not $managedProcessIds.Count) { return $false }
+
+    $workerCount = @(Get-CimInstance Win32_Process | Where-Object {
+        $_.Name -match "python" -and $_.CommandLine -match "powerpaint-runner\.py"
+    }).Count
+    if ($workerCount -gt 0) {
+        throw "A Stereovisor model worker is still active. Wait for it to finish, then run Stereovisor again."
+    }
+    Write-Host "Cleaning an orphaned Stereovisor local service..." -ForegroundColor Yellow
+    foreach ($processId in $managedProcessIds) {
+        Stop-Process -Id $processId -Force -ErrorAction SilentlyContinue
+    }
+    for ($attempt = 0; $attempt -lt 20 -and (Test-TcpPort -Port 5179); $attempt++) {
+        Start-Sleep -Milliseconds 250
+    }
+    return $true
+}
+
 try {
     $RendererReady = Test-StereovisorRenderer
     $ServiceReady = Test-StereovisorService
@@ -53,6 +93,7 @@ try {
         exit $LASTEXITCODE
     }
 
+    [void](Stop-OrphanedStereovisorService)
     $BusyPorts = @()
     if (Test-TcpPort -Port 5173) { $BusyPorts += "5173" }
     if (Test-TcpPort -Port 5179) { $BusyPorts += "5179" }

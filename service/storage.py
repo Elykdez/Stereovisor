@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import logging
 import re
 import shutil
 import tempfile
@@ -14,6 +15,9 @@ from zipfile import BadZipFile, ZIP_DEFLATED, ZIP_STORED, ZipFile
 from PIL import Image
 
 from .schemas import CameraPayload, LayerEditorPayload, ProjectPayload
+
+
+logger = logging.getLogger(__name__)
 
 
 ID_PATTERN = re.compile(r"^[a-f0-9]{32}$")
@@ -47,13 +51,18 @@ class ProjectStore:
         self.root.mkdir(parents=True, exist_ok=True)
 
     def create(self, image: Image.Image) -> tuple[str, Path]:
+        # A project directory is created before expensive processing so all
+        # generated assets share one validated, project-scoped root.
         project_id = uuid.uuid4().hex
         directory = self.root / project_id
         directory.mkdir(parents=False)
         image.convert("RGB").save(directory / "source.png", format="PNG")
+        logger.info("project created: id=%s size=%sx%s", project_id, image.width, image.height)
         return project_id, directory
 
     def directory(self, project_id: str) -> Path:
+        # Reject traversal and malformed IDs before resolving any filesystem
+        # path; every asset operation relies on this containment check.
         if not ID_PATTERN.fullmatch(project_id):
             raise FileNotFoundError("Unknown project")
         path = (self.root / project_id).resolve()
@@ -70,6 +79,8 @@ class ProjectStore:
         return path
 
     def write(self, project: ProjectPayload) -> None:
+        # The serialized project is the authoritative metadata snapshot. Asset
+        # files are written first, then this record is committed last.
         target = self.directory(project.id) / "project.json"
         target.write_text(project.model_dump_json(indent=2), encoding="utf-8")
 
@@ -84,10 +95,14 @@ class ProjectStore:
         camera: CameraPayload,
         layer_states: list[LayerEditorPayload],
     ) -> bytes:
+        # Export strips local URLs and records checksums so an imported package
+        # can be verified without trusting paths supplied by the caller.
+        logger.info("project export packaging: id=%s requested_layers=%s", project_id, len(layer_states))
         directory = self.directory(project_id)
         project = self.read(project_id)
         states = {state.id: state for state in layer_states}
         if set(states) != {layer.id for layer in project.layers}:
+            logger.warning("project export rejected: id=%s layer state mismatch", project_id)
             raise ProjectPackageError("Export state does not match the project layers")
 
         layers = [
@@ -136,9 +151,12 @@ class ProjectStore:
             archive.writestr("manifest.json", json.dumps(manifest, indent=2), compress_type=ZIP_DEFLATED)
             for asset in assets:
                 archive.write(asset, f"assets/{asset.name}", compress_type=ZIP_STORED)
-        return output.getvalue()
+        package = output.getvalue()
+        logger.info("project export packaged: id=%s assets=%s bytes=%s", project_id, len(assets), len(package))
+        return package
 
     def import_package(self, data: bytes) -> tuple[ProjectPayload, CameraPayload]:
+        logger.info("project import verifying: bytes=%s", len(data))
         try:
             archive = ZipFile(io.BytesIO(data), "r")
         except BadZipFile as error:
@@ -147,6 +165,8 @@ class ProjectStore:
         with archive:
             files = [entry for entry in archive.infolist() if not entry.is_dir()]
             names = [entry.filename for entry in files]
+            # The allowlist and size limits run before extraction to prevent zip
+            # bombs, duplicate names, and undeclared files from reaching disk.
             if len(files) > MAX_PACKAGE_FILES or len(names) != len(set(names)):
                 raise ProjectPackageError("The project package has an invalid file list")
             if sum(entry.file_size for entry in files) > MAX_UNCOMPRESSED_BYTES:
@@ -206,6 +226,9 @@ class ProjectStore:
                 raise ProjectPackageError("The project manifest references missing image assets")
 
             project_id = uuid.uuid4().hex
+            # Verify every asset in an isolated staging directory. The final
+            # replace below is atomic, so failed imports never create partial
+            # live projects.
             with tempfile.TemporaryDirectory(prefix=".import-", dir=self.root) as temporary:
                 staging = Path(temporary)
                 for name, record in declared.items():
@@ -265,6 +288,7 @@ class ProjectStore:
                 )
                 (staging / "project.json").write_text(restored.model_dump_json(indent=2), encoding="utf-8")
                 staging.replace(self.root / project_id)
+            logger.info("project import verified: id=%s assets=%s bytes=%s", project_id, len(declared), len(data))
             return restored, camera
 
 

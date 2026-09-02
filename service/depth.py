@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+import logging
+
 import numpy as np
 from PIL import Image, ImageFilter
 
 from .ai_models import DA3_PATH, begin_vram_stage, peak_vram_mb, release_cuda, resolve_device, verify_vram_peak
+
+
+logger = logging.getLogger(__name__)
 
 
 def _resize_array(array: np.ndarray, size: tuple[int, int], resample: Image.Resampling) -> np.ndarray:
@@ -12,6 +17,8 @@ def _resize_array(array: np.ndarray, size: tuple[int, int], resample: Image.Resa
 
 
 def normalize_depth(depth: np.ndarray, size: tuple[int, int]) -> np.ndarray:
+    # Normalize after resizing so every downstream mask uses the source image
+    # dimensions, while percentile clipping removes extreme model outliers.
     squeezed = np.asarray(depth, dtype=np.float32).squeeze()
     if squeezed.ndim != 2:
         raise RuntimeError(f"Depth Anything 3 returned an unexpected depth shape: {squeezed.shape}")
@@ -38,6 +45,7 @@ def estimate_near_map(image: Image.Image) -> tuple[np.ndarray, int]:
         raise RuntimeError("Depth Anything 3 is unavailable. Run scripts/setup-ai.ps1.") from error
 
     device = resolve_device(torch)
+    logger.info("depth inference started: size=%sx%s device=%s", image.width, image.height, device)
     model = None
     prediction = None
     try:
@@ -46,7 +54,9 @@ def estimate_near_map(image: Image.Image) -> tuple[np.ndarray, int]:
         with torch.inference_mode():
             prediction = model.inference([image.convert("RGB")], process_res=504)
         near = normalize_depth(prediction.depth, image.size)
-        return near, verify_vram_peak("Depth Anything 3", peak_vram_mb(torch))
+        peak = verify_vram_peak("Depth Anything 3", peak_vram_mb(torch))
+        logger.info("depth inference completed: peak_mb=%s", peak)
+        return near, peak
     finally:
         del prediction, model
         release_cuda(torch)

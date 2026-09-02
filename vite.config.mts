@@ -1,9 +1,16 @@
 import { defineConfig } from "vitest/config";
 import react from "@vitejs/plugin-react";
+import path from "node:path";
 
 export default defineConfig({
   base: "./",
   plugins: [react()],
+  resolve: {
+    // Keep centralized tests independent of their depth under src/tests.
+    alias: {
+      "@": path.resolve("src")
+    }
+  },
   server: {
     port: 5173,
     strictPort: true,
@@ -14,6 +21,6 @@ export default defineConfig({
   test: {
     globals: true,
     environment: "jsdom",
-    setupFiles: "./src/test/setup.ts"
+    setupFiles: "./src/tests/setup.ts"
   }
 });

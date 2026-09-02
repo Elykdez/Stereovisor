@@ -1,6 +1,6 @@
 import { fireEvent, render } from "@testing-library/react";
-import { LayerInspector } from "./LayerInspector";
-import type { SceneLayer } from "../types";
+import { LayerInspector } from "@/web/components/LayerInspector";
+import type { SceneLayer } from "@/web/types";
 
 const depthPlane: SceneLayer = {
   id: "depth-plane",
@@ -31,12 +31,16 @@ describe("LayerInspector mask refinement", () => {
         refiningLayerId={null}
         confirmingLayerId={null}
         aiRefineAvailable
+        maskHistory={{}}
+        maskHistoryBusy={null}
         backgroundUrl="/background.png"
         inpaintingTargetId={null}
         focusedTargetId={null}
         layerInpaintAvailable
         onEditMask={vi.fn()}
         onRefineMask={onRefineMask}
+        onUndoRefine={vi.fn()}
+        onRedoRefine={vi.fn()}
         onConfirmMask={vi.fn()}
         onInpaintTarget={vi.fn()}
         onFocusTarget={vi.fn()}
@@ -61,12 +65,16 @@ describe("LayerInspector mask refinement", () => {
         refiningLayerId={null}
         confirmingLayerId={null}
         aiRefineAvailable
+        maskHistory={{}}
+        maskHistoryBusy={null}
         backgroundUrl="/background.png"
         inpaintingTargetId={null}
         focusedTargetId={null}
         layerInpaintAvailable
         onEditMask={vi.fn()}
         onRefineMask={vi.fn()}
+        onUndoRefine={vi.fn()}
+        onRedoRefine={vi.fn()}
         onConfirmMask={vi.fn()}
         onInpaintTarget={onInpaintTarget}
         onFocusTarget={onFocusTarget}
@@ -83,5 +91,39 @@ describe("LayerInspector mask refinement", () => {
     expect(onInpaintTarget).toHaveBeenNthCalledWith(2, depthPlane.id);
     expect(onFocusTarget).toHaveBeenCalledWith("background");
     expect(onFocusTarget).toHaveBeenCalledWith(depthPlane.id);
+  });
+
+  it("exposes refinement undo and redo for the selected layer", () => {
+    const onUndoRefine = vi.fn();
+    const onRedoRefine = vi.fn();
+    const { getByRole } = render(
+      <LayerInspector
+        layers={[depthPlane]}
+        phase="selecting"
+        editingLayerId={null}
+        refiningLayerId={null}
+        confirmingLayerId={null}
+        aiRefineAvailable
+        maskHistory={{ [depthPlane.id]: { targetId: depthPlane.id, canUndo: true, canRedo: true } }}
+        maskHistoryBusy={null}
+        backgroundUrl={null}
+        inpaintingTargetId={null}
+        focusedTargetId={null}
+        layerInpaintAvailable={false}
+        onEditMask={vi.fn()}
+        onRefineMask={vi.fn()}
+        onUndoRefine={onUndoRefine}
+        onRedoRefine={onRedoRefine}
+        onConfirmMask={vi.fn()}
+        onInpaintTarget={vi.fn()}
+        onFocusTarget={vi.fn()}
+        onChange={vi.fn()}
+      />
+    );
+
+    fireEvent.click(getByRole("button", { name: "Undo refine" }));
+    fireEvent.click(getByRole("button", { name: "Redo refine" }));
+    expect(onUndoRefine).toHaveBeenCalledWith(depthPlane.id);
+    expect(onRedoRefine).toHaveBeenCalledWith(depthPlane.id);
   });
 });

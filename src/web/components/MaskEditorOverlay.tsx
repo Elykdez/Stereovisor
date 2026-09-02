@@ -1,4 +1,5 @@
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef } from "react";
+import { useAppTranslation } from "../i18n";
 import { resolveAssetUrl } from "../lib/api";
 
 export type MaskBrushMode = "add" | "erase";
@@ -55,6 +56,8 @@ function readAlpha(context: CanvasRenderingContext2D, width: number, height: num
 }
 
 function changedRegion(before: Uint8ClampedArray, after: Uint8ClampedArray, width: number, height: number): HistoryEntry | null {
+  // Store only the changed rectangle. Large masks can then support useful
+  // undo history without copying a full frame for every brush stroke.
   let left = width;
   let top = height;
   let right = -1;
@@ -127,6 +130,7 @@ export const MaskEditorOverlay = forwardRef<MaskEditorHandle, Props>(function Ma
   { target, width, height, displaySize, mode, brushSize, blurRadius, onDirtyChange, onHistoryChange, onReadyChange, onError },
   ref
 ) {
+  const { t, layerName } = useAppTranslation();
   const visibleRef = useRef<HTMLCanvasElement>(null);
   const workRef = useRef<HTMLCanvasElement | null>(null);
   const initialRef = useRef<ImageData | null>(null);
@@ -206,6 +210,8 @@ export const MaskEditorOverlay = forwardRef<MaskEditorHandle, Props>(function Ma
     historyIndexRef.current += 1;
     historyBytesRef.current += entry.before.byteLength + entry.after.byteLength;
     while (
+      // Bound both action count and raw pixel memory; whichever limit is hit
+      // first removes the oldest entry while keeping the current cursor valid.
       historyRef.current.length > 1 &&
       (historyRef.current.length > MAX_HISTORY_ACTIONS || historyBytesRef.current > MAX_HISTORY_BYTES)
     ) {
@@ -238,6 +244,8 @@ export const MaskEditorOverlay = forwardRef<MaskEditorHandle, Props>(function Ma
   }, [notifyHistory, renderMask]);
 
   useEffect(() => {
+    // Each target gets a fresh working canvas and history. The cancellation
+    // flag prevents a slow image load from reviving an editor that was closed.
     let cancelled = false;
     readyRef.current = false;
     callbacksRef.current.onReadyChange(false);
@@ -308,6 +316,8 @@ export const MaskEditorOverlay = forwardRef<MaskEditorHandle, Props>(function Ma
       context.filter = blurRadius > 0 ? `blur(${blurRadius}px)` : "none";
       context.drawImage(work, 0, 0);
       context.filter = "none";
+      // Encoding is asynchronous, so callers can keep the UI responsive while
+      // the exact alpha mask is transferred to the service.
       return new Promise<Blob>((resolve, reject) =>
         output.toBlob(
           (blob) => (blob ? resolve(blob) : reject(new Error("The edited mask could not be encoded."))),
@@ -406,7 +416,7 @@ export const MaskEditorOverlay = forwardRef<MaskEditorHandle, Props>(function Ma
       height={height}
       className="mask-editor-canvas"
       style={{ width: `${displaySize[0]}px`, height: `${displaySize[1]}px` }}
-      aria-label={`Brush editor for ${target.name}`}
+      aria-label={t("scene.brushEditor", { name: layerName(target.name) })}
       onPointerDown={pointerDown}
       onPointerMove={pointerMove}
       onPointerUp={pointerUp}

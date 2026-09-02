@@ -1,12 +1,14 @@
 import {
+  cancelProcessingJob,
   confirmProjectLayer,
   inpaintProjectTarget,
   JOB_POLL_INTERVAL_MS,
+  ProcessingCancelledError,
   refineProjectLayer,
   updateProjectMask,
   waitForJob
-} from "./api";
-import type { ProcessingProgress, SceneProject } from "../types";
+} from "@/web/lib/api";
+import type { ProcessingProgress, SceneProject } from "@/web/types";
 
 const project: SceneProject = {
   id: "finished-project",
@@ -23,14 +25,14 @@ const project: SceneProject = {
   layers: []
 };
 
-function jobResponse(state: "running" | "completed", result: SceneProject | null = null): Response {
+function jobResponse(state: "running" | "completed" | "cancelled", result: SceneProject | null = null): Response {
   return new Response(JSON.stringify({
     jobId: "job-id",
     kind: "inpaint",
     state,
     progress: state === "completed" ? 100 : 42,
-    stage: state === "completed" ? "Complete" : "Redrawing background",
-    message: state === "completed" ? "Local processing finished." : "PowerPaint is working.",
+    stage: state === "completed" ? "Complete" : state === "cancelled" ? "Cancelled" : "Redrawing background",
+    message: state === "completed" ? "Local processing finished." : state === "cancelled" ? "Processing cancelled by the user." : "PowerPaint is working.",
     result
   }), { status: 200, headers: { "Content-Type": "application/json" } });
 }
@@ -65,6 +67,23 @@ describe("job polling", () => {
     await expect(resultPromise).resolves.toEqual(project);
     expect(fetchMock).toHaveBeenCalledTimes(3);
     expect(onProgress).toHaveBeenCalledTimes(2);
+  });
+
+  it("surfaces a cancelled worker as a typed error", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jobResponse("cancelled")));
+
+    await expect(waitForJob("job-id", vi.fn())).rejects.toBeInstanceOf(ProcessingCancelledError);
+  });
+
+  it("posts a cancellation request for the active worker", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jobResponse("cancelled"));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await cancelProcessingJob("job/id");
+
+    expect(result.state).toBe("cancelled");
+    expect(fetchMock.mock.calls[0][0]).toBe("/api/jobs/job%2Fid/cancel");
+    expect(fetchMock.mock.calls[0][1]).toMatchObject({ method: "POST" });
   });
 });
 
@@ -111,7 +130,7 @@ describe("mask updates", () => {
     const composition = new Blob(["composition"], { type: "image/png" });
     const mask = new Blob(["mask"], { type: "image/png" });
 
-    await inpaintProjectTarget("project id", "layer/01", composition, mask, "  rebuild detail  ", vi.fn());
+    await inpaintProjectTarget("project id", "layer/01", composition, mask, "  rebuild detail  ", vi.fn(), undefined, 12);
 
     expect(fetchMock.mock.calls[0][0]).toBe("/api/jobs/projects/project%20id/targets/layer%2F01/inpaint");
     expect(fetchMock.mock.calls[0][1]).toMatchObject({ method: "POST" });
@@ -119,6 +138,7 @@ describe("mask updates", () => {
     expect(form.get("composition")).toBeInstanceOf(Blob);
     expect(form.get("mask")).toBeInstanceOf(Blob);
     expect(form.get("prompt")).toBe("rebuild detail");
+    expect(form.get("steps")).toBe("12");
     expect(fetchMock.mock.calls[1][0]).toBe("/api/jobs/inpaint-job");
   });
 });

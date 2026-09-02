@@ -1,5 +1,6 @@
 import { resolveAssetUrl } from "../lib/api";
-import type { SceneLayer, WorkflowPhase } from "../types";
+import { useAppTranslation } from "../i18n";
+import type { InpaintHistoryState, SceneLayer, WorkflowPhase } from "../types";
 
 interface Props {
   layers: SceneLayer[];
@@ -12,8 +13,12 @@ interface Props {
   inpaintingTargetId: string | null;
   focusedTargetId: string | null;
   layerInpaintAvailable: boolean;
+  maskHistory: Record<string, InpaintHistoryState>;
+  maskHistoryBusy: { layerId: string; action: "undo" | "redo" } | null;
   onEditMask: (layer: SceneLayer) => void;
   onRefineMask: (layer: SceneLayer) => void;
+  onUndoRefine: (layerId: string) => void;
+  onRedoRefine: (layerId: string) => void;
   onConfirmMask: (layer: SceneLayer) => void;
   onInpaintTarget: (layerId: string | null) => void;
   onFocusTarget: (targetId: string) => void;
@@ -31,17 +36,24 @@ export function LayerInspector({
   inpaintingTargetId,
   focusedTargetId,
   layerInpaintAvailable,
+  maskHistory,
+  maskHistoryBusy,
   onEditMask,
   onRefineMask,
+  onUndoRefine,
+  onRedoRefine,
   onConfirmMask,
   onInpaintTarget,
   onFocusTarget,
   onChange
 }: Props) {
+  const { t, layerName } = useAppTranslation();
   const selecting = phase === "selecting";
   const maskOperationActive = editingLayerId !== null || inpaintingTargetId !== null || refiningLayerId !== null || confirmingLayerId !== null;
 
   function update(id: string, change: Partial<SceneLayer>): void {
+    // Keep layer edits immutable; App owns the project snapshot and merges this
+    // small change with the rest of the scene state.
     onChange(layers.map((layer) => (layer.id === id ? { ...layer, ...change } : layer)));
   }
 
@@ -49,15 +61,15 @@ export function LayerInspector({
     <section className="layers-panel">
       <div className="panel-heading">
         <div>
-          <span className="eyebrow">{selecting ? "Proposals" : "Scene stack"}</span>
-          <h2>{layers.length} foreground layers</h2>
+          <span className="eyebrow">{selecting ? t("layers.proposals") : t("layers.sceneStack")}</span>
+          <h2>{t("layers.foregroundCount", { count: layers.length })}</h2>
         </div>
-        <span className="count-badge">{layers.filter((layer) => selecting ? layer.selected : layer.visible).length} on</span>
+        <span className="count-badge">{t("layers.onCount", { count: layers.filter((layer) => selecting ? layer.selected : layer.visible).length })}</span>
       </div>
       <p className="panel-note">
         {selecting
-          ? "Edit rough proposals, optionally refine their alpha, then confirm every enabled foreground mask."
-          : "Near layers move farther. Hide or tune each cutout without rerunning AI."}
+          ? t("layers.selectingHelp")
+          : t("layers.editingHelp")}
       </p>
       <div className="layer-list">
         {!selecting && backgroundUrl && (
@@ -73,21 +85,21 @@ export function LayerInspector({
               <span className="toggle-indicator">BG</span>
             </div>
             <div className="layer-meta">
-              <strong>Background</strong>
-              <span>Background plate / 0 depth</span>
+              <strong>{t("layers.background")}</strong>
+              <span>{t("layers.backgroundDetail")}</span>
             </div>
-            <span className="mask-state confirmed">Scene layer</span>
+            <span className="mask-state confirmed">{t("layers.sceneLayer")}</span>
             <button
               type="button"
               className="mask-edit-button inpaint"
               disabled={maskOperationActive || !layerInpaintAvailable}
-              title={layerInpaintAvailable ? "Paint an area to fully redraw on the background" : "Layer inpainting requires local PowerPaint"}
+              title={layerInpaintAvailable ? t("layers.paintBackgroundTitle") : t("layers.powerpaintRequired")}
               onClick={() => {
                 onFocusTarget("background");
                 onInpaintTarget(null);
               }}
             >
-              {inpaintingTargetId === "background" ? "Painting" : "Inpaint"}
+              {inpaintingTargetId === "background" ? t("layers.painting") : t("layers.inpaint")}
             </button>
           </article>
         )}
@@ -106,7 +118,7 @@ export function LayerInspector({
                 type="button"
                 className="layer-toggle"
                 aria-pressed={enabled}
-                aria-label={`${enabled ? "Disable" : "Enable"} ${layer.name}`}
+                aria-label={t(enabled ? "layers.disable" : "layers.enable", { name: layerName(layer.name) })}
                 disabled={maskOperationActive}
                 onClick={() => {
                   if (!selecting) onFocusTarget(layer.id);
@@ -114,21 +126,21 @@ export function LayerInspector({
                 }}
               >
                 <img src={resolveAssetUrl(selecting ? layer.maskUrl : layer.cutoutUrl)} alt="" />
-                <span className="toggle-indicator">{enabled ? "ON" : "OFF"}</span>
+                <span className="toggle-indicator">{enabled ? t("layers.on") : t("layers.off")}</span>
               </button>
               <div className="layer-meta">
-                <strong>{layer.name}</strong>
-                <span>{layer.kind === "depth-plane" ? "Depth plane" : `${Math.round(layer.confidence * 100)}%`} / {Math.round(layer.depth * 100)} depth</span>
+                <strong>{layerName(layer.name)}</strong>
+                <span>{layer.kind === "depth-plane" ? t("layers.depthPlane") : `${Math.round(layer.confidence * 100)}%`} / {t("layers.depth", { value: Math.round(layer.depth * 100) })}</span>
               </div>
               {selecting && (
                 <span className={`mask-state ${layer.confirmed ? "confirmed" : layer.refinementState}`}>
-                  {layer.confirmed ? "Confirmed" : layer.refinementState === "refined" ? "Refined" : "Rough"}
+                  {layer.confirmed ? t("layers.confirmed") : layer.refinementState === "refined" ? t("layers.refined") : t("layers.rough")}
                 </span>
               )}
               {!selecting && (
                 <div className="scene-layer-controls">
                   <label className="depth-control">
-                    <span className="sr-only">{layer.name} depth</span>
+                    <span className="sr-only">{t("layers.depthLabel", { name: layerName(layer.name) })}</span>
                     <input
                       type="range"
                       min="0.05"
@@ -142,13 +154,13 @@ export function LayerInspector({
                     type="button"
                     className="mask-edit-button inpaint"
                     disabled={!enabled || maskOperationActive || !layerInpaintAvailable}
-                    title={layerInpaintAvailable ? `Paint an area to fully redraw on ${layer.name}` : "Layer inpainting requires local PowerPaint"}
+                    title={layerInpaintAvailable ? t("layers.paintLayerTitle", { name: layerName(layer.name) }) : t("layers.powerpaintRequired")}
                     onClick={() => {
                       onFocusTarget(layer.id);
                       onInpaintTarget(layer.id);
                     }}
                   >
-                    {inpaintingTargetId === layer.id ? "Painting" : "Inpaint"}
+                    {inpaintingTargetId === layer.id ? t("layers.painting") : t("layers.inpaint")}
                   </button>
                 </div>
               )}
@@ -160,24 +172,46 @@ export function LayerInspector({
                     disabled={!enabled || maskOperationActive}
                     onClick={() => onEditMask(layer)}
                   >
-                    {editingLayerId === layer.id ? "Editing" : "Edit"}
+                    {editingLayerId === layer.id ? t("layers.editing") : t("layers.edit")}
                   </button>
                   <button
                     type="button"
                     className="mask-edit-button refine"
                     disabled={!enabled || maskOperationActive || !aiRefineAvailable}
-                    title={aiRefineAvailable ? "Refine this rough mask with local mask-guided processing" : "Refine requires the Local AI engine"}
+                    title={aiRefineAvailable ? t("layers.refineTitle") : t("layers.refineRequiresAI")}
                     onClick={() => onRefineMask(layer)}
                   >
-                    {refiningLayerId === layer.id ? "Refining..." : "Refine"}
+                    {refiningLayerId === layer.id ? t("layers.refining") : t("mask.refine")}
                   </button>
+                  {maskHistory[layer.id] && (maskHistory[layer.id].canUndo || maskHistory[layer.id].canRedo) && (
+                    <>
+                      <button
+                        type="button"
+                        className="mask-edit-button history"
+                        disabled={maskOperationActive || maskHistoryBusy !== null || !maskHistory[layer.id].canUndo}
+                        title={t("layers.undoRefineTitle")}
+                        onClick={() => onUndoRefine(layer.id)}
+                      >
+                        {maskHistoryBusy?.layerId === layer.id && maskHistoryBusy.action === "undo" ? t("layers.undoing") : t("layers.undoRefine")}
+                      </button>
+                      <button
+                        type="button"
+                        className="mask-edit-button history"
+                        disabled={maskOperationActive || maskHistoryBusy !== null || !maskHistory[layer.id].canRedo}
+                        title={t("layers.redoRefineTitle")}
+                        onClick={() => onRedoRefine(layer.id)}
+                      >
+                        {maskHistoryBusy?.layerId === layer.id && maskHistoryBusy.action === "redo" ? t("layers.redoing") : t("layers.redoRefine")}
+                      </button>
+                    </>
+                  )}
                   <button
                     type="button"
                     className="mask-edit-button confirm"
                     disabled={!enabled || maskOperationActive || layer.confirmed}
                     onClick={() => onConfirmMask(layer)}
                   >
-                    {confirmingLayerId === layer.id ? "Confirming..." : layer.confirmed ? "Confirmed" : "Confirm"}
+                    {confirmingLayerId === layer.id ? t("layers.confirming") : layer.confirmed ? t("layers.confirmed") : t("layers.confirm")}
                   </button>
                 </div>
               )}

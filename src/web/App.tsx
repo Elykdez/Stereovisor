@@ -6,19 +6,30 @@ import { SceneCanvas, type SceneCanvasHandle } from "./components/SceneCanvas";
 import {
   analyzeImage,
   analyzeSample,
+  cancelProcessingJob,
   confirmProjectLayer,
   exportProjectPackage,
   getHealth,
   getInpaintHistory,
+  getMaskHistory,
   importProjectPackage,
   inpaintProject,
   inpaintProjectTarget,
+  redoProjectLayerRefine,
   redoProjectTargetInpaint,
   refineProjectLayer,
   undoProjectTargetInpaint,
-  updateProjectMask
+  undoProjectLayerRefine,
+  updateProjectMask,
+  ProcessingCancelledError,
+  setJobPollIntervalMs
 } from "./lib/api";
 import { mergeProjectResult, refreshedAssetUrl } from "./lib/projectAssets";
+import { appLog } from "./lib/logger";
+import { useAppTranslation, type AppTranslate } from "./i18n";
+import { DEFAULT_APP_SETTINGS, loadAppSettings, persistAppSettings, sanitizeAppSettings, type AppSettings } from "./settings";
+import { SettingsDialog } from "./components/SettingsDialog";
+import { AboutDialog } from "./components/AboutDialog";
 import type { CameraState, HealthStatus, InpaintHistoryState, InpaintRefinement, ProcessingProgress, SceneLayer, SceneProject, WorkflowPhase } from "./types";
 import "./styles.css";
 
@@ -30,6 +41,8 @@ interface ActiveMaskEditor extends MaskEditorTarget {
 }
 
 function downloadBlob(blob: Blob, name: string): void {
+  // Browser downloads need a temporary object URL; release it after the click
+  // so repeated exports do not retain the rendered file in memory.
   const link = document.createElement("a");
   const url = URL.createObjectURL(blob);
   link.href = url;
@@ -43,21 +56,26 @@ function downloadBlob(blob: Blob, name: string): void {
   }, 1000);
 }
 
-function phaseLabel(phase: WorkflowPhase): string {
+function phaseLabel(phase: WorkflowPhase, t: AppTranslate): string {
   return {
-    idle: "Waiting for image",
-    analyzing: "Segmenting rough object masks",
-    selecting: "Review and confirm masks",
-    inpainting: "Running local inpaint",
-    editing: "Scene ready"
+    idle: t("phase.waiting"),
+    analyzing: t("phase.segmenting"),
+    selecting: t("phase.reviewing"),
+    inpainting: t("phase.inpainting"),
+    editing: t("phase.ready")
   }[phase];
 }
 
 export default function App() {
+  const { locale, setLocale, t, runtimeText, layerName } = useAppTranslation();
   const [health, setHealth] = useState<HealthStatus | null>(null);
   const [project, setProject] = useState<SceneProject | null>(null);
   const [phase, setPhase] = useState<WorkflowPhase>("idle");
   const [camera, setCamera] = useState<CameraState>(DEFAULT_CAMERA);
+  const [settings, setSettings] = useState<AppSettings>(DEFAULT_APP_SETTINGS);
+  const [showOptions, setShowOptions] = useState(false);
+  const [showAbout, setShowAbout] = useState(false);
+  const [appVersion, setAppVersion] = useState("0.1.0");
   const [moving, setMoving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [refinement, setRefinement] = useState<InpaintRefinement>("lama");
@@ -79,22 +97,76 @@ export default function App() {
   const [focusedInpaintTargetId, setFocusedInpaintTargetId] = useState<string | null>(null);
   const [inpaintHistory, setInpaintHistory] = useState<Record<string, InpaintHistoryState>>({});
   const [inpaintHistoryBusy, setInpaintHistoryBusy] = useState<"undo" | "redo" | null>(null);
+  const [focusedMaskLayerId, setFocusedMaskLayerId] = useState<string | null>(null);
+  const [maskHistory, setMaskHistory] = useState<Record<string, InpaintHistoryState>>({});
+  const [maskHistoryBusy, setMaskHistoryBusy] = useState<{ layerId: string; action: "undo" | "redo" } | null>(null);
   const [processingProgress, setProcessingProgress] = useState<ProcessingProgress | null>(null);
+  const [processingJobId, setProcessingJobId] = useState<string | null>(null);
+  const [cancellingJob, setCancellingJob] = useState(false);
   const [fileOperation, setFileOperation] = useState<"import" | "project" | "video" | "png" | null>(null);
   const canvasRef = useRef<SceneCanvasHandle>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const projectFileRef = useRef<HTMLInputElement>(null);
+  const cameraDefaults: CameraState = {
+    ...DEFAULT_CAMERA,
+    zoom: settings.camera.defaultZoom,
+    strength: settings.camera.defaultStrength
+  };
 
   useEffect(() => {
+    // Settings are loaded before controls become interactive. Applying the
+    // persisted values here also keeps polling, camera defaults, and locale in sync.
+    let cancelled = false;
+    void loadAppSettings().then((loaded) => {
+      if (cancelled) return;
+      setSettings(loaded);
+      setJobPollIntervalMs(loaded.processing.pollIntervalMs);
+      setRefinement(loaded.processing.defaultRefinement);
+      setCamera((current) => ({ ...current, zoom: loaded.camera.defaultZoom, strength: loaded.camera.defaultStrength }));
+      if (locale !== loaded.locale) setLocale(loaded.locale);
+      appLog.info("settings.loaded", { locale: loaded.locale, pollIntervalMs: loaded.processing.pollIntervalMs });
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => window.stereovisor?.onOpenOptions?.(() => setShowOptions(true)), []);
+
+  useEffect(() => window.stereovisor?.onOpenAbout?.(() => {
+    setShowAbout(true);
+    const getAppVersion = window.stereovisor?.getAppVersion;
+    if (getAppVersion) void getAppVersion().then((version) => setAppVersion(version)).catch(() => undefined);
+  }), []);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (!(event.ctrlKey || event.metaKey) || event.altKey || event.shiftKey || event.repeat || event.key !== ",") return;
+      event.preventDefault();
+      setShowOptions(true);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
+
+  useEffect(() => {
+    setSettings((current) => current.locale === locale ? current : { ...current, locale });
+  }, [locale]);
+
+  useEffect(() => {
+    // Health is intentionally checked once on mount; the service reports both
+    // the selected engine and provider readiness used by the UI guards.
     let cancelled = false;
     const load = async () => {
       try {
         const status = await getHealth();
         if (!cancelled) {
           setHealth(status);
+          appLog.info("ui.health-state.updated", { engine: status.activeEngine, device: status.device });
         }
       } catch (requestError) {
         if (!cancelled) {
+          appLog.error("ui.health-state.unavailable", requestError);
           setError(requestError instanceof Error ? requestError.message : "The local vision service is unavailable.");
         }
       }
@@ -107,7 +179,7 @@ export default function App() {
 
   useEffect(() => {
     if (!moving) return;
-    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+    if (settings.appearance.reduceMotion || window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
       setMoving(false);
       return;
     }
@@ -117,14 +189,14 @@ export default function App() {
       const elapsed = (time - started) / 1000;
       setCamera((current) => ({
         ...current,
-        x: Math.sin(elapsed * 0.72) * 0.74,
-        y: Math.sin(elapsed * 0.46 + 0.8) * 0.28
+        x: Math.sin(elapsed * 0.72 * settings.motion.speed) * settings.motion.horizontalAmount,
+        y: Math.sin(elapsed * 0.46 * settings.motion.speed + 0.8) * settings.motion.verticalAmount
       }));
       frame = requestAnimationFrame(tick);
     };
     frame = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(frame);
-  }, [moving]);
+  }, [moving, settings.appearance.reduceMotion, settings.motion]);
 
   useEffect(() => {
     if (!project || phase !== "editing") return;
@@ -135,6 +207,21 @@ export default function App() {
       })
       .catch(() => {
         if (!cancelled) setInpaintHistory({});
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [project?.id, phase]);
+
+  useEffect(() => {
+    if (!project || phase !== "selecting") return;
+    let cancelled = false;
+    void getMaskHistory(project.id)
+      .then((history) => {
+        if (!cancelled) setMaskHistory(Object.fromEntries(history.map((state) => [state.targetId, state])));
+      })
+      .catch(() => {
+        if (!cancelled) setMaskHistory({});
       });
     return () => {
       cancelled = true;
@@ -158,9 +245,32 @@ export default function App() {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [project, phase, maskEditor, focusedInpaintTargetId, inpaintHistory, inpaintHistoryBusy]);
 
+  useEffect(() => {
+    if (!project || phase !== "selecting" || maskEditor || refiningLayerId || confirmingLayerId || !focusedMaskLayerId || maskHistoryBusy) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (!(event.ctrlKey || event.metaKey) || event.altKey || event.repeat) return;
+      const eventTarget = event.target as HTMLElement | null;
+      if (eventTarget?.closest("textarea, select, [contenteditable='true'], input:not([type='range']):not([type='checkbox']):not([type='radio'])")) return;
+      const redo = event.key.toLowerCase() === "y" || (event.key.toLowerCase() === "z" && event.shiftKey);
+      const undo = event.key.toLowerCase() === "z" && !event.shiftKey;
+      const state = maskHistory[focusedMaskLayerId];
+      if ((!undo || !state?.canUndo) && (!redo || !state?.canRedo)) return;
+      event.preventDefault();
+      void restoreLayerRefine(focusedMaskLayerId, redo ? "redo" : "undo");
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [project, phase, maskEditor, refiningLayerId, confirmingLayerId, focusedMaskLayerId, maskHistory, maskHistoryBusy]);
+
   async function process(
-    operation: (onProgress: (progress: ProcessingProgress) => void) => Promise<SceneProject>
+    operation: (
+      onProgress: (progress: ProcessingProgress) => void,
+      onJobStarted: (jobId: string) => void
+    ) => Promise<SceneProject>
   ): Promise<void> {
+    // A new analysis invalidates all transient editor/history state. Reset it
+    // before changing phase so stale controls cannot target the next project.
+    appLog.info("workflow.analysis.started");
     setError(null);
     setMoving(false);
     setLayerInpaintPrompt("");
@@ -168,30 +278,68 @@ export default function App() {
     setBackgroundRetouchPending(false);
     setFocusedInpaintTargetId(null);
     setInpaintHistory({});
+    setFocusedMaskLayerId(null);
+    setMaskHistory({});
+    setMaskHistoryBusy(null);
+    setProcessingJobId(null);
+    setCancellingJob(false);
     setMaskBlurRadius(0);
     setMaskEditor(null);
     setPhase("analyzing");
     setProcessingProgress({ state: "queued", progress: 0, stage: "Queued", message: "Preparing the local AI job." });
     try {
-      const result = await operation(setProcessingProgress);
+      const result = await operation(setProcessingProgress, setProcessingJobId);
       setProject(result);
-      setCamera(DEFAULT_CAMERA);
+      setCamera(cameraDefaults);
       setPhase("selecting");
+      appLog.info("workflow.analysis.completed", { projectId: result.id, layers: result.layers.length, engine: result.engine });
     } catch (operationError) {
       setPhase(project ? "editing" : "idle");
-      setError(operationError instanceof Error ? operationError.message : "Image analysis failed.");
+      if (operationError instanceof ProcessingCancelledError) {
+        appLog.info("workflow.analysis.cancelled");
+      } else {
+        appLog.error("workflow.analysis.failed", operationError);
+      }
+      setError(operationError instanceof ProcessingCancelledError ? null : operationError instanceof Error ? operationError.message : "Image analysis failed.");
     } finally {
       setProcessingProgress(null);
+      setProcessingJobId(null);
+      setCancellingJob(false);
     }
   }
 
   async function onFile(file: File | undefined): Promise<void> {
     if (!file) return;
-    await process((onProgress) => analyzeImage(file, onProgress));
+    // Keep the density choice with the request so the service and the visible
+    // settings remain a single source of truth for this analysis.
+    await process((onProgress, onJobStarted) => analyzeImage(file, onProgress, onJobStarted, settings.processing.segmentationDensity));
+  }
+
+  async function cancelProcessing(): Promise<void> {
+    const jobId = processingJobId;
+    if (!jobId || cancellingJob) return;
+    setCancellingJob(true);
+    setError(null);
+    appLog.info("workflow.analysis-cancel.requested", { jobId });
+    try {
+      const cancelled = await cancelProcessingJob(jobId);
+      setProcessingProgress({
+        state: cancelled.state,
+        progress: cancelled.progress,
+        stage: cancelled.stage,
+        message: cancelled.message
+      });
+    } catch (operationError) {
+      setCancellingJob(false);
+      appLog.error("workflow.analysis-cancel.failed", operationError, { jobId });
+      setError(operationError instanceof Error ? operationError.message : "The processing job could not be cancelled.");
+    }
   }
 
   async function buildScene(): Promise<void> {
     if (!project) return;
+    // These checks mirror the service invariants: selected layers must be
+    // confirmed, and PowerPaint needs either a prompt or its local captioner.
     if (maskEditor || refiningLayerId) {
       setError("Finish the active mask edit or refinement before inpainting.");
       return;
@@ -215,9 +363,22 @@ export default function App() {
     setShowInpaintMask(false);
     setPhase("inpainting");
     setProcessingProgress({ state: "queued", progress: 0, stage: "Queued", message: "Preparing the local inpainting job." });
+    setProcessingJobId(null);
+    setCancellingJob(false);
+    appLog.info("workflow.scene-build.started", { projectId: project.id, layerCount: selected.length, refinement });
     try {
-      const result = await inpaintProject(project.id, selected, refinement, inpaintPrompt, setProcessingProgress);
+      const result = await inpaintProject(
+        project.id,
+        selected,
+        refinement,
+        inpaintPrompt,
+        setProcessingProgress,
+        setProcessingJobId,
+        settings.processing.inpaintingSteps
+      );
       const selectedIds = new Set(selected);
+      // Keep user layer ordering/visibility while replacing only generated
+      // assets and metadata returned by the service.
       const mergedResult = mergeProjectResult(project, result);
       const merged = result.backgroundUrl
         ? { ...mergedResult, backgroundUrl: refreshedAssetUrl(result.backgroundUrl) }
@@ -229,11 +390,19 @@ export default function App() {
       setBackgroundRetouchPending(false);
       setFocusedInpaintTargetId("background");
       setPhase("editing");
+      appLog.info("workflow.scene-build.completed", { projectId: result.id, provider: result.inpaintProvider });
     } catch (operationError) {
       setPhase("selecting");
-      setError(operationError instanceof Error ? operationError.message : "Background inpainting failed.");
+      if (operationError instanceof ProcessingCancelledError) {
+        appLog.info("workflow.scene-build.cancelled", { projectId: project.id });
+      } else {
+        appLog.error("workflow.scene-build.failed", operationError, { projectId: project.id });
+      }
+      setError(operationError instanceof ProcessingCancelledError ? null : operationError instanceof Error ? operationError.message : "Background inpainting failed.");
     } finally {
       setProcessingProgress(null);
+      setProcessingJobId(null);
+      setCancellingJob(false);
     }
   }
 
@@ -244,7 +413,7 @@ export default function App() {
   function editLayerMask(layer: SceneLayer): void {
     setError(null);
     setMoving(false);
-    setCamera(DEFAULT_CAMERA);
+    setCamera(cameraDefaults);
     setShowInpaintMask(false);
     setMaskBrushMode("add");
     setMaskBlurRadius(0);
@@ -252,6 +421,7 @@ export default function App() {
     setMaskReady(false);
     setMaskCanUndo(false);
     setMaskCanRedo(false);
+    setFocusedMaskLayerId(layer.id);
     setMaskEditor({ kind: "layer", layerId: layer.id, key: `layer:${layer.id}`, name: layer.name, maskUrl: layer.maskUrl });
   }
 
@@ -259,7 +429,7 @@ export default function App() {
     if (!project) return;
     setError(null);
     setMoving(false);
-    setCamera(DEFAULT_CAMERA);
+    setCamera(cameraDefaults);
     setShowInpaintMask(false);
     setMaskBrushMode("add");
     setMaskBlurRadius(0);
@@ -291,7 +461,7 @@ export default function App() {
     setFocusedInpaintTargetId(layerId ?? "background");
     setError(null);
     setMoving(false);
-    setCamera(DEFAULT_CAMERA);
+    setCamera(cameraDefaults);
     setShowInpaintMask(false);
     setMaskBrushMode("add");
     setMaskBlurRadius(0);
@@ -326,16 +496,25 @@ export default function App() {
     setError(null);
     setMoving(false);
     setShowInpaintMask(false);
+    setFocusedMaskLayerId(layer.id);
     setRefiningLayerId(layer.id);
     setProcessingProgress({ state: "queued", progress: 0, stage: "Queued", message: `Preparing ${layer.name} for local refinement.` });
+    setProcessingJobId(null);
+    setCancellingJob(false);
+    appLog.info("workflow.mask-refine.started", { projectId: project.id, layerId: layer.id });
     try {
-      const result = await refineProjectLayer(project.id, layer.id, setProcessingProgress);
+      const result = await refineProjectLayer(project.id, layer.id, setProcessingProgress, setProcessingJobId);
       setProject(mergeProjectResult(project, result, { refreshLayerId: layer.id }));
+      await refreshMaskHistory(project.id);
+      appLog.info("workflow.mask-refine.completed", { projectId: project.id, layerId: layer.id });
     } catch (operationError) {
-      setError(operationError instanceof Error ? operationError.message : "The selected mask could not be refined.");
+      appLog.error("workflow.mask-refine.failed", operationError, { projectId: project.id, layerId: layer.id });
+      setError(operationError instanceof ProcessingCancelledError ? null : operationError instanceof Error ? operationError.message : "The selected mask could not be refined.");
     } finally {
       setRefiningLayerId(null);
       setProcessingProgress(null);
+      setProcessingJobId(null);
+      setCancellingJob(false);
     }
   }
 
@@ -343,10 +522,13 @@ export default function App() {
     if (!project) return;
     setError(null);
     setConfirmingLayerId(layer.id);
+    appLog.info("workflow.mask-confirm.started", { projectId: project.id, layerId: layer.id });
     try {
       const result = await confirmProjectLayer(project.id, layer.id);
       setProject(mergeProjectResult(project, result));
+      appLog.info("workflow.mask-confirm.completed", { projectId: project.id, layerId: layer.id });
     } catch (operationError) {
+      appLog.error("workflow.mask-confirm.failed", operationError, { projectId: project.id, layerId: layer.id });
       setError(operationError instanceof Error ? operationError.message : "The selected mask could not be confirmed.");
     } finally {
       setConfirmingLayerId(null);
@@ -359,6 +541,7 @@ export default function App() {
     const retouchingBuiltBackground = phase === "editing" && maskEditor.kind === "extra" && Boolean(project.backgroundUrl);
     setError(null);
     setMaskSaving(true);
+    appLog.info("workflow.mask-save.started", { projectId: project.id, target: maskEditor.layerId ?? "extra" });
     try {
       const mask = await canvasRef.current.exportEditedMask();
       const result = await updateProjectMask(project.id, maskEditor.layerId, mask);
@@ -367,12 +550,19 @@ export default function App() {
         refreshExtra: maskEditor.kind === "extra"
       }));
       cancelMaskEdit();
+      if (maskEditor.layerId) {
+        await refreshMaskHistory(project.id);
+      }
       if (retouchingBuiltBackground) {
+        // Any mask change invalidates the existing plate; force the user back
+        // through selection before allowing another build.
         setBackgroundRetouchPending(true);
         setPhase("selecting");
       }
+      appLog.info("workflow.mask-save.completed", { projectId: project.id, target: maskEditor.layerId ?? "extra", rebuildRequired: retouchingBuiltBackground });
       return true;
     } catch (operationError) {
+      appLog.error("workflow.mask-save.failed", operationError, { projectId: project.id, target: maskEditor.layerId ?? "extra" });
       setError(operationError instanceof Error ? operationError.message : "The edited mask could not be saved.");
       return false;
     } finally {
@@ -392,6 +582,7 @@ export default function App() {
       : "background";
     setError(null);
     setMaskSaving(true);
+    appLog.info("workflow.target-inpaint.started", { projectId: project.id, target: targetLayerId ?? "background" });
     try {
       const [mask, composition] = await Promise.all([
         canvasRef.current.exportEditedMask(),
@@ -405,13 +596,17 @@ export default function App() {
         stage: "Queued",
         message: `Preparing ${targetName} for full-redraw inpainting.`
       });
+      setProcessingJobId(null);
+      setCancellingJob(false);
       const result = await inpaintProjectTarget(
         project.id,
         targetLayerId,
         composition,
         mask,
         layerInpaintPrompt,
-        setProcessingProgress
+        setProcessingProgress,
+        setProcessingJobId,
+        settings.processing.inpaintingSteps
       );
       let merged = mergeProjectResult(project, result, { refreshLayerId: targetLayerId });
       if (targetLayerId === null && result.backgroundUrl) {
@@ -420,18 +615,54 @@ export default function App() {
       setProject(merged);
       setFocusedInpaintTargetId(targetLayerId ?? "background");
       setPhase("editing");
+      appLog.info("workflow.target-inpaint.completed", { projectId: project.id, target: targetLayerId ?? "background" });
     } catch (operationError) {
       setPhase("editing");
-      setError(operationError instanceof Error ? operationError.message : "The selected layer could not be inpainted.");
+      if (operationError instanceof ProcessingCancelledError) {
+        appLog.info("workflow.target-inpaint.cancelled", { projectId: project.id, target: targetLayerId ?? "background" });
+      } else {
+        appLog.error("workflow.target-inpaint.failed", operationError, { projectId: project.id, target: targetLayerId ?? "background" });
+      }
+      setError(operationError instanceof ProcessingCancelledError ? null : operationError instanceof Error ? operationError.message : "The selected layer could not be inpainted.");
     } finally {
       setMaskSaving(false);
       setProcessingProgress(null);
+      setProcessingJobId(null);
+      setCancellingJob(false);
     }
   }
 
   async function refreshInpaintHistory(projectId: string): Promise<void> {
     const history = await getInpaintHistory(projectId);
     setInpaintHistory(Object.fromEntries(history.map((state) => [state.targetId, state])));
+  }
+
+  async function refreshMaskHistory(projectId: string): Promise<void> {
+    const history = await getMaskHistory(projectId);
+    setMaskHistory(Object.fromEntries(history.map((state) => [state.targetId, state])));
+  }
+
+  async function restoreLayerRefine(layerId: string, action: "undo" | "redo"): Promise<void> {
+    if (!project || maskHistoryBusy || maskEditor || refiningLayerId || confirmingLayerId) return;
+    const state = maskHistory[layerId];
+    if ((action === "undo" && !state?.canUndo) || (action === "redo" && !state?.canRedo)) return;
+    setFocusedMaskLayerId(layerId);
+    setError(null);
+    setMaskHistoryBusy({ layerId, action });
+    appLog.info("workflow.mask-history.started", { projectId: project.id, layerId, action });
+    try {
+      const result = action === "undo"
+        ? await undoProjectLayerRefine(project.id, layerId)
+        : await redoProjectLayerRefine(project.id, layerId);
+      setProject(mergeProjectResult(project, result, { refreshLayerId: layerId }));
+      await refreshMaskHistory(project.id);
+      appLog.info("workflow.mask-history.completed", { projectId: project.id, layerId, action });
+    } catch (operationError) {
+      appLog.error("workflow.mask-history.failed", operationError, { projectId: project.id, layerId, action });
+      setError(operationError instanceof Error ? operationError.message : `The mask refinement could not be ${action === "undo" ? "undone" : "redone"}.`);
+    } finally {
+      setMaskHistoryBusy(null);
+    }
   }
 
   async function restoreFocusedInpaint(action: "undo" | "redo"): Promise<void> {
@@ -442,6 +673,7 @@ export default function App() {
     setError(null);
     setMoving(false);
     setInpaintHistoryBusy(action);
+    appLog.info("workflow.inpaint-history.started", { projectId: project.id, target: focusedInpaintTargetId, action });
     try {
       const result = action === "undo"
         ? await undoProjectTargetInpaint(project.id, targetLayerId)
@@ -452,7 +684,9 @@ export default function App() {
       }
       setProject(merged);
       await refreshInpaintHistory(project.id);
+      appLog.info("workflow.inpaint-history.completed", { projectId: project.id, target: focusedInpaintTargetId, action });
     } catch (operationError) {
+      appLog.error("workflow.inpaint-history.failed", operationError, { projectId: project.id, target: focusedInpaintTargetId, action });
       setError(operationError instanceof Error ? operationError.message : `The layer inpaint could not be ${action === "undo" ? "undone" : "redone"}.`);
     } finally {
       setInpaintHistoryBusy(null);
@@ -483,9 +717,12 @@ export default function App() {
   ): Promise<void> {
     setError(null);
     setFileOperation(operation);
+    appLog.info("workflow.file-operation.started", { operation });
     try {
       await action();
+      appLog.info("workflow.file-operation.completed", { operation });
     } catch (operationError) {
+      appLog.error("workflow.file-operation.failed", operationError, { operation });
       setError(operationError instanceof Error ? operationError.message : "The file operation failed.");
     } finally {
       setFileOperation(null);
@@ -501,11 +738,18 @@ export default function App() {
   }
 
   function applyImportedProject(importedProject: SceneProject, importedCamera: CameraState): void {
+    // Imported projects replace the complete editor snapshot, including the
+    // camera and provider metadata; clear all transient interaction state first.
     setMoving(false);
     setShowInpaintMask(false);
     setBackgroundRetouchPending(false);
     setFocusedInpaintTargetId(importedProject.backgroundUrl ? "background" : null);
     setInpaintHistory({});
+    setFocusedMaskLayerId(null);
+    setMaskHistory({});
+    setMaskHistoryBusy(null);
+    setProcessingJobId(null);
+    setCancellingJob(false);
     setMaskBlurRadius(0);
     setMaskEditor(null);
     setProject(importedProject);
@@ -514,6 +758,7 @@ export default function App() {
     setLayerInpaintPrompt("");
     setRefinement(importedProject.inpaintProvider === "powerpaint" ? "powerpaint" : "lama");
     setPhase(importedProject.backgroundUrl ? "editing" : "selecting");
+    appLog.info("workflow.project-import.applied", { projectId: importedProject.id, layers: importedProject.layers.length, hasBackground: Boolean(importedProject.backgroundUrl) });
   }
 
   async function chooseProjectFile(): Promise<void> {
@@ -553,11 +798,12 @@ export default function App() {
   }
 
   function resetProject(): void {
-    if (!window.confirm("Discard the current editor state and return to the image upload screen?")) return;
+    if (!window.confirm(t("error.confirmReset"))) return;
+    appLog.info("workflow.project-reset");
     setMoving(false);
     setProject(null);
     setPhase("idle");
-    setCamera(DEFAULT_CAMERA);
+    setCamera(cameraDefaults);
     setError(null);
     setInpaintPrompt("");
     setLayerInpaintPrompt("");
@@ -575,9 +821,37 @@ export default function App() {
     setFocusedInpaintTargetId(null);
     setInpaintHistory({});
     setInpaintHistoryBusy(null);
-    setRefinement("lama");
+    setFocusedMaskLayerId(null);
+    setMaskHistory({});
+    setMaskHistoryBusy(null);
+    setProcessingJobId(null);
+    setCancellingJob(false);
+    setRefinement(settings.processing.defaultRefinement);
     if (fileRef.current) fileRef.current.value = "";
     if (projectFileRef.current) projectFileRef.current.value = "";
+  }
+
+  async function saveSettings(next: AppSettings): Promise<void> {
+    const normalized = sanitizeAppSettings(next);
+    appLog.info("settings.save.started", { locale: normalized.locale, pollIntervalMs: normalized.processing.pollIntervalMs });
+    await persistAppSettings(normalized);
+    setSettings(normalized);
+    setJobPollIntervalMs(normalized.processing.pollIntervalMs);
+    setRefinement(normalized.processing.defaultRefinement);
+    if (!project) setCamera((current) => ({ ...current, zoom: normalized.camera.defaultZoom, strength: normalized.camera.defaultStrength }));
+    if (locale !== normalized.locale) setLocale(normalized.locale);
+    setShowOptions(false);
+    appLog.info("settings.save.completed", { locale: normalized.locale });
+  }
+
+  function changeRefinement(next: InpaintRefinement): void {
+    appLog.info("settings.refinement.changed", { refinement: next });
+    setRefinement(next);
+    const nextSettings = sanitizeAppSettings({ ...settings, processing: { ...settings.processing, defaultRefinement: next } });
+    setSettings(nextSettings);
+    void persistAppSettings(nextSettings).catch((saveError) => {
+      setError(saveError instanceof Error ? saveError.message : t("settings.saveFailed"));
+    });
   }
 
   const selectedLayers = project?.layers.filter((layer) => layer.selected) ?? [];
@@ -594,11 +868,11 @@ export default function App() {
   const maskOperationActive = maskEditor !== null || refiningLayerId !== null || confirmingLayerId !== null;
   const inpaintDisabled = maskOperationActive || unconfirmedMaskCount > 0 || selectedLayers.length === 0;
   const inpaintLabel = unconfirmedMaskCount > 0
-    ? `Confirm ${unconfirmedMaskCount} mask${unconfirmedMaskCount === 1 ? "" : "s"}`
+    ? t("build.confirmMasks", { count: unconfirmedMaskCount })
     : backgroundRetouchPending
-      ? "Rebuild background"
-      : "Inpaint holes";
-  const busy = phase === "analyzing" || phase === "inpainting" || fileOperation !== null || maskSaving || refiningLayerId !== null || confirmingLayerId !== null || inpaintHistoryBusy !== null;
+      ? t("build.rebuildBackground")
+      : t("build.inpaintHoles");
+  const busy = phase === "analyzing" || phase === "inpainting" || processingJobId !== null || fileOperation !== null || maskSaving || refiningLayerId !== null || confirmingLayerId !== null || inpaintHistoryBusy !== null || maskHistoryBusy !== null;
   const engine = project?.engine ?? health?.activeEngine;
 
   return (
@@ -606,55 +880,27 @@ export default function App() {
       event.preventDefault();
       void onFile(event.dataTransfer.files[0]);
     }}>
-      <header className="topbar">
-        <div className="brand-block">
-          <img className="brand-mark" src="./app-icon.png" alt="" />
-          <div>
-            <span className="eyebrow">Local depth studio</span>
-            <h1>Stereovisor</h1>
-          </div>
-        </div>
-        <div className="topbar-actions">
-          <button type="button" className="topbar-file-button" disabled={busy} onClick={() => void chooseProjectFile()}>
-            {fileOperation === "import" ? "Importing..." : "Import project"}
-          </button>
-          <span className={`engine-badge ${engine === "ai" ? "ai" : "preview"}`}>
-            <span /> {engine === "ai" ? "Local AI" : "Preview engine"}
-          </span>
-          {project && (
-            <>
-              <button type="button" className="export-button subtle" disabled={busy} onClick={resetProject}>
-                Reset project
-              </button>
-              <button type="button" className="export-button subtle" disabled={busy} onClick={() => void saveProjectPackage()}>
-                {fileOperation === "project" ? "Packing..." : "Project file"}
-              </button>
-            </>
-          )}
-          {phase === "editing" && (
-            <>
-              <button type="button" className="export-button subtle" disabled={busy} onClick={() => void saveCanvas("video")}>
-                {fileOperation === "video" ? "Rendering..." : "Demo MP4"}
-              </button>
-              <button type="button" className="export-button" disabled={busy} onClick={() => void saveCanvas("png")}>
-                {fileOperation === "png" ? "Saving..." : "PNG"}
-              </button>
-            </>
-          )}
-        </div>
-      </header>
-
       <aside className="workflow-rail">
-        <div className="rail-index">01</div>
+        <div className="rail-heading">
+          <div className="brand-block">
+            <img className="brand-mark" src="./app-icon.png" alt="" />
+            <div>
+              <span className="eyebrow">{t("brand.tagline")}</span>
+              <h1>Stereovisor</h1>
+            </div>
+          </div>
+          <div className="rail-index">01</div>
+        </div>
         <section className="source-section">
-          <span className="eyebrow">Source</span>
-          <h2>One image.<br />A scene with depth.</h2>
-          <p>Separate objects, rebuild what sits behind them, then direct a virtual camera.</p>
+          <span className="eyebrow">{t("source.title")}</span>
+          <h2>{t("source.headlineFirst")}<br />{t("source.headlineSecond")}</h2>
+          <p>{t("source.description")}</p>
           <input
             ref={fileRef}
             className="sr-only"
             type="file"
             accept="image/png,image/jpeg,image/webp"
+            aria-label={t("source.imageFileInput")}
             onChange={(event) => void onFile(event.target.files?.[0])}
           />
           <input
@@ -662,30 +908,46 @@ export default function App() {
             className="sr-only"
             type="file"
             accept=".stereovisor,application/zip"
+            aria-label={t("file.projectFileInput")}
             onChange={(event) => {
               void openProjectFile(event.target.files?.[0]);
               event.currentTarget.value = "";
             }}
           />
           <button type="button" className="primary-button" disabled={busy} onClick={() => fileRef.current?.click()}>
-            Open image
+            {t("source.openImage")}
           </button>
-          <button type="button" className="secondary-button" disabled={busy} onClick={() => void process(analyzeSample)}>
-            Use sample scene
+          <button type="button" className="secondary-button" disabled={busy} onClick={() => void chooseProjectFile()}>
+            {fileOperation === "import" ? t("file.importing") : t("file.importProject")}
+          </button>
+          <button
+            type="button"
+            className="secondary-button"
+            disabled={busy}
+            onClick={() => void process((onProgress, onJobStarted) => analyzeSample(
+              onProgress,
+              onJobStarted,
+              settings.processing.segmentationDensity,
+            ))}
+          >
+            {t("source.sample")}
           </button>
         </section>
         <section className="pipeline-readout" aria-live="polite">
-          <span className="eyebrow">Pipeline</span>
+          <span className="eyebrow">{t("pipeline.title")}</span>
           <ol>
-            <li className={phase !== "idle" ? "active" : ""}><span>1</span> Import image</li>
-            <li className={phase !== "idle" ? "active" : ""}><span>2</span> Segment objects</li>
-            <li className={["selecting", "inpainting", "editing"].includes(phase) ? "active" : ""}><span>3</span> Refine + confirm</li>
-            <li className={["inpainting", "editing"].includes(phase) ? "active" : ""}><span>4</span> Build scene</li>
+            <li className={phase !== "idle" ? "active" : ""}><span>1</span> {t("pipeline.import")}</li>
+            <li className={phase !== "idle" ? "active" : ""}><span>2</span> {t("pipeline.segment")}</li>
+            <li className={["selecting", "inpainting", "editing"].includes(phase) ? "active" : ""}><span>3</span> {t("pipeline.refine")}</li>
+            <li className={["inpainting", "editing"].includes(phase) ? "active" : ""}><span>4</span> {t("pipeline.build")}</li>
           </ol>
         </section>
         <div className="local-note">
           <span className="local-pulse" />
-          <div><strong>Local only</strong><small>No image upload or cloud inference</small></div>
+          <div>
+            <strong>{t("privacy.title")} / {engine === "ai" ? t("engine.localAI") : t("engine.preview")}</strong>
+            <small>{t("privacy.detail")}</small>
+          </div>
         </div>
       </aside>
 
@@ -693,15 +955,25 @@ export default function App() {
         {processingProgress && (
           <div className="processing-status" aria-live="polite">
             <div className="processing-copy">
-              <span className="eyebrow">Local processing</span>
-              <strong>{processingProgress.stage}</strong>
-              <span>{processingProgress.message}</span>
+              <span className="eyebrow">{t("processing.local")}</span>
+              <strong>{runtimeText(processingProgress.stage)}</strong>
+              <span>{runtimeText(processingProgress.message)}</span>
             </div>
-            <output>{processingProgress.progress}%</output>
+            <div className="processing-actions">
+              <output>{processingProgress.progress}%</output>
+              <button
+                type="button"
+                className="processing-cancel"
+                disabled={!processingJobId || cancellingJob || processingProgress.state === "cancelled"}
+                onClick={() => void cancelProcessing()}
+              >
+                {cancellingJob ? t("processing.cancelling") : t("processing.cancel")}
+              </button>
+            </div>
             <div
               className="progress-track"
               role="progressbar"
-              aria-label={processingProgress.stage}
+              aria-label={runtimeText(processingProgress.stage)}
               aria-valuemin={0}
               aria-valuemax={100}
               aria-valuenow={processingProgress.progress}
@@ -714,10 +986,28 @@ export default function App() {
           <>
             <div className="stage-header">
               <div>
-                <span className="eyebrow">Composition</span>
+                <span className="eyebrow">{t("composition.title")}</span>
                 <strong>{project.width} x {project.height}</strong>
               </div>
               <div className="stage-status">
+                <div className="stage-actions">
+                  <button type="button" className="secondary-button compact" disabled={busy} onClick={resetProject}>
+                    {t("file.resetProject")}
+                  </button>
+                  <button type="button" className="secondary-button compact" disabled={busy} onClick={() => void saveProjectPackage()}>
+                    {fileOperation === "project" ? t("file.packing") : t("file.projectFile")}
+                  </button>
+                  {phase === "editing" && (
+                    <>
+                      <button type="button" className="secondary-button compact" disabled={busy} onClick={() => void saveCanvas("video")}>
+                        {fileOperation === "video" ? t("file.rendering") : t("file.demoVideo")}
+                      </button>
+                      <button type="button" className="primary-button compact" disabled={busy} onClick={() => void saveCanvas("png")}>
+                        {fileOperation === "png" ? t("file.saving") : t("file.png")}
+                      </button>
+                    </>
+                  )}
+                </div>
                 {phase === "selecting" && (
                   <button
                     type="button"
@@ -732,7 +1022,7 @@ export default function App() {
                     {inpaintLabel}
                   </button>
                 )}
-                <span className="phase-label"><i className={busy ? "working" : ""} /> {backgroundRetouchPending && phase === "selecting" ? "Retouch mask ready to rebuild" : phaseLabel(phase)}</span>
+                <span className="phase-label"><i className={busy ? "working" : ""} /> {backgroundRetouchPending && phase === "selecting" ? t("phase.retouchReady") : phaseLabel(phase, t)}</span>
               </div>
             </div>
             <SceneCanvas
@@ -757,24 +1047,24 @@ export default function App() {
               onCameraChange={setCamera}
             />
             {(phase === "selecting" || phase === "editing") && maskEditor && (
-              <div className="mask-toolbar" role="region" aria-label="Mask brush controls">
+              <div className="mask-toolbar" role="region" aria-label={t("mask.controls")}>
                 <div className="mask-toolbar-title">
-                  <span className="eyebrow">Mask brush</span>
-                  <strong>{maskEditor.name}</strong>
+                  <span className="eyebrow">{t("mask.brush")}</span>
+                  <strong>{layerName(maskEditor.name)}</strong>
                   <span>{maskEditor.kind === "inpaint"
-                    ? "Paint pixels to fully regenerate using the entire composition as context."
+                    ? t("mask.inpaintHelp")
                     : maskEditor.kind === "extra"
                     ? phase === "editing"
-                      ? "Paint anything else that should be regenerated on the background plate."
-                      : "Expands the background inpaint area."
-                    : "Updates this foreground cutout."}</span>
+                      ? t("mask.extraRetouchHelp")
+                      : t("mask.extraHelp")
+                    : t("mask.layerHelp")}</span>
                 </div>
-                <div className="brush-modes" aria-label="Brush mode">
-                  <button type="button" className={maskBrushMode === "add" ? "active" : ""} onClick={() => setMaskBrushMode("add")}>Add</button>
-                  <button type="button" className={maskBrushMode === "erase" ? "active" : ""} onClick={() => setMaskBrushMode("erase")}>Erase</button>
+                <div className="brush-modes" aria-label={t("mask.brushMode")}>
+                  <button type="button" className={maskBrushMode === "add" ? "active" : ""} onClick={() => setMaskBrushMode("add")}>{t("mask.add")}</button>
+                  <button type="button" className={maskBrushMode === "erase" ? "active" : ""} onClick={() => setMaskBrushMode("erase")}>{t("mask.erase")}</button>
                 </div>
                 <label className="brush-size-control">
-                  <span>Size</span>
+                  <span>{t("mask.size")}</span>
                   <input
                     type="range"
                     min="6"
@@ -786,7 +1076,7 @@ export default function App() {
                   <output>{maskBrushSize}px</output>
                 </label>
                 <label className="brush-size-control blur-control">
-                  <span>Edge blur</span>
+                  <span>{t("mask.edgeBlur")}</span>
                   <input
                     type="range"
                     min="0"
@@ -797,24 +1087,24 @@ export default function App() {
                   />
                   <output>{maskBlurRadius}px</output>
                 </label>
-                <div className="brush-history" aria-label="Brush history">
-                  <button type="button" disabled={!maskCanUndo || maskSaving} onClick={() => canvasRef.current?.undoEditedMask()} title="Undo brush stroke (Ctrl+Z)">Undo</button>
-                  <button type="button" disabled={!maskCanRedo || maskSaving} onClick={() => canvasRef.current?.redoEditedMask()} title="Redo brush stroke (Ctrl+Shift+Z or Ctrl+Y)">Redo</button>
+                <div className="brush-history" aria-label={t("mask.history")}>
+                  <button type="button" disabled={!maskCanUndo || maskSaving} onClick={() => canvasRef.current?.undoEditedMask()} title={t("mask.undoTitle")}>{t("mask.undo")}</button>
+                  <button type="button" disabled={!maskCanRedo || maskSaving} onClick={() => canvasRef.current?.redoEditedMask()} title={t("mask.redoTitle")}>{t("mask.redo")}</button>
                 </div>
-                <button type="button" className="text-button" disabled={!maskHasChanges || maskSaving} onClick={resetActiveMask}>Reset</button>
-                <button type="button" className="secondary-button compact" disabled={maskSaving} onClick={cancelMaskEdit}>Cancel</button>
+                <button type="button" className="text-button" disabled={!maskHasChanges || maskSaving} onClick={resetActiveMask}>{t("mask.reset")}</button>
+                <button type="button" className="secondary-button compact" disabled={maskSaving} onClick={cancelMaskEdit}>{t("mask.cancel")}</button>
                 {maskEditor.kind === "layer" && activeEditedLayer && project.engine === "ai" && (
                   <button type="button" className="secondary-button compact refine-action" disabled={!maskReady || maskSaving} onClick={() => void refineActiveMask()}>
-                    {maskDirty ? "Apply + refine" : "Refine"}
+                    {maskDirty ? t("mask.applyRefine") : t("mask.refine")}
                   </button>
                 )}
                 {maskEditor.kind === "inpaint" ? (
                   <button type="button" className="primary-button compact" disabled={!maskReady || !maskDirty || maskSaving} onClick={() => void inpaintActiveTarget()}>
-                    {maskSaving ? "Starting..." : "Inpaint layer"}
+                    {maskSaving ? t("mask.starting") : t("mask.inpaintLayer")}
                   </button>
                 ) : (
                   <button type="button" className="primary-button compact" disabled={!maskReady || !maskHasChanges || maskSaving} onClick={() => void applyMaskEdit()}>
-                    {maskSaving ? "Saving..." : "Apply mask"}
+                    {maskSaving ? t("mask.applying") : t("mask.apply")}
                   </button>
                 )}
               </div>
@@ -825,18 +1115,18 @@ export default function App() {
                 moving={moving}
                 onChange={(value) => { setMoving(false); setCamera(value); }}
                 onToggleMotion={() => setMoving((value) => !value)}
-                onReset={() => { setMoving(false); setCamera(DEFAULT_CAMERA); }}
+                onReset={() => { setMoving(false); setCamera(cameraDefaults); }}
               />
             )}
           </>
         ) : (
           <button type="button" className="empty-stage" onClick={() => fileRef.current?.click()} disabled={busy}>
             <span className="empty-orbit"><i /><i /><i /></span>
-            <strong>{busy ? "Analyzing image" : "Drop an image to begin"}</strong>
-            <small>{busy ? "The local engine is building layer proposals." : "PNG, JPEG or WebP - up to 40 MB"}</small>
+            <strong>{busy ? t("empty.analyzing") : t("empty.drop")}</strong>
+            <small>{busy ? t("empty.analyzingDetail") : t("empty.formats")}</small>
           </button>
         )}
-        {error && <div className="error-banner" role="alert">{error}</div>}
+        {error && <div className="error-banner" role="alert">{runtimeText(error)}</div>}
       </section>
 
       <aside className="inspector">
@@ -849,12 +1139,16 @@ export default function App() {
               refiningLayerId={refiningLayerId}
               confirmingLayerId={confirmingLayerId}
               aiRefineAvailable={project.engine === "ai"}
+              maskHistory={maskHistory}
+              maskHistoryBusy={maskHistoryBusy}
               backgroundUrl={project.backgroundUrl}
               inpaintingTargetId={activeInpaintTargetId}
               focusedTargetId={focusedInpaintTargetId}
               layerInpaintAvailable={phase === "editing" && project.engine === "ai" && Boolean(health?.providers.refinement?.available)}
               onEditMask={editLayerMask}
               onRefineMask={(layer) => void refineLayerMask(layer)}
+              onUndoRefine={(layerId) => void restoreLayerRefine(layerId, "undo")}
+              onRedoRefine={(layerId) => void restoreLayerRefine(layerId, "redo")}
               onConfirmMask={(layer) => void confirmLayer(layer)}
               onInpaintTarget={editInpaintTarget}
               onFocusTarget={setFocusedInpaintTargetId}
@@ -863,33 +1157,33 @@ export default function App() {
             {phase === "selecting" && (
               <div className="build-panel build-scene-panel">
                 <div className="build-options">
-                  <strong>Build background plate</strong>
+                  <strong>{t("build.title")}</strong>
                   <div className="extra-mask-option">
                     <div>
-                      <span>Extra inpaint area</span>
-                      <small>Brush additional background pixels to regenerate.</small>
+                      <span>{t("build.extraArea")}</span>
+                      <small>{t("build.extraAreaHelp")}</small>
                     </div>
                     <button type="button" disabled={maskEditor !== null} onClick={editExtraMask}>
-                      {project.extraMaskUrl ? "Edit area" : "Add area"}
+                      {project.extraMaskUrl ? t("build.editArea") : t("build.addArea")}
                     </button>
                   </div>
                   <label>
-                    <span>Local inpainter</span>
-                    <select value={refinement} onChange={(event) => setRefinement(event.target.value as InpaintRefinement)}>
-                      <option value="lama">Big LaMa - structural fill</option>
-                      <option value="powerpaint" disabled={!health?.providers.refinement?.available}>PowerPaint - advanced full redraw</option>
+                    <span>{t("build.inpainter")}</span>
+                    <select value={refinement} onChange={(event) => changeRefinement(event.target.value as InpaintRefinement)}>
+                      <option value="lama">{t("build.lama")}</option>
+                      <option value="powerpaint" disabled={!health?.providers.refinement?.available}>{t("build.powerpaint")}</option>
                     </select>
                   </label>
                   {refinement === "powerpaint" && (
                     <>
-                      <span className="redraw-note">Full redraw / denoise 1.00. Original masked pixels are discarded.</span>
+                      <span className="redraw-note">{t("build.fullRedrawNote")}</span>
                       <label>
-                        <span>Background prompt (optional)</span>
+                        <span>{t("build.backgroundPrompt")}</span>
                         <input
                           type="text"
                           maxLength={500}
                           value={inpaintPrompt}
-                          placeholder="Blank uses local Qwen3-VL"
+                          placeholder={t("build.backgroundPromptPlaceholder")}
                           onChange={(event) => setInpaintPrompt(event.target.value)}
                         />
                       </label>
@@ -897,7 +1191,7 @@ export default function App() {
                   )}
                   {health && !health.providers.refinement?.available && (
                     <span className="redraw-note warning">
-                      Full redraw unavailable: {health.providers.refinement?.detail}. Relaunch the one-click setup to resume the checkpoint download.
+                      {t("build.fullRedrawUnavailable", { detail: runtimeText(health.providers.refinement?.detail ?? "") })}
                     </span>
                   )}
                 </div>
@@ -919,8 +1213,8 @@ export default function App() {
               <div className="build-panel processing">
                 <span className="spinner" />
                 <div>
-                  <strong>{processingProgress?.stage ?? "Inpainting locally"}</strong>
-                  <span>{processingProgress?.message ?? "The source and masks stay on this machine."}</span>
+                  <strong>{processingProgress ? runtimeText(processingProgress.stage) : t("build.inpaintingLocally")}</strong>
+                  <span>{processingProgress ? runtimeText(processingProgress.message) : t("build.localDetail")}</span>
                 </div>
                 <output>{processingProgress?.progress ?? 0}%</output>
               </div>
@@ -928,49 +1222,49 @@ export default function App() {
             {phase === "editing" && (
               <div className="build-panel">
                 <div className="build-options">
-                  <strong>Layer inpaint</strong>
-                  <span>Select Inpaint on Background or any foreground layer, then paint over the full composition.</span>
-                  <span className="redraw-note">PowerPaint full redraw / denoise 1.00. Every painted source pixel is discarded.</span>
+                  <strong>{t("build.layerInpaint")}</strong>
+                  <span>{t("build.layerInpaintHelp")}</span>
+                  <span className="redraw-note">{t("build.layerFullRedrawNote")}</span>
                   <div className="inpaint-history-controls">
-                    <span>Focused layer: <strong>{focusedInpaintTargetName ?? "Select a scene layer"}</strong></span>
+                    <span>{t("build.focusedLayer", { name: focusedInpaintTargetName ? layerName(focusedInpaintTargetName) : t("build.selectLayer") })}</span>
                     <button
                       type="button"
                       disabled={!focusedInpaintHistory?.canUndo || inpaintHistoryBusy !== null}
-                      title="Undo this layer's last completed inpaint (Ctrl+Z)"
+                      title={t("build.undoTitle")}
                       onClick={() => void restoreFocusedInpaint("undo")}
                     >
-                      {inpaintHistoryBusy === "undo" ? "Undoing..." : "Undo inpaint"}
+                      {inpaintHistoryBusy === "undo" ? t("build.undoing") : t("build.undoInpaint")}
                     </button>
                     <button
                       type="button"
                       disabled={!focusedInpaintHistory?.canRedo || inpaintHistoryBusy !== null}
-                      title="Redo this layer's completed inpaint (Ctrl+Y or Ctrl+Shift+Z)"
+                      title={t("build.redoTitle")}
                       onClick={() => void restoreFocusedInpaint("redo")}
                     >
-                      {inpaintHistoryBusy === "redo" ? "Redoing..." : "Redo inpaint"}
+                      {inpaintHistoryBusy === "redo" ? t("build.redoing") : t("build.redoInpaint")}
                     </button>
                   </div>
                   <label>
-                    <span>Inpaint prompt</span>
+                    <span>{t("build.inpaintPrompt")}</span>
                     <input
                       type="text"
                       maxLength={500}
                       value={layerInpaintPrompt}
-                      placeholder="Blank continues the surrounding composition"
+                      placeholder={t("build.inpaintPromptPlaceholder")}
                       onChange={(event) => setLayerInpaintPrompt(event.target.value)}
                     />
                   </label>
                   <div className="extra-mask-option">
                     <div>
-                      <span>Rebuild hidden background</span>
-                      <small>Use confirmed object masks plus an optional extra hole mask.</small>
+                      <span>{t("build.rebuildHidden")}</span>
+                      <small>{t("build.rebuildHiddenHelp")}</small>
                     </div>
                     <button type="button" disabled={maskEditor !== null} onClick={editExtraMask}>
-                      {project.extraMaskUrl ? "Edit hole mask" : "Add hole mask"}
+                      {project.extraMaskUrl ? t("build.editHole") : t("build.addHole")}
                     </button>
                   </div>
                   {health && !health.providers.refinement?.available && (
-                    <span className="redraw-note warning">Layer inpainting unavailable: {health.providers.refinement?.detail}.</span>
+                    <span className="redraw-note warning">{t("build.layerUnavailable", { detail: runtimeText(health.providers.refinement?.detail ?? "") })}</span>
                   )}
                 </div>
               </div>
@@ -978,13 +1272,15 @@ export default function App() {
           </>
         ) : (
           <div className="inspector-empty">
-            <span className="eyebrow">Layer inspector</span>
-            <h2>Objects appear here</h2>
-            <p>After analysis, choose foreground cutouts and tune their depth.</p>
+            <span className="eyebrow">{t("inspector.title")}</span>
+            <h2>{t("inspector.emptyTitle")}</h2>
+            <p>{t("inspector.emptyDetail")}</p>
             <div className="ghost-layer" /><div className="ghost-layer short" /><div className="ghost-layer" />
           </div>
         )}
       </aside>
+      {showOptions && <SettingsDialog settings={settings} onSave={saveSettings} onCancel={() => setShowOptions(false)} />}
+      {showAbout && <AboutDialog version={appVersion} onClose={() => setShowAbout(false)} />}
     </main>
   );
 }

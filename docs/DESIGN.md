@@ -32,10 +32,13 @@ The service has no cloud-provider adapter. Network access is used only to acquir
 2. Run Grounding DINO-T once with the configured vocabulary and suppress duplicate boxes.
 3. Prompt SAM 2.1 Small with all retained boxes in one batch.
 4. Release both segmentation models before starting matting.
-5. For each instance, crop with padding and run InSPyReNet `base`; retain the SAM mask if the salient matte is empty.
-6. Release InSPyReNet, then run Depth Anything 3 Small for relative layer ordering.
-7. Assign semantic-layer depth from the depth map and optionally extract one non-semantic near plane.
-8. Save RGBA cutouts, grayscale masks, the depth map, labels, confidence, and per-stage VRAM peaks.
+5. For each instance, crop to the edited proposal AABB and run InSPyReNet `base`; intersect its soft alpha with the stable proposal and retain that proposal if the salient matte collapses.
+6. Keep the edited proposal in a separate `*-proposal-mask.png` asset. A later refine reads this asset instead of the previous refined alpha, so repeated passes cannot drift to an undesignated fragment.
+7. Release InSPyReNet, then run Depth Anything 3 Small for relative layer ordering.
+8. Assign semantic-layer depth from the depth map and optionally extract one non-semantic near plane.
+9. Save RGBA cutouts, grayscale masks, the depth map, labels, confidence, and per-stage VRAM peaks.
+
+Refinement snapshots are stored per layer under `.mask-history/<layer-key>`. A refine pushes the current alpha and state to undo history, clears redo history, and leaves the proposal asset unchanged. Undo/redo swaps snapshots, regenerates the cutout, and increments `maskRevision` so the renderer reloads the correct pixels.
 
 Every GPU provider is loaded for one stage and explicitly released before the next. The service lock prevents simultaneous jobs, and every stage records peak CUDA allocation against the 8192 MB limit.
 
@@ -46,7 +49,7 @@ Every GPU provider is loaded for one stage and explicitly released before the ne
 3. Dilate the union by a user-independent safety radius proportional to image size.
 4. Feather only the inspection/export mask; keep a binary mask for LaMa.
 5. In full-redraw mode, run Qwen3-VL only when a manual prompt is absent, release it, then invoke PowerPaint in its isolated CPU-offload environment.
-6. Start PowerPaint from random latents for all scheduler steps, equivalent to denoise strength 1.0.
+6. Start PowerPaint from random latents for the persisted Inference step count (25 by default), equivalent to denoise strength 1.0.
 7. Composite generated pixels with a binary mask so no source pixel is blended back inside the removal region.
 8. In fast structural-fill mode, run Big LaMa against the original RGB image and binary removal mask.
 9. Save the background plate, selected provider, generated prompt, and stage metrics.
@@ -115,6 +118,7 @@ Portable manifests store both sets of state so a load operation restores the exa
 - `GET /api/projects/{id}/assets/{name}`: validated project asset delivery.
 - `POST /api/projects/{id}/export`: camera/layer state in, `.stereovisor` package out.
 - `POST /api/projects/import`: `.stereovisor` package in, restored project and camera state out.
+- `POST /api/jobs/{id}/cancel`: request cooperative cancellation and return the job's cancelled state.
 
 All errors use `{ "code": string, "message": string, "detail"?: string }`.
 
@@ -147,6 +151,7 @@ The visual language is a dark graphite workspace with warm ivory text and a rest
 - Individual matte rejection: preserve the corresponding SAM instance mask.
 - Matting runtime failure: abort the AI job; do not silently mix hard preview masks into an AI result.
 - Inpaint failure: retain analyzed layers and allow retry.
+- Cancellation: mark the job cancelled immediately, poll cancellation at stage boundaries, kill a running PowerPaint subprocess, and skip the final project write.
 - Missing asset: return 404 without exposing arbitrary filesystem paths.
 
 ## 8. Packaging Plan

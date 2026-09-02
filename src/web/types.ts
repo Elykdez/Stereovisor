@@ -12,7 +12,7 @@ export interface HealthStatus {
   activeEngine: Engine;
   device: string;
   localOnly: true;
-  providers: Record<string, ProviderStatus>;
+  providers: Record<string, ProviderStatus>; // Feature gates use readiness details without instantiating models.
   message: string;
 }
 
@@ -45,7 +45,7 @@ export interface SceneProject {
   depthMapUrl: string | null;
   backgroundPrompt: string | null;
   inpaintProvider: "preview" | "big-lama" | "powerpaint" | null;
-  vramPeaksMb: Record<string, number>;
+  vramPeaksMb: Record<string, number>; // Per-stage diagnostics returned after an AI run.
   engine: Engine;
   layers: SceneLayer[];
 }
@@ -63,7 +63,9 @@ export interface ImportedProject {
 }
 
 export interface ProcessingProgress {
-  state: "queued" | "running" | "completed" | "failed";
+  // Stages are coarse-grained by design; detailed model progress stays in the
+  // message while the UI can render one stable progress indicator.
+  state: "queued" | "running" | "completed" | "failed" | "cancelled";
   progress: number;
   stage: string;
   message: string;
@@ -75,5 +77,10 @@ export interface InpaintHistoryState {
   canRedo: boolean;
 }
 
-export type WorkflowPhase = "idle" | "analyzing" | "selecting" | "inpainting" | "editing";
+export type WorkflowPhase =
+  | "idle"
+  | "analyzing"
+  | "selecting"
+  | "inpainting"
+  | "editing";
 export type InpaintRefinement = "lama" | "powerpaint";

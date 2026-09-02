@@ -1,6 +1,6 @@
 import { fireEvent, render } from "@testing-library/react";
-import { demoVideoExtension, drawScene, SceneCanvas, selectDemoVideoType } from "./SceneCanvas";
-import type { SceneProject } from "../types";
+import { demoVideoExtension, drawScene, SceneCanvas, selectDemoVideoType } from "@/web/components/SceneCanvas";
+import type { SceneProject } from "@/web/types";
 
 const project: SceneProject = {
   id: "drag-test",
@@ -20,8 +20,8 @@ const project: SceneProject = {
 describe("SceneCanvas camera interaction", () => {
   beforeEach(() => {
     vi.stubGlobal("ResizeObserver", class {
-      observe(): void {}
-      disconnect(): void {}
+      observe(): void { }
+      disconnect(): void { }
     });
     vi.spyOn(HTMLCanvasElement.prototype, "getBoundingClientRect").mockReturnValue({
       x: 0,
