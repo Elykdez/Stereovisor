@@ -14,7 +14,7 @@ Electron main process
 React renderer  <---- HTTP/JSON ---->  FastAPI vision service
   - workflow state                    - project asset store
   - layer list                        - Grounded instance proposals
-  - Canvas 2D compositor              - DINO-T + SAM 2.1 instances
+  - Canvas 2D compositor              - DINO-B + SAM 2.1 instances
   - camera controls                   - InSPyReNet + DA3 layers
   - PNG/MP4 export                    - LaMa / Qwen + PowerPaint
   - project load/export               - validated package import/export
@@ -29,18 +29,18 @@ The service has no cloud-provider adapter. Network access is used only to acquir
 ### Analyze
 
 1. Decode and normalize the source into RGB without changing dimensions.
-2. Run Grounding DINO-T once with the configured vocabulary and suppress duplicate boxes.
-3. Prompt SAM 2.1 Small with all retained boxes in one batch.
-4. Release both segmentation models before starting matting.
-5. For each instance, crop to the edited proposal AABB and run InSPyReNet `base`; intersect its soft alpha with the stable proposal and retain that proposal if the salient matte collapses.
-6. Keep the edited proposal in a separate `*-proposal-mask.png` asset. A later refine reads this asset instead of the previous refined alpha, so repeated passes cannot drift to an undesignated fragment.
-7. Release InSPyReNet, then run Depth Anything 3 Small for relative layer ordering.
-8. Assign semantic-layer depth from the depth map and optionally extract one non-semantic near plane.
-9. Save RGBA cutouts, grayscale masks, the depth map, labels, confidence, and per-stage VRAM peaks.
+2. If the VLM proposer is enabled and the manual vocabulary is blank, run Qwen3-VL to propose object labels, convert its output to a bounded vocabulary, and release it. Otherwise skip the VLM stage entirely.
+3. Run Grounding DINO-B once with the manual, VLM-proposed, or density-profile vocabulary and suppress duplicate boxes.
+4. Prompt SAM 2.1 Small with all retained boxes in one batch.
+5. Release both segmentation models before starting depth estimation.
+6. Run Depth Anything 3 Small for relative layer ordering, then optionally extract one non-semantic near plane.
+7. Save rough RGBA cutouts, grayscale masks, the depth map, labels, confidence, and per-stage VRAM peaks. Matting is deferred until the user requests refinement.
+8. On refinement, crop the original image to the edited proposal AABB and run InSPyReNet `base`; intersect its soft alpha with the stable proposal and retain that proposal if the salient matte collapses.
+9. Keep the edited proposal in a separate `*-proposal-mask.png` asset. A later refine reads this asset instead of the previous refined alpha, so repeated passes cannot drift to an undesignated fragment.
 
 Refinement snapshots are stored per layer under `.mask-history/<layer-key>`. A refine pushes the current alpha and state to undo history, clears redo history, and leaves the proposal asset unchanged. Undo/redo swaps snapshots, regenerates the cutout, and increments `maskRevision` so the renderer reloads the correct pixels.
 
-Every GPU provider is loaded for one stage and explicitly released before the next. The service lock prevents simultaneous jobs, and every stage records peak CUDA allocation against the 8192 MB limit.
+Every GPU provider is loaded for one stage and explicitly released before the next. The service lock prevents simultaneous jobs, and every stage records peak CUDA allocation against the 8192 MB limit. The sequence is Qwen3-VL vocabulary proposal (optional) -> Grounding DINO-B -> SAM 2.1 -> DA3 -> InSPyReNet (per refinement) -> Qwen3-VL background prompt (optional) -> PowerPaint or Big LaMa.
 
 ### Build Scene
 
@@ -137,7 +137,7 @@ The visual language is a dark graphite workspace with warm ivory text and a rest
 
 1. Establish shared types and service API.
 2. Implement project storage and preview pipeline.
-3. Add production Grounding DINO-T, SAM 2.1, InSPyReNet, DA3, LaMa, Qwen3-VL, and PowerPaint providers behind the same interfaces.
+3. Add production Grounding DINO-B, SAM 2.1, InSPyReNet, DA3, LaMa, Qwen3-VL, and PowerPaint providers behind the same interfaces.
 4. Build the upload/analyze/select/inpaint workflow.
 5. Build the cached Canvas compositor and camera controls.
 6. Add Electron lifecycle, service launch, and native export.

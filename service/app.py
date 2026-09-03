@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import logging
+import math
 import shutil
 import time
 from typing import Callable
@@ -12,12 +13,15 @@ from fastapi.responses import FileResponse, Response
 from PIL import Image, ImageOps, UnidentifiedImageError
 
 from .config import (
+    MAX_IMAGE_PIXELS,
     MAX_UPLOAD_BYTES,
     MAX_PROJECT_PACKAGE_BYTES,
     MODE,
     PROJECT_ROOT,
+    REQUIRED_PROVIDERS,
     active_engine,
     ai_dependencies,
+    bootstrap_status,
     production_available,
     runtime_device,
 )
@@ -28,10 +32,16 @@ from .pipeline import (
     ProductionPipeline,
     ProgressCallback,
     confirm_layer_mask,
+    create_layer_from_mask,
     create_sample_image,
+    delete_layer,
     inpaint_history,
+    layer_merge_history,
+    merge_layer_masks,
     mask_history,
+    rename_layer,
     replace_layer_mask,
+    restore_layer_merge_history,
     restore_mask_history,
     restore_inpaint_history,
     save_extra_inpaint_mask,
@@ -40,12 +50,14 @@ from .schemas import (
     HealthPayload,
     InpaintHistoryPayload,
     InpaintRequest,
+    MergeLayersRequest,
     ProcessingJobPayload,
     ProcessingJobStart,
     ProjectExportRequest,
     ProjectImportPayload,
     ProjectPayload,
     ProviderStatus,
+    RenameLayerRequest,
     SegmentationDensity,
 )
 from .storage import ProjectPackageError, ProjectStore
@@ -63,6 +75,40 @@ store = ProjectStore(PROJECT_ROOT)
 jobs = ProcessingJobStore()
 logger = logging.getLogger(__name__)
 CancelCheck = Callable[[], None]
+
+
+def _downsample_image(image: Image.Image) -> Image.Image:
+    """Return an aspect-preserving copy whose area is at most 4MP."""
+    source_pixels = image.width * image.height
+    if source_pixels <= MAX_IMAGE_PIXELS:
+        return image
+
+    original_size = image.size
+    scale = math.sqrt(MAX_IMAGE_PIXELS / source_pixels)
+    bounded_width = max(1, math.floor(image.width * scale))
+    bounded_height = max(1, math.floor(image.height * scale))
+    if bounded_width * bounded_height > MAX_IMAGE_PIXELS:
+        # This only matters for extremely narrow images where rounding a
+        # sub-pixel dimension up to one could otherwise exceed the area cap.
+        if bounded_width >= bounded_height:
+            bounded_width = max(1, MAX_IMAGE_PIXELS // bounded_height)
+        else:
+            bounded_height = max(1, MAX_IMAGE_PIXELS // bounded_width)
+    bounded_size = (bounded_width, bounded_height)
+    # Applying the same scale to both dimensions preserves the source ratio;
+    # flooring keeps the resulting pixel area at or below the configured cap.
+    bounded = image.resize(bounded_size, Image.Resampling.LANCZOS)
+    logger.info(
+        "image downsampled: original=%sx%s pixels=%s bounded=%sx%s pixels=%s max_pixels=%s",
+        original_size[0],
+        original_size[1],
+        source_pixels,
+        bounded.width,
+        bounded.height,
+        bounded.width * bounded.height,
+        MAX_IMAGE_PIXELS,
+    )
+    return bounded
 
 
 def _pipeline():
@@ -87,19 +133,46 @@ def _pipeline():
     return PreviewPipeline()
 
 
+def _require_ready_for_ai_job() -> None:
+    """Reject an AI job before enqueueing it during a service/model swap."""
+    if active_engine() != "ai" or production_available():
+        return
+    dependencies = ai_dependencies()
+    missing = ", ".join(key for key in REQUIRED_PROVIDERS if not dependencies[key].available)
+    logger.warning("AI job rejected while providers are starting: missing=%s", missing)
+    raise HTTPException(
+        status_code=503,
+        detail={
+            "code": "AI_STACK_STARTING",
+            "message": "The local AI stack is still starting.",
+            "detail": f"Waiting for providers: {missing or 'local runtime'}.",
+        },
+    )
+
+
 def _analyze_image(
     image: Image.Image,
     progress: ProgressCallback | None = None,
     cancelled: CancelCheck | None = None,
     segmentation_density: SegmentationDensity = "balanced",
+    segmentation_labels: str = "",
+    use_vlm_vocabulary: bool = False,
 ) -> ProjectPayload:
     started_at = time.monotonic()
-    logger.info("analysis started: size=%sx%s density=%s", image.width, image.height, segmentation_density)
     if progress is not None:
         progress(3, "Preparing image", "Normalizing orientation and color.")
     if cancelled is not None:
         cancelled()
-    image = ImageOps.exif_transpose(image).convert("RGB")
+    # Normalize orientation before downsampling so the stored project dimensions
+    # match the pixels users see, including images with EXIF rotation.
+    image = _downsample_image(ImageOps.exif_transpose(image).convert("RGB"))
+    logger.info(
+        "analysis started: size=%sx%s density=%s vlm_vocabulary=%s",
+        image.width,
+        image.height,
+        segmentation_density,
+        use_vlm_vocabulary,
+    )
     project_id, directory = store.create(image)
     try:
         if cancelled is not None:
@@ -109,6 +182,8 @@ def _analyze_image(
             directory,
             project_id,
             segmentation_density=segmentation_density,
+            segmentation_labels=segmentation_labels,
+            use_vlm_vocabulary=use_vlm_vocabulary,
             progress=progress,
             cancelled=cancelled,
         )
@@ -304,6 +379,85 @@ def _confirm_project_layer(project_id: str, layer_id: str) -> ProjectPayload:
         raise HTTPException(status_code=422, detail={"code": "MASK_CONFIRM_FAILED", "message": str(error)}) from error
 
 
+def _create_project_layer(project_id: str, mask: Image.Image, name: str | None) -> ProjectPayload:
+    logger.info("layer creation requested: project=%s size=%sx%s", project_id, mask.width, mask.height)
+    try:
+        directory = store.directory(project_id)
+        project = store.read(project_id)
+        updated = create_layer_from_mask(project, directory, mask, name)
+        store.write(updated)
+        logger.info("layer creation committed: project=%s layers=%s", project_id, len(updated.layers))
+        return updated
+    except FileNotFoundError as error:
+        raise HTTPException(status_code=404, detail={"code": "PROJECT_NOT_FOUND", "message": "The project no longer exists."}) from error
+    except PipelineError as error:
+        raise HTTPException(status_code=422, detail={"code": "LAYER_CREATE_FAILED", "message": str(error)}) from error
+
+
+def _rename_project_layer(project_id: str, layer_id: str, name: str) -> ProjectPayload:
+    logger.info("layer rename requested: project=%s layer=%s", project_id, layer_id)
+    try:
+        updated = rename_layer(store.read(project_id), layer_id, name)
+        store.write(updated)
+        return updated
+    except FileNotFoundError as error:
+        raise HTTPException(status_code=404, detail={"code": "PROJECT_NOT_FOUND", "message": "The project no longer exists."}) from error
+    except PipelineError as error:
+        raise HTTPException(status_code=422, detail={"code": "LAYER_RENAME_FAILED", "message": str(error)}) from error
+
+
+def _delete_project_layer(project_id: str, layer_id: str) -> ProjectPayload:
+    logger.info("layer deletion requested: project=%s layer=%s", project_id, layer_id)
+    try:
+        directory = store.directory(project_id)
+        updated = delete_layer(store.read(project_id), directory, layer_id)
+        store.write(updated)
+        logger.info("layer deletion committed: project=%s remaining=%s", project_id, len(updated.layers))
+        return updated
+    except FileNotFoundError as error:
+        raise HTTPException(status_code=404, detail={"code": "PROJECT_NOT_FOUND", "message": "The project no longer exists."}) from error
+    except PipelineError as error:
+        raise HTTPException(status_code=422, detail={"code": "LAYER_DELETE_FAILED", "message": str(error)}) from error
+
+
+def _merge_project_layers(project_id: str, layer_ids: list[str]) -> ProjectPayload:
+    logger.info("layer merge requested: project=%s layers=%s", project_id, layer_ids)
+    try:
+        directory = store.directory(project_id)
+        project = store.read(project_id)
+        updated = merge_layer_masks(project, directory, layer_ids)
+        store.write(updated)
+        logger.info("layer merge committed: project=%s layers=%s", project_id, len(updated.layers))
+        return updated
+    except FileNotFoundError as error:
+        raise HTTPException(status_code=404, detail={"code": "PROJECT_NOT_FOUND", "message": "The project no longer exists."}) from error
+    except PipelineError as error:
+        raise HTTPException(status_code=422, detail={"code": "LAYER_MERGE_FAILED", "message": str(error)}) from error
+
+
+def _read_layer_merge_history(project_id: str) -> list[InpaintHistoryPayload]:
+    try:
+        directory = store.directory(project_id)
+        return layer_merge_history(store.read(project_id), directory)
+    except FileNotFoundError as error:
+        raise HTTPException(status_code=404, detail={"code": "PROJECT_NOT_FOUND", "message": "The project no longer exists."}) from error
+
+
+def _restore_project_layer_merge(project_id: str, action: str) -> ProjectPayload:
+    logger.info("layer merge history requested: project=%s action=%s", project_id, action)
+    try:
+        directory = store.directory(project_id)
+        project = store.read(project_id)
+        updated = restore_layer_merge_history(project, directory, action)
+        store.write(updated)
+        logger.info("layer merge history committed: project=%s action=%s layers=%s", project_id, action, len(updated.layers))
+        return updated
+    except FileNotFoundError as error:
+        raise HTTPException(status_code=404, detail={"code": "PROJECT_NOT_FOUND", "message": "The project no longer exists."}) from error
+    except PipelineError as error:
+        raise HTTPException(status_code=422, detail={"code": "LAYER_MERGE_HISTORY_FAILED", "message": str(error)}) from error
+
+
 def _save_edited_mask(project_id: str, mask: Image.Image, layer_id: str | None = None) -> ProjectPayload:
     logger.info("mask save started: project=%s target=%s size=%sx%s", project_id, layer_id or "extra", mask.width, mask.height)
     try:
@@ -364,22 +518,67 @@ def health() -> HealthPayload:
     dependencies = ai_dependencies()
     engine = active_engine()
     actual_device = runtime_device()
+    bootstrap = bootstrap_status()
+    startup_state = bootstrap.state
+    startup_detail = bootstrap.detail
+    core_ready = all(dependencies[key].available for key in REQUIRED_PROVIDERS)
+    if core_ready:
+        startup_state = "ready"
+        startup_detail = None
+    elif startup_state == "ready":
+        # A completed status file can outlive a changed runtime or a damaged
+        # model cache; never report ready until the live provider probe agrees.
+        startup_state = "blocked"
+        startup_detail = None
+    active_startup_state = startup_state in {"starting", "downloading", "initializing"}
+
+    def provider_payload(key: str, dependency: object) -> ProviderStatus:
+        available = bool(getattr(dependency, "available", False))
+        detail = str(getattr(dependency, "detail", ""))
+        if available:
+            state = "ready"
+            progress = 100
+        elif active_startup_state and key in bootstrap.completed:
+            # Prepared by the running bootstrap. The core-only service that
+            # answers during preparation cannot probe the AI packages itself,
+            # so report the finished stage instead of dropping back to waiting.
+            state = "ready"
+            progress = 100
+            detail = "Prepared. Verified when the local AI service starts."
+        elif active_startup_state and bootstrap.provider == key:
+            state = startup_state
+            progress = bootstrap.progress
+            if bootstrap.provider == key and startup_detail:
+                detail = startup_detail
+        elif active_startup_state:
+            state = "waiting"
+            progress = None
+        else:
+            state = "blocked"
+            progress = None
+        return ProviderStatus(available=available, detail=detail, state=state, progress=progress)
     if engine == "ai":
-        message = f"Local AI engine ready on {actual_device}. Inference stays on this machine."
+        missing = ", ".join(key for key in REQUIRED_PROVIDERS if not dependencies[key].available)
+        message = (
+            f"Local AI engine ready on {actual_device}. Inference stays on this machine."
+            if not missing
+            else startup_detail or f"Local AI engine is starting. Waiting for providers: {missing}."
+        )
     elif MODE == "preview" and production_available():
         message = "Preview engine selected by configuration. Set STEREOVISOR_MODE=ai to use the installed local models."
     else:
         missing = ", ".join(key for key, value in dependencies.items() if not value.available)
-        message = f"Preview engine active. Install the local AI stack for production processing: {missing}."
+        message = startup_detail or f"Preview engine active. Install the local AI stack for production processing: {missing}."
     payload = HealthPayload(
         configuredMode=MODE,
         activeEngine=engine,
         device=actual_device,
-        providers={
-            key: ProviderStatus(available=value.available, detail=value.detail)
-            for key, value in dependencies.items()
-        },
+        providers={key: provider_payload(key, value) for key, value in dependencies.items()},
         message=message,
+        startupState=startup_state,
+        startupDetail=startup_detail,
+        startupProvider=bootstrap.provider,
+        startupProgress=bootstrap.progress,
     )
     logger.info(
         "health check: mode=%s engine=%s device=%s providers=%s",
@@ -395,13 +594,29 @@ def health() -> HealthPayload:
 async def analyze(
     file: UploadFile = File(...),
     segmentation_density: SegmentationDensity = Form("balanced"),
+    segmentation_labels: str = Form(""),
+    use_vlm_vocabulary: bool = Form(False),
 ) -> ProjectPayload:
-    return _analyze_image(await _decode_upload(file), segmentation_density=segmentation_density)
+    return _analyze_image(
+        await _decode_upload(file),
+        segmentation_density=segmentation_density,
+        segmentation_labels=segmentation_labels,
+        use_vlm_vocabulary=use_vlm_vocabulary,
+    )
 
 
 @app.post("/api/sample", response_model=ProjectPayload)
-def sample(segmentation_density: SegmentationDensity = "balanced") -> ProjectPayload:
-    return _analyze_image(create_sample_image(), segmentation_density=segmentation_density)
+def sample(
+    segmentation_density: SegmentationDensity = "balanced",
+    segmentation_labels: str = "",
+    use_vlm_vocabulary: bool = False,
+) -> ProjectPayload:
+    return _analyze_image(
+        create_sample_image(),
+        segmentation_density=segmentation_density,
+        segmentation_labels=segmentation_labels,
+        use_vlm_vocabulary=use_vlm_vocabulary,
+    )
 
 
 @app.post("/api/jobs/analyze", response_model=ProcessingJobStart)
@@ -409,10 +624,18 @@ async def start_analyze_job(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     segmentation_density: SegmentationDensity = Form("balanced"),
+    segmentation_labels: str = Form(""),
+    use_vlm_vocabulary: bool = Form(False),
 ) -> ProcessingJobStart:
+    _require_ready_for_ai_job()
     image = await _decode_upload(file)
     job_id = jobs.create("analyze")
-    logger.info("job accepted: id=%s kind=analyze density=%s", job_id, segmentation_density)
+    logger.info(
+        "job accepted: id=%s kind=analyze density=%s vlm_vocabulary=%s",
+        job_id,
+        segmentation_density,
+        use_vlm_vocabulary,
+    )
     background_tasks.add_task(
         _run_job,
         job_id,
@@ -421,6 +644,8 @@ async def start_analyze_job(
             progress,
             cancelled,
             segmentation_density=segmentation_density,
+            segmentation_labels=segmentation_labels,
+            use_vlm_vocabulary=use_vlm_vocabulary,
         ),
     )
     return ProcessingJobStart(jobId=job_id)
@@ -430,10 +655,18 @@ async def start_analyze_job(
 def start_sample_job(
     background_tasks: BackgroundTasks,
     segmentation_density: SegmentationDensity = "balanced",
+    segmentation_labels: str = "",
+    use_vlm_vocabulary: bool = False,
 ) -> ProcessingJobStart:
+    _require_ready_for_ai_job()
     image = create_sample_image()
     job_id = jobs.create("analyze")
-    logger.info("job accepted: id=%s kind=sample density=%s", job_id, segmentation_density)
+    logger.info(
+        "job accepted: id=%s kind=sample density=%s vlm_vocabulary=%s",
+        job_id,
+        segmentation_density,
+        use_vlm_vocabulary,
+    )
     background_tasks.add_task(
         _run_job,
         job_id,
@@ -442,6 +675,8 @@ def start_sample_job(
             progress,
             cancelled,
             segmentation_density=segmentation_density,
+            segmentation_labels=segmentation_labels,
+            use_vlm_vocabulary=use_vlm_vocabulary,
         ),
     )
     return ProcessingJobStart(jobId=job_id)
@@ -530,6 +765,47 @@ def redo_target_inpaint(project_id: str, target_id: str) -> ProjectPayload:
 @app.get("/api/projects/{project_id}/mask-history", response_model=list[InpaintHistoryPayload])
 def get_project_mask_history(project_id: str) -> list[InpaintHistoryPayload]:
     return _read_mask_history(project_id)
+
+
+@app.get("/api/projects/{project_id}/layer-merge-history", response_model=list[InpaintHistoryPayload])
+def get_layer_merge_history(project_id: str) -> list[InpaintHistoryPayload]:
+    return _read_layer_merge_history(project_id)
+
+
+@app.post("/api/projects/{project_id}/layers", response_model=ProjectPayload)
+async def create_layer(
+    project_id: str,
+    file: UploadFile = File(...),
+    name: str | None = Form(default=None),
+) -> ProjectPayload:
+    return _create_project_layer(project_id, await _decode_upload(file), name)
+
+
+@app.post("/api/projects/{project_id}/layers/{layer_id}/name", response_model=ProjectPayload)
+def rename_project_layer(project_id: str, layer_id: str, request: RenameLayerRequest) -> ProjectPayload:
+    return _rename_project_layer(project_id, layer_id, request.name)
+
+
+# Deletion is a POST like every other mutation here: the local CORS policy
+# allows GET and POST only, and the renderer is a cross-origin dev host.
+@app.post("/api/projects/{project_id}/layers/{layer_id}/delete", response_model=ProjectPayload)
+def delete_project_layer(project_id: str, layer_id: str) -> ProjectPayload:
+    return _delete_project_layer(project_id, layer_id)
+
+
+@app.post("/api/projects/{project_id}/layers/merge", response_model=ProjectPayload)
+def merge_layers(project_id: str, request: MergeLayersRequest) -> ProjectPayload:
+    return _merge_project_layers(project_id, request.layerIds)
+
+
+@app.post("/api/projects/{project_id}/layers/undo-merge", response_model=ProjectPayload)
+def undo_layer_merge(project_id: str) -> ProjectPayload:
+    return _restore_project_layer_merge(project_id, "undo")
+
+
+@app.post("/api/projects/{project_id}/layers/redo-merge", response_model=ProjectPayload)
+def redo_layer_merge(project_id: str) -> ProjectPayload:
+    return _restore_project_layer_merge(project_id, "redo")
 
 
 @app.post("/api/projects/{project_id}/layers/{layer_id}/undo-refine", response_model=ProjectPayload)

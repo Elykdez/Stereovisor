@@ -12,8 +12,9 @@ declare global {
       openProject: () => Promise<ArrayBuffer | null>;
       getSettings: () => Promise<{
         version: 1;
-        locale: "en" | "zh-CN" | "ja" | "ko";
+        locale: "en" | "ja" | "ko" | "zh-CN";
         appearance: { reduceMotion: boolean };
+        service: { showConsole: boolean };
         camera: { defaultZoom: number; defaultStrength: number };
         motion: {
           speed: number;
@@ -25,13 +26,16 @@ declare global {
           defaultRefinement: "lama" | "powerpaint";
           inpaintingSteps: number;
           segmentationDensity: "sparse" | "balanced" | "dense";
+          segmentationLabels: string;
+          useVlmVocabularyProposer: boolean;
         };
       }>;
       getAppVersion: () => Promise<string>;
       saveSettings: (settings: {
         version: 1;
-        locale: "en" | "zh-CN" | "ja" | "ko";
+        locale: "en" | "ja" | "ko" | "zh-CN";
         appearance: { reduceMotion: boolean };
+        service: { showConsole: boolean };
         camera: { defaultZoom: number; defaultStrength: number };
         motion: {
           speed: number;
@@ -43,11 +47,13 @@ declare global {
           defaultRefinement: "lama" | "powerpaint";
           inpaintingSteps: number;
           segmentationDensity: "sparse" | "balanced" | "dense";
+          segmentationLabels: string;
+          useVlmVocabularyProposer: boolean;
         };
       }) => Promise<void>;
       onOpenOptions: (listener: () => void) => () => void;
       onOpenAbout: (listener: () => void) => () => void;
-      setLocale: (locale: "en" | "zh-CN" | "ja" | "ko") => void;
+      setLocale: (locale: "en" | "ja" | "ko" | "zh-CN") => void;
     };
   }
 }

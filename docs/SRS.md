@@ -40,11 +40,13 @@ The primary user is a designer or content creator who wants a parallax still wit
 
 ### FR-2 Object Analysis
 
-- Production mode shall run Grounding DINO-T locally to find repeated open-vocabulary subjects.
+- Production mode shall run Grounding DINO-B locally to find repeated open-vocabulary subjects.
 - Grounding DINO boxes shall prompt SAM 2.1 Small locally to produce one instance mask per detected subject.
 - Filter tiny, near-full-frame, duplicate, and low-value detections.
 - Return at most 24 semantic instance layers so dense group portraits can retain individual characters.
-- Accept custom detection labels through `STEREOVISOR_OBJECT_LABELS` without changing application code.
+- Expose a persisted comma-separated detection vocabulary override; blank uses the selected density's built-in labels.
+- Expose an opt-in Qwen3-VL vocabulary proposer that is disabled by default, runs only when the manual vocabulary is blank, and releases the VLM before Grounding DINO-B loads.
+- Accept custom detection labels through `STEREOVISOR_OBJECT_LABELS` for headless runs without changing application code.
 
 ### FR-3 Foreground Matting
 
@@ -126,11 +128,11 @@ The primary user is a designer or content creator who wants a parallax still wit
 
 - Camera interaction target: 60 fps for up to 24 2K layers on a typical discrete GPU.
 - Production inference shall fit an 8 GB VRAM budget by loading GPU stages sequentially and releasing segmentation tensors before inpainting.
-- Grounding DINO-T, SAM 2.1, InSPyReNet, Depth Anything 3, Qwen3-VL, and the selected inpainter shall never remain GPU-resident together.
+- Grounding DINO-B, SAM 2.1, InSPyReNet, Depth Anything 3, Qwen3-VL, and the selected inpainter shall never remain GPU-resident together.
 - PowerPaint shall run in an isolated Python environment with model CPU offload.
 - Each CUDA stage shall report its measured peak allocation and fail explicitly if it exceeds 8192 MB.
 - No model inference or image decoding during an animation frame.
-- Reuse InSPyReNet across proposals within one job; release GPU models at stage boundaries.
+- Release InSPyReNet after each refinement operation; no GPU model may remain resident across stage boundaries.
 - Analyze and inpaint off the Electron renderer thread.
 - Encode demo video with Chromium's local H.264 MP4 encoder, falling back to WebM when needed; do not require FFmpeg or a cloud service.
 
@@ -159,12 +161,12 @@ The primary user is a designer or content creator who wants a parallax still wit
 
 ### Production AI Mode
 
-- Detection: Grounding DINO-T.
+- Detection: Grounding DINO-B.
 - Instance segmentation: SAM 2.1 Small.
 - Matting: InSPyReNet `base` with dynamic resizing and a per-job CUDA session.
 - Depth: Depth Anything 3 Small, selected for relative ordering and the 8 GB budget.
 - Default inpainting: local Big LaMa TorchScript model.
-- Optional refinement: Qwen3-VL 2B prompt generation plus PowerPaint v2.1.
+- Optional Qwen3-VL 2B vocabulary proposal and background-prompt generation; PowerPaint v2.1 provides full-redraw refinement.
 - Model files download on first production use and remain in the user's model cache.
 - All inference runs locally. No cloud inference endpoint is supported by the service contract.
 
@@ -203,6 +205,7 @@ The primary user is a designer or content creator who wants a parallax still wit
 ## 9. Technical References
 
 - [Grounding DINO in Transformers](https://huggingface.co/docs/transformers/model_doc/grounding-dino)
+- [Grounding DINO-B checkpoint](https://huggingface.co/IDEA-Research/grounding-dino-base)
 - [SAM 2 in Transformers](https://huggingface.co/docs/transformers/model_doc/sam2)
 - [SAM 2.1 Small](https://huggingface.co/facebook/sam2.1-hiera-small)
 - [Depth Anything 3](https://github.com/ByteDance-Seed/Depth-Anything-3)

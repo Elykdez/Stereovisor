@@ -1,5 +1,21 @@
 $ErrorActionPreference = "Stop"
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
+$ShowConsole = $env:STEREOVISOR_SHOW_CONSOLE -in @("1", "true", "yes")
+$AppProcess = $null
+$BootstrapServiceProcess = $null
+$ServiceProcess = $null
+$ModelRoot = Join-Path $ProjectRoot "service\.models"
+$BootstrapMarker = Join-Path $ModelRoot ".stereovisor-bootstrap-running"
+$BootstrapClaimed = $false
+$env:STEREOVISOR_BOOTSTRAP_STATUS = Join-Path $ModelRoot ".stereovisor-bootstrap-status"
+# Start from an empty set: an inherited value would claim stages this launch
+# has not verified.
+$env:STEREOVISOR_BOOTSTRAP_COMPLETED = ""
+. (Join-Path $PSScriptRoot "bootstrap-status.ps1")
+
+# A terminal hosted inside another Electron app exports this, which would make
+# our electron.exe run main.js as plain Node and exit before a window opens.
+Remove-Item Env:\ELECTRON_RUN_AS_NODE -ErrorAction SilentlyContinue
 
 function Test-TcpPort {
     param([Parameter(Mandatory = $true)][int]$Port)
@@ -15,6 +31,87 @@ function Test-TcpPort {
     finally {
         $Client.Dispose()
     }
+}
+
+function Wait-StereovisorRenderer {
+    for ($attempt = 0; $attempt -lt 120; $attempt++) {
+        # A listening socket can exist before Vite has served index.html. Use
+        # the real renderer probe so Electron never opens against a half-ready
+        # dev host on a cold start.
+        if (Test-StereovisorRenderer) {
+            return
+        }
+        if ($script:AppProcess -and $script:AppProcess.HasExited) {
+            throw "The Stereovisor renderer stopped before the app window opened."
+        }
+        Start-Sleep -Milliseconds 500
+    }
+    throw "The Stereovisor renderer did not start within 60 seconds."
+}
+
+function Stop-StereovisorProcessTree {
+    param([Parameter(Mandatory = $true)][int]$ProcessId)
+
+    if ($ProcessId -le 0) {
+        return
+    }
+    # A child that exits between the walk and the kill makes taskkill write to
+    # stderr. Under "Stop" that becomes a terminating error, which would abort
+    # the launcher from inside its own cleanup path.
+    $PreviousErrorAction = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        & taskkill.exe /PID $ProcessId /T /F *> $null
+    }
+    catch {
+        Write-Host "Could not fully stop process tree $ProcessId." -ForegroundColor DarkYellow
+    }
+    finally {
+        $ErrorActionPreference = $PreviousErrorAction
+    }
+}
+
+function Start-StereovisorApp {
+    $NpmCommand = Get-Command npm.cmd -ErrorAction SilentlyContinue
+    if (-not $NpmCommand) {
+        $NpmCommand = Get-Command npm -ErrorAction Stop
+    }
+    # The Electron window must appear before AI setup; keep its dev-host
+    # process hidden so the optional service console is the only extra window.
+    $script:AppProcess = Start-Process -FilePath $NpmCommand.Source `
+        -ArgumentList @("run", "dev:app") `
+        -WorkingDirectory $ProjectRoot `
+        -WindowStyle Hidden `
+        -PassThru
+    Wait-StereovisorRenderer
+}
+
+function Ensure-StereovisorCore {
+    $CorePython = Join-Path $ProjectRoot ".venv\Scripts\python.exe"
+    $ElectronExecutable = Join-Path $ProjectRoot "node_modules\electron\dist\electron.exe"
+    if ((Test-Path -LiteralPath $CorePython) -and (Test-Path -LiteralPath $ElectronExecutable)) {
+        return
+    }
+    Write-Host "Preparing the Stereovisor core environment before opening the app..." -ForegroundColor Cyan
+    & (Join-Path $PSScriptRoot "setup-core.ps1")
+    if ($LASTEXITCODE -ne 0) {
+        throw "Core setup failed with exit code $LASTEXITCODE."
+    }
+}
+
+function Start-StereovisorService {
+    $ServiceWindowStyle = if ($ShowConsole) { "Normal" } else { "Hidden" }
+    return Start-Process -FilePath "powershell.exe" `
+        -ArgumentList @(
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            (Join-Path $PSScriptRoot "start-service.ps1")
+        ) `
+        -WorkingDirectory $ProjectRoot `
+        -WindowStyle $ServiceWindowStyle `
+        -PassThru
 }
 
 function Test-StereovisorRenderer {
@@ -101,19 +198,90 @@ try {
         throw "Stereovisor cannot start because port(s) $($BusyPorts -join ', ') are occupied by another process. Close that process and run Stereovisor again."
     }
 
-    . (Join-Path $PSScriptRoot "ensure-ready.ps1")
-
     $env:STEREOVISOR_MODE = "ai"
     $env:STEREOVISOR_DEVICE = "cuda"
-    $env:STEREOVISOR_MODEL_ROOT = Join-Path $ProjectRoot "service\.models"
-    Set-Location -LiteralPath $ProjectRoot
+    $env:STEREOVISOR_MODEL_ROOT = $ModelRoot
+
+    # Claim the bootstrap before the health service can answer. Without this the
+    # renderer's first poll would read a stale status file and briefly show a
+    # "not ready" card on every launch.
+    New-Item -ItemType Directory -Force -Path $ModelRoot | Out-Null
+    New-Item -ItemType File -Force -Path $BootstrapMarker | Out-Null
+    $BootstrapClaimed = $true
+    Publish-BootstrapStatus -State "starting" -Detail "Starting the local Stereovisor services." -Provider "runtime" -Progress 1
+
+    # A renderer can show its startup gate while the first-run Python core is
+    # being provisioned. Only defer the window when Electron itself is absent.
+    $ElectronExecutable = Join-Path $ProjectRoot "node_modules\electron\dist\electron.exe"
+    if (Test-Path -LiteralPath $ElectronExecutable) {
+        Start-StereovisorApp
+        Ensure-StereovisorCore
+    }
+    else {
+        Ensure-StereovisorCore
+        Start-StereovisorApp
+    }
+
+    # A core-only service gives the renderer a live health endpoint while the
+    # CUDA environment and model files are being prepared. It is replaced by
+    # the selected AI runtime after ensure-ready.ps1 completes.
+    $env:STEREOVISOR_PYTHON = Join-Path $ProjectRoot ".venv\Scripts\python.exe"
+    $BootstrapServiceProcess = Start-StereovisorService
+
+    # The app is already visible and shows its connecting state while this
+    # synchronous preparation installs/validates the local AI stack.
+    try {
+        . (Join-Path $PSScriptRoot "ensure-ready.ps1")
+    }
+    catch {
+        # Keep the core health service and locked editor alive so the user can
+        # see the actionable bootstrap failure instead of losing the window.
+        Write-Host "Local AI preparation is blocked: $($_.Exception.Message)" -ForegroundColor Red
+        Wait-Process -Id $AppProcess.Id
+        exit 1
+    }
+
+    # The core health service is replaced by the prepared CUDA runtime here.
+    # Hold the bootstrap marker across the swap so the startup gate keeps
+    # showing an honest "initializing" state instead of a transient failure.
+    New-Item -ItemType File -Force -Path $BootstrapMarker | Out-Null
+    # ensure-ready.ps1 only returns once every required model is downloaded and
+    # validated, so the gate can hold a complete readout across the swap.
+    foreach ($Provider in @("runtime", "segmentation", "matting", "depth", "inpainting")) {
+        Complete-BootstrapProvider -Provider $Provider
+    }
+    Publish-BootstrapStatus -State "initializing" -Detail "Starting the local AI service." -Provider "runtime" -Progress 100
+    Stop-StereovisorProcessTree -ProcessId $BootstrapServiceProcess.Id
+    for ($attempt = 0; $attempt -lt 20 -and (Test-TcpPort -Port 5179); $attempt++) {
+        Start-Sleep -Milliseconds 250
+    }
     Write-Host "Starting Stereovisor with local AI..." -ForegroundColor Green
-    & npm run dev
-    exit $LASTEXITCODE
+    $ServiceProcess = Start-StereovisorService
+    for ($attempt = 0; $attempt -lt 240 -and -not (Test-StereovisorService); $attempt++) {
+        if ($ServiceProcess.HasExited) { break }
+        Start-Sleep -Milliseconds 500
+    }
+    Remove-Item -LiteralPath $BootstrapMarker -Force -ErrorAction SilentlyContinue
+    Wait-Process -Id $AppProcess.Id
+    exit $AppProcess.ExitCode
 }
 catch {
     Write-Host ""
     Write-Host "Stereovisor could not start:" -ForegroundColor Red
     Write-Host $_.Exception.Message -ForegroundColor Red
     exit 1
+}
+finally {
+    if ($BootstrapClaimed) {
+        Remove-Item -LiteralPath $BootstrapMarker -Force -ErrorAction SilentlyContinue
+    }
+    if ($BootstrapServiceProcess -and -not $BootstrapServiceProcess.HasExited) {
+        Stop-StereovisorProcessTree -ProcessId $BootstrapServiceProcess.Id
+    }
+    if ($ServiceProcess -and -not $ServiceProcess.HasExited) {
+        Stop-StereovisorProcessTree -ProcessId $ServiceProcess.Id
+    }
+    if ($AppProcess -and -not $AppProcess.HasExited) {
+        Stop-StereovisorProcessTree -ProcessId $AppProcess.Id
+    }
 }

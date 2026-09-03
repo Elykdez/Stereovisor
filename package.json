@@ -3,19 +3,25 @@
   "version": "0.1.0",
   "private": true,
   "description": "Local-first image-to-parallax desktop studio",
+  "author": "Stereovisor",
   "main": "dist-electron/main.js",
   "scripts": {
     "dev": "concurrently -k -s first \"npm:dev:service\" \"npm:dev:renderer\" \"npm:dev:electron\"",
+    "dev:app": "concurrently -k -s first \"npm:dev:renderer\" \"npm:dev:electron\"",
     "dev:renderer": "vite --host 127.0.0.1",
-    "dev:electron": "wait-on tcp:5173 tcp:5179 && cross-env VITE_DEV_SERVER_URL=http://127.0.0.1:5173 electron .",
+    "dev:electron": "wait-on http://127.0.0.1:5173/ && cross-env VITE_DEV_SERVER_URL=http://127.0.0.1:5173 electron .",
     "dev:service": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/start-service.ps1",
     "i18n:generate": "node scripts/generate-locales.mjs",
     "i18n:check": "node scripts/generate-locales.mjs --check",
     "prebuild": "npm run i18n:generate",
     "build": "tsc -p tsconfig.electron.json && vite build",
+    "package": "npm run build && electron-builder --win nsis portable",
+    "package:installer": "npm run build && electron-builder --win nsis",
+    "package:portable": "npm run build && electron-builder --win portable",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.electron.json --noEmit",
     "test": "vitest run",
     "test:service": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test-service.ps1",
+    "smoke": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/smoke-test.ps1",
     "check": "npm run i18n:check && npm run typecheck && npm test && npm run test:service && npm run build",
     "start": "electron ."
   },
@@ -36,10 +42,104 @@
     "concurrently": "10.0.5",
     "cross-env": "10.1.0",
     "electron": "44.0.0",
+    "electron-builder": "26.15.3",
+    "electron-devtools-installer": "^4.0.0",
     "jsdom": "27.4.0",
     "papaparse": "^5.7.0",
     "typescript": "5.9.3",
     "vitest": "4.1.11",
     "wait-on": "9.1.0"
+  },
+  "build": {
+    "appId": "com.stereovisor.app",
+    "productName": "Stereovisor",
+    "asar": true,
+    "compression": "normal",
+    "directories": {
+      "output": "release"
+    },
+    "electronDist": "node_modules/electron/dist",
+    "files": [
+      "dist/**/*",
+      "dist-electron/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "service",
+        "to": "service",
+        "filter": [
+          "**/*.py",
+          "!**/.models{,/**}",
+          "!**/.projects{,/**}",
+          "!**/__pycache__{,/**}"
+        ]
+      },
+      {
+        "from": "scripts",
+        "to": "scripts",
+        "filter": [
+          "**/*.py",
+          "**/*.ps1",
+          "**/*.txt",
+          "!**/__pycache__{,/**}"
+        ]
+      },
+      {
+        "from": ".cache/vendor",
+        "to": ".cache/vendor",
+        "filter": [
+          "**/*",
+          "!**/.git{,/**}"
+        ]
+      },
+      {
+        "from": ".venv",
+        "to": ".venv",
+        "filter": [
+          "**/*",
+          "!**/__pycache__{,/**}",
+          "!**/*.pyc"
+        ]
+      },
+      {
+        "from": ".venv-ai",
+        "to": ".venv-ai",
+        "filter": [
+          "**/*",
+          "!**/__pycache__{,/**}",
+          "!**/*.pyc"
+        ]
+      },
+      {
+        "from": ".venv-powerpaint",
+        "to": ".venv-powerpaint",
+        "filter": [
+          "**/*",
+          "!**/__pycache__{,/**}",
+          "!**/*.pyc"
+        ]
+      }
+    ],
+    "win": {
+      "target": [
+        "nsis",
+        "portable"
+      ],
+      "icon": "public/app-icon.png",
+      "signAndEditExecutable": false,
+      "signExecutable": false
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Stereovisor"
+    },
+    "portable": {
+      "artifactName": "Stereovisor-${version}-portable.${ext}"
+    },
+    "artifactName": "Stereovisor-${version}-setup.${ext}"
   }
 }

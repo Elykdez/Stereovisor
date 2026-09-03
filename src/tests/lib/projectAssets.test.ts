@@ -25,6 +25,8 @@ function scene(cutoutUrl: string, backgroundUrl: string | null): SceneProject {
       maskRevision: 2,
       depth: 0.91,
       order: 1,
+      offsetX: 0,
+      offsetY: 0,
       selected: true,
       visible: true,
       bounds: [100, 300, 650, 1080],

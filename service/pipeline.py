@@ -6,9 +6,11 @@ import json
 import logging
 import math
 import os
+import re
 import shutil
 import threading
 import time
+import urllib.error
 import urllib.request
 import uuid
 import warnings
@@ -20,18 +22,20 @@ import numpy as np
 from PIL import Image, ImageChops, ImageDraw, ImageEnhance, ImageFilter
 
 from .ai_models import (
+    CUSTOM_OBJECT_LABELS,
     DEFAULT_SEGMENTATION_DENSITY,
     InstanceMask,
     begin_vram_stage,
     grounded_sam_instances,
     normalize_segmentation_density,
+    normalize_segmentation_labels,
     peak_vram_mb,
     verify_vram_peak,
 )
 from .config import DEVICE, MODEL_ROOT
 from .depth import depth_for_mask, depth_preview, estimate_near_map, foreground_depth_plane
 from .jobs import JobCancelled
-from .refinement import generate_background_prompt, powerpaint_inpaint
+from .refinement import generate_background_prompt, powerpaint_inpaint, propose_object_vocabulary
 from .schemas import InpaintHistoryPayload, LayerPayload, ProjectPayload
 from .storage import asset_url
 
@@ -42,10 +46,16 @@ logger = logging.getLogger(__name__)
 PIPELINE_LOCK = threading.Lock()
 INPAINT_HISTORY_LOCK = threading.Lock()
 MASK_HISTORY_LOCK = threading.Lock()
+MERGE_HISTORY_LOCK = threading.Lock()
 ProgressCallback = Callable[[int, str, str], None]
 CancellationCheck = Callable[[], None]
 INPAINT_HISTORY_LIMIT = 20
 MASK_HISTORY_LIMIT = 20
+MERGE_HISTORY_LIMIT = 20
+# Manual layer creation is user-driven, so both the count and the name it can
+# store are bounded before they reach project storage and the export manifest.
+MAX_LAYERS = 64
+MAX_LAYER_NAME_LENGTH = 80
 LAMA_URL = "https://github.com/Sanster/models/releases/download/add_big_lama/big-lama.pt"
 LAMA_MD5 = "e3aa4aaa15225a33ec84f9f4bc47e500"
 INSPYRENET_MODEL_URL = "https://github.com/plemeri/transparent-background/releases/download/1.2.12/ckpt_base.pth"
@@ -294,6 +304,163 @@ def mask_history(project: ProjectPayload, directory: Path) -> list[InpaintHistor
     ]
 
 
+def _merge_history_stack(directory: Path, stack: str) -> Path:
+    return directory / ".layer-merge-history" / stack
+
+
+def _merge_history_entries(directory: Path, stack: str) -> list[Path]:
+    stack_directory = _merge_history_stack(directory, stack)
+    return sorted(
+        (entry for entry in stack_directory.iterdir() if entry.is_dir()),
+        key=lambda entry: entry.name,
+    ) if stack_directory.is_dir() else []
+
+
+def _push_merge_history(project: ProjectPayload, directory: Path, stack: str) -> None:
+    snapshot = _merge_history_stack(directory, stack) / f"{time.time_ns():020d}-{uuid.uuid4().hex}"
+    snapshot.mkdir(parents=True, exist_ok=True)
+    (snapshot / "project.json").write_text(project.model_dump_json(indent=2), encoding="utf-8")
+    for asset in directory.glob("*.png"):
+        shutil.copy2(asset, snapshot / asset.name)
+    for history_name in (".mask-history", ".inpaint-history"):
+        history = directory / history_name
+        if history.is_dir():
+            shutil.copytree(history, snapshot / history_name)
+    for stale in _merge_history_entries(directory, stack)[:-MERGE_HISTORY_LIMIT]:
+        shutil.rmtree(stale, ignore_errors=True)
+
+
+def _clear_merge_history(directory: Path, stack: str) -> None:
+    for entry in _merge_history_entries(directory, stack):
+        shutil.rmtree(entry, ignore_errors=True)
+
+
+def record_layer_merge_history(project: ProjectPayload, directory: Path) -> None:
+    # A merge replaces several layer assets and metadata, so keep one complete
+    # project snapshot rather than trying to reconstruct removed layer files.
+    with MERGE_HISTORY_LOCK:
+        _push_merge_history(project, directory, "undo")
+        _clear_merge_history(directory, "redo")
+    logger.info("layer merge history recorded: project=%s", project.id)
+
+
+def restore_layer_merge_history(
+    project: ProjectPayload,
+    directory: Path,
+    action: str,
+) -> ProjectPayload:
+    if action not in {"undo", "redo"}:
+        raise PipelineError("The layer merge history action is invalid")
+    opposite = "redo" if action == "undo" else "undo"
+    with MERGE_HISTORY_LOCK:
+        entries = _merge_history_entries(directory, action)
+        if not entries:
+            raise PipelineError(f"There is no {action} layer merge state")
+        _push_merge_history(project, directory, opposite)
+        snapshot = entries[-1]
+        snapshot_project = ProjectPayload.model_validate_json((snapshot / "project.json").read_text(encoding="utf-8"))
+        for asset in directory.glob("*.png"):
+            asset.unlink(missing_ok=True)
+        for asset in snapshot.glob("*.png"):
+            shutil.copy2(asset, directory / asset.name)
+        for history_name in (".mask-history", ".inpaint-history"):
+            current_history = directory / history_name
+            snapshot_history = snapshot / history_name
+            if current_history.exists():
+                shutil.rmtree(current_history, ignore_errors=True)
+            if snapshot_history.is_dir():
+                shutil.copytree(snapshot_history, current_history)
+        shutil.rmtree(snapshot, ignore_errors=True)
+    logger.info("layer merge history restored: project=%s action=%s", project.id, action)
+    return snapshot_project
+
+
+def layer_merge_history(project: ProjectPayload, directory: Path) -> list[InpaintHistoryPayload]:
+    return [
+        InpaintHistoryPayload(
+            targetId="layers",
+            canUndo=bool(_merge_history_entries(directory, "undo")),
+            canRedo=bool(_merge_history_entries(directory, "redo")),
+        )
+    ]
+
+
+def merge_layer_masks(
+    project: ProjectPayload,
+    directory: Path,
+    layer_ids: list[str],
+) -> ProjectPayload:
+    unique_ids = list(dict.fromkeys(layer_ids))
+    if len(unique_ids) < 2:
+        raise PipelineError("Select at least two layers to merge")
+    known = {layer.id: layer for layer in project.layers}
+    if any(layer_id not in known for layer_id in unique_ids):
+        raise PipelineError("The layer merge selected an unknown layer")
+
+    # Use project order for a deterministic survivor and stable depth/order.
+    selected = [layer for layer in project.layers if layer.id in unique_ids]
+    source = Image.open(directory / "source.png").convert("RGB")
+    masks = []
+    for layer in selected:
+        mask = Image.open(directory / Path(layer.maskUrl).name).convert("L")
+        if mask.size != source.size:
+            raise PipelineError("The selected layer masks do not match the source image")
+        masks.append(np.asarray(mask, dtype=np.uint8))
+    alpha = np.maximum.reduce(masks)
+    if not np.count_nonzero(alpha > 8):
+        raise PipelineError("The selected layer masks are empty")
+
+    record_layer_merge_history(project, directory)
+    for layer in selected:
+        _clear_mask_history(directory, layer.id, "undo")
+        _clear_mask_history(directory, layer.id, "redo")
+    survivor = selected[0]
+    mask_name = Path(survivor.maskUrl).name
+    proposal_name = Path(survivor.proposalMaskUrl).name if survivor.proposalMaskUrl else f"{survivor.id}-proposal-mask.png"
+    cutout_name = Path(survivor.cutoutUrl).name
+    Image.fromarray(alpha).save(directory / mask_name)
+    Image.fromarray(alpha).save(directory / proposal_name)
+    cutout = source.convert("RGBA")
+    cutout.putalpha(Image.fromarray(alpha))
+    cutout.save(directory / cutout_name)
+
+    removed_assets = {
+        Path(layer.cutoutUrl).name
+        for layer in selected[1:]
+    } | {
+        Path(layer.maskUrl).name
+        for layer in selected[1:]
+    } | {
+        Path(layer.proposalMaskUrl).name
+        for layer in selected[1:]
+        if layer.proposalMaskUrl
+    }
+    for asset_name in removed_assets:
+        (directory / asset_name).unlink(missing_ok=True)
+
+    merged_layer = survivor.model_copy(
+        update={
+            "name": f"Merged ({len(selected)} objects)",
+            "proposalMaskUrl": asset_url(project.id, proposal_name),
+            "refinementState": "rough",
+            "confirmed": False,
+            "maskRevision": survivor.maskRevision + 1,
+            "bounds": _bounds(np.where(alpha > 8, 255, 0).astype(np.uint8)),
+            "selected": any(layer.selected for layer in selected),
+            "visible": any(layer.visible for layer in selected),
+            "confidence": round(max(layer.confidence for layer in selected), 3),
+        }
+    )
+    updated_layers = [
+        merged_layer if layer.id == survivor.id else layer
+        for layer in project.layers
+        if layer.id == survivor.id or layer.id not in unique_ids
+    ]
+    updated = _invalidate_background(project.model_copy(update={"layers": updated_layers}))
+    logger.info("layer masks merged: project=%s selected=%s survivor=%s", project.id, unique_ids, survivor.id)
+    return updated
+
+
 def _save_layer(
     image: Image.Image,
     alpha: np.ndarray,
@@ -404,6 +571,108 @@ def confirm_layer_mask(project: ProjectPayload, layer_id: str) -> ProjectPayload
     )
 
 
+def _next_layer_index(project: ProjectPayload) -> int:
+    """Lowest free `layer-NN` slot so a new layer never reuses live assets."""
+    used = {
+        int(match.group(1))
+        for match in (re.fullmatch(r"layer-(\d+)", layer.id) for layer in project.layers)
+        if match
+    }
+    index = 0
+    while index + 1 in used:
+        index += 1
+    return index
+
+
+def clean_layer_name(name: str) -> str:
+    # Collapse whitespace so a pasted multi-line name cannot break the layer
+    # list or the exported manifest.
+    cleaned = " ".join(name.split())
+    if not cleaned:
+        raise PipelineError("A layer name cannot be empty")
+    return cleaned[:MAX_LAYER_NAME_LENGTH]
+
+
+def create_layer_from_mask(
+    project: ProjectPayload,
+    directory: Path,
+    mask: Image.Image,
+    name: str | None = None,
+) -> ProjectPayload:
+    """Add a hand-brushed foreground layer to an already analyzed project."""
+    if len(project.layers) >= MAX_LAYERS:
+        raise PipelineError(f"A project is limited to {MAX_LAYERS} layers")
+    source = Image.open(directory / "source.png").convert("RGB")
+    if mask.size != source.size:
+        raise PipelineError("The new layer mask dimensions do not match the source image")
+    alpha = np.asarray(mask.convert("L"), dtype=np.uint8)
+    if not np.count_nonzero(alpha > 8):
+        raise PipelineError("Paint an area before adding it as a layer")
+
+    index = _next_layer_index(project)
+    # A brushed region is not a detector proposal, so it carries the manual kind:
+    # refinement aligns it to image edges instead of assuming one salient subject.
+    layer = _save_layer(
+        source,
+        alpha,
+        directory,
+        project.id,
+        index,
+        name=clean_layer_name(name) if name else f"Area {index + 1:02d}",
+        kind="manual",
+    )
+    layer = layer.model_copy(
+        update={"order": max((candidate.order for candidate in project.layers), default=-1) + 1}
+    )
+    # A new foreground invalidates any built plate: its pixels must be rebuilt.
+    updated = _invalidate_background(project.model_copy(update={"layers": [*project.layers, layer]}))
+    logger.info(
+        "layer created: project=%s layer=%s pixels=%s layers=%s",
+        project.id,
+        layer.id,
+        int(np.count_nonzero(alpha > 8)),
+        len(updated.layers),
+    )
+    return updated
+
+
+def rename_layer(project: ProjectPayload, layer_id: str, name: str) -> ProjectPayload:
+    if layer_id not in {layer.id for layer in project.layers}:
+        raise PipelineError("The rename request selected an unknown layer")
+    cleaned = clean_layer_name(name)
+    logger.info("layer renamed: project=%s layer=%s", project.id, layer_id)
+    return project.model_copy(
+        update={
+            "layers": [
+                layer.model_copy(update={"name": cleaned}) if layer.id == layer_id else layer
+                for layer in project.layers
+            ]
+        }
+    )
+
+
+def delete_layer(project: ProjectPayload, directory: Path, layer_id: str) -> ProjectPayload:
+    known = {layer.id: layer for layer in project.layers}
+    if layer_id not in known:
+        raise PipelineError("The delete request selected an unknown layer")
+    layer = known[layer_id]
+
+    # Snapshot the whole layer set first. Deleting removes image assets that
+    # cannot be reconstructed, so it shares the reversible layer history.
+    record_layer_merge_history(project, directory)
+    with MASK_HISTORY_LOCK:
+        _clear_mask_history(directory, layer_id, "undo")
+        _clear_mask_history(directory, layer_id, "redo")
+    for asset in (layer.cutoutUrl, layer.maskUrl, layer.proposalMaskUrl):
+        if asset:
+            (directory / Path(asset).name).unlink(missing_ok=True)
+
+    remaining = [candidate for candidate in project.layers if candidate.id != layer_id]
+    updated = _invalidate_background(project.model_copy(update={"layers": remaining}))
+    logger.info("layer deleted: project=%s layer=%s remaining=%s", project.id, layer_id, len(remaining))
+    return updated
+
+
 def save_extra_inpaint_mask(
     project: ProjectPayload,
     directory: Path,
@@ -507,7 +776,11 @@ class PreviewPipeline:
         segmentation_density: str = DEFAULT_SEGMENTATION_DENSITY,
         progress: ProgressCallback | None = None,
         cancelled: CancellationCheck | None = None,
+        *,
+        segmentation_labels: str | None = None,
+        use_vlm_vocabulary: bool = False,
     ) -> ProjectPayload:
+        del segmentation_density, segmentation_labels, use_vlm_vocabulary
         # Preview segmentation is a deterministic color-region heuristic. It
         # keeps the workflow usable without model weights, but is not a claim
         # of production-quality semantic segmentation.
@@ -615,13 +888,21 @@ def _release_cuda(torch_module: object) -> None:
     gc.collect()
     cuda = getattr(torch_module, "cuda")
     if cuda.is_available():
+        synchronize = getattr(cuda, "synchronize", None)
+        if callable(synchronize):
+            synchronize()
         cuda.empty_cache()
 
 
 _inspyrenet_remover: object | None = None
 
 
-def _download_with_resume(url: str, target: Path, expected_md5: str) -> None:
+def _download_with_resume(
+    url: str,
+    target: Path,
+    expected_md5: str,
+    progress_callback: Callable[[int], None] | None = None,
+) -> None:
     # Resume through a .part file, then verify the complete checksum before the
     # atomic rename. Partial or tampered model files never become loadable.
     logger.info("model download started: target=%s", target.name)
@@ -640,11 +921,26 @@ def _download_with_resume(url: str, target: Path, expected_md5: str) -> None:
                 if offset and status != 206:
                     partial.unlink(missing_ok=True)
                     continue
+                content_range = response.headers.get("Content-Range", "")
+                try:
+                    total = int(content_range.rsplit("/", 1)[1]) if "/" in content_range else offset + int(response.headers["Content-Length"])
+                except (KeyError, TypeError, ValueError):
+                    total = 0
+                last_progress = -1
                 with partial.open("ab" if offset else "wb") as output:
                     while chunk := response.read(1024 * 1024):
                         output.write(chunk)
+                        if progress_callback and total > 0:
+                            progress = min(100, int(output.tell() * 100 / total))
+                            if progress != last_progress:
+                                progress_callback(progress)
+                                last_progress = progress
             digest = hashlib.md5(partial.read_bytes()).hexdigest()
             if digest != expected_md5:
+                # Resumed bytes that fail the checksum cannot be trusted, and a
+                # full-length .part would make every later attempt ask for a
+                # range past the end of the file. Discard it.
+                partial.unlink(missing_ok=True)
                 logger.warning("model checksum mismatch: target=%s attempt=%s", target.name, attempt + 1)
                 raise PipelineError(f"Downloaded model failed its checksum: {target.name}")
             partial.replace(target)
@@ -653,6 +949,11 @@ def _download_with_resume(url: str, target: Path, expected_md5: str) -> None:
         except PipelineError:
             raise
         except Exception as error:
+            if isinstance(error, urllib.error.HTTPError) and error.code == 416:
+                # The leftover .part is at or past the end of the remote file,
+                # so no range request can extend it. Start the next attempt
+                # from zero instead of asking for the same rejected range.
+                partial.unlink(missing_ok=True)
             last_error = error
             logger.warning("model download retry: target=%s attempt=%s error=%s", target.name, attempt + 1, error)
             if attempt < 7:
@@ -735,7 +1036,7 @@ def _matte_mask(image: Image.Image, mask: np.ndarray) -> np.ndarray:
     return full
 
 
-def _guided_mask_refine(image: Image.Image, mask: np.ndarray) -> np.ndarray:
+def _guided_mask_refine(image: Image.Image, mask: np.ndarray, band_scale: float = 0.12) -> np.ndarray:
     """Refine an arbitrary rough foreground mask without assuming it is one salient subject."""
     try:
         import cv2
@@ -743,11 +1044,23 @@ def _guided_mask_refine(image: Image.Image, mask: np.ndarray) -> np.ndarray:
         raise PipelineError("OpenCV is unavailable. Run scripts/setup-ai.ps1.") from error
 
     binary = (mask > 8).astype(np.uint8)
-    if not np.count_nonzero(binary):
+    area = int(np.count_nonzero(binary))
+    if not area:
         raise PipelineError("The selected foreground mask is empty")
-    radius = max(2, round(min(binary.shape) * 0.006))
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (radius * 2 + 1, radius * 2 + 1))
-    eroded = cv2.erode(binary, kernel, iterations=1)
+    # The band GrabCut is allowed to decide has to scale with the object, not
+    # the canvas. A hand-brushed boundary is off by a share of the object's own
+    # size, so a fixed few-pixel band leaves the mask essentially unchanged.
+    radius = max(2, min(round(band_scale * math.sqrt(area)), round(min(binary.shape) * 0.08)))
+    eroded = np.zeros_like(binary)
+    while radius >= 2:
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (radius * 2 + 1, radius * 2 + 1))
+        eroded = cv2.erode(binary, kernel, iterations=1)
+        # A thin or wiry mask can erode away completely. Keep halving the band
+        # until a definite-foreground core survives to seed the model.
+        if np.count_nonzero(eroded):
+            break
+        radius //= 2
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (max(radius, 2) * 2 + 1, max(radius, 2) * 2 + 1))
     dilated = cv2.dilate(binary, kernel, iterations=1)
     if not np.count_nonzero(eroded):
         eroded = binary.copy()
@@ -807,13 +1120,16 @@ def _lama_inpaint(image: Image.Image, mask: Image.Image) -> tuple[Image.Image, i
     if not model_path.is_file():
         _download_lama(model_path)
     device = _resolve_device(torch)
-    begin_vram_stage(torch)
-    model = torch.jit.load(str(model_path), map_location=device).eval()
-    rgb, original_size = _pad_to_modulo(np.asarray(image.convert("RGB"), dtype=np.float32), 8)
-    binary, _ = _pad_to_modulo(np.asarray(mask.convert("L"), dtype=np.float32), 8)
-    image_tensor = torch.from_numpy(rgb.transpose(2, 0, 1) / 255.0).unsqueeze(0).to(device)
-    mask_tensor = torch.from_numpy((binary > 0).astype(np.float32)).unsqueeze(0).unsqueeze(0).to(device)
+    model = None
+    image_tensor = None
+    mask_tensor = None
     try:
+        begin_vram_stage(torch)
+        model = torch.jit.load(str(model_path), map_location=device).eval()
+        rgb, original_size = _pad_to_modulo(np.asarray(image.convert("RGB"), dtype=np.float32), 8)
+        binary, _ = _pad_to_modulo(np.asarray(mask.convert("L"), dtype=np.float32), 8)
+        image_tensor = torch.from_numpy(rgb.transpose(2, 0, 1) / 255.0).unsqueeze(0).to(device)
+        mask_tensor = torch.from_numpy((binary > 0).astype(np.float32)).unsqueeze(0).unsqueeze(0).to(device)
         with torch.inference_mode():
             output = model(image_tensor, mask_tensor)
         if isinstance(output, dict):
@@ -836,6 +1152,8 @@ class ProductionPipeline:
         directory: Path,
         project_id: str,
         segmentation_density: str = DEFAULT_SEGMENTATION_DENSITY,
+        segmentation_labels: str | None = None,
+        use_vlm_vocabulary: bool = False,
         progress: ProgressCallback | None = None,
         cancelled: CancellationCheck | None = None,
     ) -> ProjectPayload:
@@ -844,16 +1162,37 @@ class ProductionPipeline:
         # The lock serializes model loads and GPU allocations. Depth inference
         # follows segmentation so peak VRAM metrics describe each stage clearly.
         with PIPELINE_LOCK:
-            _report(progress, 8, "Segmenting objects", "Grounding DINO-T and SAM 2.1 are finding individual objects.")
+            resolved_labels = segmentation_labels
+            manual_labels = normalize_segmentation_labels(segmentation_labels)
+            environment_labels = normalize_segmentation_labels(CUSTOM_OBJECT_LABELS)
+            if use_vlm_vocabulary and not manual_labels and not environment_labels:
+                _report(progress, 4, "Describing objects", "Qwen3-VL is proposing a scene vocabulary.")
+                try:
+                    resolved_labels, qwen_peak = propose_object_vocabulary(
+                        image,
+                        normalize_segmentation_density(segmentation_density),
+                    )
+                except RuntimeError as error:
+                    raise PipelineError(str(error)) from error
+                metrics = {"qwen3VlVocabulary": qwen_peak}
+                logger.info("AI vocabulary proposal complete: project=%s labels=%s peak_mb=%s", project_id, len(normalize_segmentation_labels(resolved_labels)), qwen_peak)
+            else:
+                metrics = {}
+            _report(progress, 8, "Segmenting objects", "Grounding DINO-B and SAM 2.1 are finding individual objects.")
             try:
-                instances, metrics = grounded_sam_instances(image, normalize_segmentation_density(segmentation_density))
+                instances, segmentation_metrics = grounded_sam_instances(
+                    image,
+                    normalize_segmentation_density(segmentation_density),
+                    resolved_labels,
+                )
+                metrics.update(segmentation_metrics)
             except RuntimeError as error:
                 raise PipelineError(str(error)) from error
             _check_cancelled(cancelled)
             if not instances:
                 raise PipelineError(
-                    "Grounding DINO-T found no supported foreground objects. "
-                    "Add labels with STEREOVISOR_OBJECT_LABELS and retry."
+                    "Grounding DINO-B found no supported foreground objects. "
+                    "Edit the segmentation vocabulary or set STEREOVISOR_OBJECT_LABELS and retry."
                 )
             _report(progress, 48, "Estimating depth", "Depth Anything 3 is mapping near and distant regions.")
             try:

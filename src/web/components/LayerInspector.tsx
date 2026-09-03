@@ -8,18 +8,30 @@ interface Props {
   editingLayerId: string | null;
   refiningLayerId: string | null;
   confirmingLayerId: string | null;
-  aiRefineAvailable: boolean;
   backgroundUrl: string | null;
   inpaintingTargetId: string | null;
   focusedTargetId: string | null;
   layerInpaintAvailable: boolean;
   maskHistory: Record<string, InpaintHistoryState>;
   maskHistoryBusy: { layerId: string; action: "undo" | "redo" } | null;
+  selectedLayerIds: string[];
+  mergeHistory: InpaintHistoryState | null;
+  mergeHistoryBusy: "undo" | "redo" | null;
+  merging: boolean;
+  deletingLayerId: string | null;
+  disabled?: boolean;
   onEditMask: (layer: SceneLayer) => void;
-  onRefineMask: (layer: SceneLayer) => void;
+  onCancelEdit: () => void;
+  onDeleteLayer: (layerId: string) => void;
   onUndoRefine: (layerId: string) => void;
   onRedoRefine: (layerId: string) => void;
   onConfirmMask: (layer: SceneLayer) => void;
+  onSelectLayer: (layerId: string) => void;
+  onClearSelection: () => void;
+  onToggleSelected: () => void;
+  onMergeSelected: () => void;
+  onUndoMerge: () => void;
+  onRedoMerge: () => void;
   onInpaintTarget: (layerId: string | null) => void;
   onFocusTarget: (targetId: string) => void;
   onChange: (layers: SceneLayer[]) => void;
@@ -31,18 +43,30 @@ export function LayerInspector({
   editingLayerId,
   refiningLayerId,
   confirmingLayerId,
-  aiRefineAvailable,
   backgroundUrl,
   inpaintingTargetId,
   focusedTargetId,
   layerInpaintAvailable,
   maskHistory,
   maskHistoryBusy,
+  selectedLayerIds,
+  mergeHistory,
+  mergeHistoryBusy,
+  merging,
+  deletingLayerId,
+  disabled = false,
   onEditMask,
-  onRefineMask,
+  onCancelEdit,
+  onDeleteLayer,
   onUndoRefine,
   onRedoRefine,
   onConfirmMask,
+  onSelectLayer,
+  onClearSelection,
+  onToggleSelected,
+  onMergeSelected,
+  onUndoMerge,
+  onRedoMerge,
   onInpaintTarget,
   onFocusTarget,
   onChange
@@ -50,6 +74,11 @@ export function LayerInspector({
   const { t, layerName } = useAppTranslation();
   const selecting = phase === "selecting";
   const maskOperationActive = editingLayerId !== null || inpaintingTargetId !== null || refiningLayerId !== null || confirmingLayerId !== null;
+  // Cancelling an open editor stays available; a running refine or confirm has
+  // to finish first because it is already rewriting that layer's mask.
+  const maskJobActive = refiningLayerId !== null || confirmingLayerId !== null;
+  const selectionLocked = disabled || maskOperationActive || merging;
+  const selected = new Set(selectedLayerIds);
 
   function update(id: string, change: Partial<SceneLayer>): void {
     // Keep layer edits immutable; App owns the project snapshot and merges this
@@ -58,7 +87,8 @@ export function LayerInspector({
   }
 
   return (
-    <section className="layers-panel">
+    <section className={`layers-panel ${disabled ? "editor-locked" : ""}`} aria-disabled={disabled}>
+      {disabled && <div className="editor-lock-note" role="status">{t("startup.blockedDetail")}</div>}
       <div className="panel-heading">
         <div>
           <span className="eyebrow">{selecting ? t("layers.proposals") : t("layers.sceneStack")}</span>
@@ -71,14 +101,70 @@ export function LayerInspector({
           ? t("layers.selectingHelp")
           : t("layers.editingHelp")}
       </p>
+      {selecting && (
+        <div className="selection-toolbar" aria-label={t("layers.selectionControls")}>
+          <div className="selection-summary">
+            <strong>{t("layers.selectionCount", { count: selectedLayerIds.length })}</strong>
+            <span>{t("layers.selectionHint")}</span>
+          </div>
+          <div className="selection-actions">
+            <button
+              type="button"
+              className="mask-edit-button"
+              disabled={selectedLayerIds.length === 0 || selectionLocked}
+              onClick={onToggleSelected}
+            >
+              {t("layers.toggleSelected")}
+            </button>
+            <button
+              type="button"
+              className="mask-edit-button merge"
+              disabled={selectedLayerIds.length < 2 || selectionLocked}
+              onClick={onMergeSelected}
+            >
+              {merging ? t("layers.merging") : t("layers.mergeSelected")}
+            </button>
+            <button
+              type="button"
+              className="text-button"
+              disabled={selectedLayerIds.length === 0 || selectionLocked}
+              onClick={onClearSelection}
+            >
+              {t("layers.clearSelection")}
+            </button>
+          </div>
+          {mergeHistory && (mergeHistory.canUndo || mergeHistory.canRedo) && (
+            <div className="selection-history">
+              <button
+                type="button"
+                className="mask-edit-button history"
+                disabled={selectionLocked || mergeHistoryBusy !== null || !mergeHistory.canUndo}
+                onClick={onUndoMerge}
+                title={t("layers.undoMergeTitle")}
+              >
+                {mergeHistoryBusy === "undo" ? t("layers.undoing") : t("layers.undoMerge")}
+              </button>
+              <button
+                type="button"
+                className="mask-edit-button history"
+                disabled={selectionLocked || mergeHistoryBusy !== null || !mergeHistory.canRedo}
+                onClick={onRedoMerge}
+                title={t("layers.redoMergeTitle")}
+              >
+                {mergeHistoryBusy === "redo" ? t("layers.redoing") : t("layers.redoMerge")}
+              </button>
+            </div>
+          )}
+        </div>
+      )}
       <div className="layer-list">
         {!selecting && backgroundUrl && (
           <article
             className={`layer-card enabled background-layer ${inpaintingTargetId === "background" ? "editing" : ""} ${focusedTargetId === "background" ? "focused" : ""}`}
-            tabIndex={0}
+            tabIndex={disabled ? -1 : 0}
             aria-current={focusedTargetId === "background" ? "true" : undefined}
-            onPointerDown={() => onFocusTarget("background")}
-            onFocus={() => onFocusTarget("background")}
+            onPointerDown={() => { if (!disabled) onFocusTarget("background"); }}
+            onFocus={() => { if (!disabled) onFocusTarget("background"); }}
           >
             <div className="layer-toggle layer-preview">
               <img src={resolveAssetUrl(backgroundUrl)} alt="" />
@@ -92,7 +178,7 @@ export function LayerInspector({
             <button
               type="button"
               className="mask-edit-button inpaint"
-              disabled={maskOperationActive || !layerInpaintAvailable}
+              disabled={disabled || maskOperationActive || !layerInpaintAvailable}
               title={layerInpaintAvailable ? t("layers.paintBackgroundTitle") : t("layers.powerpaintRequired")}
               onClick={() => {
                 onFocusTarget("background");
@@ -105,32 +191,48 @@ export function LayerInspector({
         )}
         {layers.map((layer) => {
           const enabled = selecting ? layer.selected : layer.visible;
+          const isSelected = selecting && selected.has(layer.id);
           return (
             <article
-              className={`layer-card ${enabled ? "enabled" : ""} ${editingLayerId === layer.id ? "editing" : ""} ${!selecting && focusedTargetId === layer.id ? "focused" : ""}`}
+              className={`layer-card ${enabled ? "enabled" : ""} ${isSelected ? "selected" : ""} ${editingLayerId === layer.id ? "editing" : ""} ${!selecting && focusedTargetId === layer.id ? "focused" : ""}`}
               key={layer.id}
               tabIndex={selecting ? undefined : 0}
+              aria-selected={selecting ? isSelected : undefined}
               aria-current={!selecting && focusedTargetId === layer.id ? "true" : undefined}
-              onPointerDown={() => { if (!selecting) onFocusTarget(layer.id); }}
-              onFocus={() => { if (!selecting) onFocusTarget(layer.id); }}
+              onClick={(event) => {
+                if (disabled || !selecting || selectionLocked || (event.target as HTMLElement).closest("button, input, select")) return;
+                onSelectLayer(layer.id);
+              }}
+              onPointerDown={() => { if (!disabled && !selecting) onFocusTarget(layer.id); }}
+              onFocus={() => { if (!disabled && !selecting) onFocusTarget(layer.id); }}
             >
               <button
                 type="button"
                 className="layer-toggle"
-                aria-pressed={enabled}
-                aria-label={t(enabled ? "layers.disable" : "layers.enable", { name: layerName(layer.name) })}
-                disabled={maskOperationActive}
+                aria-pressed={selecting ? isSelected : enabled}
+                aria-label={selecting ? t(isSelected ? "layers.deselect" : "layers.select", { name: layerName(layer.name) }) : t(enabled ? "layers.disable" : "layers.enable", { name: layerName(layer.name) })}
+                disabled={disabled || selectionLocked}
                 onClick={() => {
+                  if (selecting) {
+                    onSelectLayer(layer.id);
+                    return;
+                  }
                   if (!selecting) onFocusTarget(layer.id);
-                  update(layer.id, selecting ? { selected: !enabled } : { visible: !enabled });
+                  update(layer.id, { visible: !enabled });
                 }}
               >
                 <img src={resolveAssetUrl(selecting ? layer.maskUrl : layer.cutoutUrl)} alt="" />
                 <span className="toggle-indicator">{enabled ? t("layers.on") : t("layers.off")}</span>
+                {isSelected && <span className="toggle-indicator selection-indicator">{t("layers.selected")}</span>}
               </button>
               <div className="layer-meta">
                 <strong>{layerName(layer.name)}</strong>
-                <span>{layer.kind === "depth-plane" ? t("layers.depthPlane") : `${Math.round(layer.confidence * 100)}%`} / {t("layers.depth", { value: Math.round(layer.depth * 100) })}</span>
+                <span>{layer.kind === "depth-plane"
+                  ? t("layers.depthPlane")
+                  : layer.kind === "manual"
+                    // A hand-brushed layer has no detector confidence to report.
+                    ? t("layers.manual")
+                    : `${Math.round(layer.confidence * 100)}%`} / {t("layers.depth", { value: Math.round(layer.depth * 100) })}</span>
               </div>
               {selecting && (
                 <span className={`mask-state ${layer.confirmed ? "confirmed" : layer.refinementState}`}>
@@ -147,13 +249,14 @@ export function LayerInspector({
                       max="1"
                       step="0.01"
                       value={layer.depth}
+                      disabled={disabled}
                       onChange={(event) => update(layer.id, { depth: Number(event.target.value) })}
                     />
                   </label>
                   <button
                     type="button"
                     className="mask-edit-button inpaint"
-                    disabled={!enabled || maskOperationActive || !layerInpaintAvailable}
+                    disabled={disabled || !enabled || maskOperationActive || !layerInpaintAvailable}
                     title={layerInpaintAvailable ? t("layers.paintLayerTitle", { name: layerName(layer.name) }) : t("layers.powerpaintRequired")}
                     onClick={() => {
                       onFocusTarget(layer.id);
@@ -166,29 +269,23 @@ export function LayerInspector({
               )}
               {selecting && (
                 <div className="mask-actions">
+                  {/* While this layer's mask is open the button closes it
+                      again, so a quick look costs one click each way. */}
                   <button
                     type="button"
                     className="mask-edit-button"
-                    disabled={!enabled || maskOperationActive}
-                    onClick={() => onEditMask(layer)}
+                    disabled={disabled || (editingLayerId === layer.id ? maskJobActive : !enabled || maskOperationActive)}
+                    title={editingLayerId === layer.id ? t("layers.cancelEditTitle") : undefined}
+                    onClick={() => editingLayerId === layer.id ? onCancelEdit() : onEditMask(layer)}
                   >
-                    {editingLayerId === layer.id ? t("layers.editing") : t("layers.edit")}
-                  </button>
-                  <button
-                    type="button"
-                    className="mask-edit-button refine"
-                    disabled={!enabled || maskOperationActive || !aiRefineAvailable}
-                    title={aiRefineAvailable ? t("layers.refineTitle") : t("layers.refineRequiresAI")}
-                    onClick={() => onRefineMask(layer)}
-                  >
-                    {refiningLayerId === layer.id ? t("layers.refining") : t("mask.refine")}
+                    {editingLayerId === layer.id ? t("mask.cancel") : t("layers.edit")}
                   </button>
                   {maskHistory[layer.id] && (maskHistory[layer.id].canUndo || maskHistory[layer.id].canRedo) && (
                     <>
                       <button
                         type="button"
                         className="mask-edit-button history"
-                        disabled={maskOperationActive || maskHistoryBusy !== null || !maskHistory[layer.id].canUndo}
+                        disabled={disabled || maskOperationActive || maskHistoryBusy !== null || !maskHistory[layer.id].canUndo}
                         title={t("layers.undoRefineTitle")}
                         onClick={() => onUndoRefine(layer.id)}
                       >
@@ -197,7 +294,7 @@ export function LayerInspector({
                       <button
                         type="button"
                         className="mask-edit-button history"
-                        disabled={maskOperationActive || maskHistoryBusy !== null || !maskHistory[layer.id].canRedo}
+                        disabled={disabled || maskOperationActive || maskHistoryBusy !== null || !maskHistory[layer.id].canRedo}
                         title={t("layers.redoRefineTitle")}
                         onClick={() => onRedoRefine(layer.id)}
                       >
@@ -208,10 +305,19 @@ export function LayerInspector({
                   <button
                     type="button"
                     className="mask-edit-button confirm"
-                    disabled={!enabled || maskOperationActive || layer.confirmed}
+                    disabled={disabled || !enabled || maskOperationActive || layer.confirmed}
                     onClick={() => onConfirmMask(layer)}
                   >
                     {confirmingLayerId === layer.id ? t("layers.confirming") : layer.confirmed ? t("layers.confirmed") : t("layers.confirm")}
+                  </button>
+                  <button
+                    type="button"
+                    className="mask-edit-button delete"
+                    disabled={disabled || maskOperationActive || deletingLayerId !== null}
+                    title={t("layers.deleteTitle", { name: layerName(layer.name) })}
+                    onClick={() => onDeleteLayer(layer.id)}
+                  >
+                    {deletingLayerId === layer.id ? t("layers.deleting") : t("layers.delete")}
                   </button>
                 </div>
               )}

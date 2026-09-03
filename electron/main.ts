@@ -8,6 +8,7 @@ import {
   type MenuItemConstructorOptions,
 } from "electron";
 import { spawn, type ChildProcess } from "node:child_process";
+import { existsSync, unlinkSync } from "node:fs";
 import { readFile, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { readSettings, writeSettings } from "./settings";
@@ -19,6 +20,7 @@ import {
 
 let mainWindow: BrowserWindow | null = null;
 let serviceProcess: ChildProcess | null = null;
+let modelPreparationProcess: ChildProcess | null = null;
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
 let appLocale: AppLocale = "en";
 
@@ -48,41 +50,198 @@ function nativeText(key: NativeMessage): string {
   return nativeMessages[appLocale][key];
 }
 
-function projectRoot(): string {
-  // Compiled Electron code lives in dist-electron; resolve resources from the
-  // repository/package root instead of relying on the current working folder.
-  return path.resolve(__dirname, "..");
+async function installReactDevTools(): Promise<void> {
+  // Keep the extension out of packaged builds: it is a development aid and
+  // electron-devtools-installer downloads it from the Chrome Web Store.
+  if (app.isPackaged || !process.env.VITE_DEV_SERVER_URL) return;
+
+  try {
+    const { default: installExtension, REACT_DEVELOPER_TOOLS } = await import(
+      "electron-devtools-installer"
+    );
+    const extension = await installExtension(REACT_DEVELOPER_TOOLS, {
+      // The dev renderer normally uses http://, but this also keeps the
+      // extension useful if a local file URL is used during development.
+      loadExtensionOptions: { allowFileAccess: true },
+    });
+    electronLog("devtools.react.installed", {
+      id: extension.id,
+      name: extension.name,
+    });
+  } catch (error) {
+    // DevTools are optional. A blocked network or stale Chrome Web Store
+    // package must not prevent the renderer from starting.
+    console.warn("[Stereovisor][electron] React Developer Tools unavailable", error);
+  }
 }
 
-function startService(): void {
+function appRoot(): string {
+  // In a packaged build the renderer lives in app.asar. In development the
+  // compiled Electron code lives in dist-electron, so both resolve from the
+  // application root instead of relying on the current working directory.
+  return app.isPackaged ? app.getAppPath() : path.resolve(__dirname, "..");
+}
+
+function resourceRoot(): string {
+  // electron-builder places extraResources beside app.asar under resources.
+  return app.isPackaged ? process.resourcesPath : appRoot();
+}
+
+function findPackagedModelRoot(): string {
+  const configured = process.env.STEREOVISOR_MODEL_ROOT?.trim();
+  if (configured) return configured;
+  if (!app.isPackaged) return path.join(appRoot(), "service", ".models");
+
+  // An unpacked build placed under the repository can reuse the existing model
+  // cache. An installed build falls back to a writable per-user location.
+  const searchRoots = [path.resolve(resourceRoot()), path.dirname(process.execPath)];
+  for (const root of searchRoots) {
+    let cursor = root;
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const candidate = path.join(cursor, "service", ".models");
+      if (existsSync(candidate)) return candidate;
+      const parent = path.dirname(cursor);
+      if (parent === cursor) break;
+      cursor = parent;
+    }
+  }
+  return path.join(app.getPath("userData"), "models");
+}
+
+function packagedModelsReady(modelRoot: string): boolean {
+  const required = [
+    path.join(modelRoot, "grounding-dino-base", ".stereovisor-ready"),
+    path.join(modelRoot, "sam2.1-hiera-small", ".stereovisor-ready"),
+    path.join(modelRoot, "da3-small", ".stereovisor-ready"),
+    path.join(modelRoot, "inspyrenet", "ckpt_base.pth"),
+    path.join(modelRoot, "big-lama.pt"),
+  ];
+  return required.every((file) => existsSync(file));
+}
+
+function startPackagedModelPreparation(showConsole: boolean): void {
+  if (!app.isPackaged || process.env.STEREOVISOR_MODE === "preview") return;
+  const root = resourceRoot();
+  const modelRoot = findPackagedModelRoot();
+  if (packagedModelsReady(modelRoot)) {
+    electronLog("models.bootstrap.skipped-ready", { modelRoot });
+    return;
+  }
+  const script = path.join(root, "scripts", "prepare-packaged-ai.ps1");
+  if (!existsSync(script)) {
+    console.error("[Stereovisor][electron] Packaged model preparation script is missing", script);
+    return;
+  }
+  const marker = path.join(modelRoot, ".stereovisor-bootstrap-running");
+  if (existsSync(marker)) {
+    // A force-quit can leave the marker behind after its child has gone away.
+    // Single-instance locking means no other Stereovisor bootstrap can own it,
+    // so clear the stale marker and start preparation again.
+    electronLog("models.bootstrap.stale-marker", { modelRoot });
+    try {
+      unlinkSync(marker);
+    } catch (error) {
+      console.warn("[Stereovisor][electron] Could not clear stale model marker", error);
+    }
+  }
+  const environment: NodeJS.ProcessEnv = {
+    ...process.env,
+    STEREOVISOR_APP_ROOT: root,
+    STEREOVISOR_MODEL_ROOT: modelRoot,
+  };
+  modelPreparationProcess = spawn(
+    process.platform === "win32" ? "powershell.exe" : "powershell",
+    [
+      "-NoProfile",
+      "-ExecutionPolicy",
+      "Bypass",
+      "-File",
+      script,
+      "-ResourceRoot",
+      root,
+      "-ModelRoot",
+      modelRoot,
+    ],
+    {
+      cwd: root,
+      windowsHide: !showConsole,
+      stdio: "pipe",
+      env: environment,
+    },
+  );
+  electronLog("models.bootstrap.started", { modelRoot });
+  modelPreparationProcess.stdout?.setEncoding("utf8");
+  modelPreparationProcess.stdout?.on("data", (chunk: string) => {
+    const output = chunk.trimEnd();
+    if (output) console.info("[Stereovisor][models]", output);
+  });
+  modelPreparationProcess.stderr?.setEncoding("utf8");
+  modelPreparationProcess.stderr?.on("data", (chunk: string) => {
+    const output = chunk.trimEnd();
+    if (output) console.warn("[Stereovisor][models]", output);
+  });
+  modelPreparationProcess.on("exit", (code, signal) => {
+    electronLog("models.bootstrap.exited", { code, signal });
+    modelPreparationProcess = null;
+  });
+  modelPreparationProcess.on("error", (error) => {
+    console.error("[Stereovisor][electron] Local model preparation failed", error);
+  });
+}
+
+function startService(showConsole: boolean): void {
   // Development uses the separately launched service. Packaged mode owns one
   // child process so renderer health checks have a predictable local endpoint.
   if (process.env.VITE_DEV_SERVER_URL) {
     electronLog("service.start.skipped-dev");
     return;
   }
-  const root = projectRoot();
-  const managedPython = path.join(root, ".venv", "Scripts", "python.exe");
+  const root = resourceRoot();
+  const managedPython = path.join(
+    root,
+    app.isPackaged ? ".venv-ai" : ".venv",
+    "Scripts",
+    "python.exe",
+  );
   const python =
     process.env.STEREOVISOR_PYTHON ??
-    (process.platform === "win32"
+    (existsSync(managedPython)
       ? managedPython
-      : path.join(root, ".venv", "bin", "python"));
+      : process.platform === "win32"
+        ? "python"
+        : path.join(root, ".venv", "bin", "python"));
+  const serviceRoot = root;
+  const packagedDataRoot = path.join(app.getPath("userData"), "workspace");
+  const environment: NodeJS.ProcessEnv = {
+    ...process.env,
+    STEREOVISOR_MODE: process.env.STEREOVISOR_MODE ?? "auto",
+    STEREOVISOR_APP_ROOT: serviceRoot,
+  };
+  if (app.isPackaged) {
+    environment.STEREOVISOR_PROJECT_ROOT = path.join(packagedDataRoot, "projects");
+    environment.STEREOVISOR_MODEL_ROOT = findPackagedModelRoot();
+    environment.STEREOVISOR_POWERPAINT_PYTHON = path.join(
+      root,
+      ".venv-powerpaint",
+      "Scripts",
+      "python.exe",
+    );
+    environment.STEREOVISOR_POWERPAINT_VENDOR = path.join(root, ".cache", "vendor", "PowerPaint");
+  }
   serviceProcess = spawn(
     python,
-    [path.join(root, "scripts", "run-service.py")],
+    [path.join(serviceRoot, "scripts", "run-service.py")],
     {
       cwd: root,
-      windowsHide: true,
+      windowsHide: !showConsole,
       stdio: "pipe",
-      env: {
-        ...process.env,
-        STEREOVISOR_MODE: process.env.STEREOVISOR_MODE ?? "auto",
-      },
+      env: environment,
     },
   );
   electronLog("service.start.requested", {
     python,
+    root: serviceRoot,
+    modelRoot: environment.STEREOVISOR_MODEL_ROOT,
     mode: process.env.STEREOVISOR_MODE ?? "auto",
   });
   serviceProcess.stdout?.setEncoding("utf8");
@@ -178,7 +337,7 @@ function createWindow(): void {
     height: 920,
     minWidth: 1020,
     minHeight: 680,
-    icon: path.join(projectRoot(), "public", "app-icon.png"),
+    icon: path.join(appRoot(), "dist", "app-icon.png"),
     backgroundColor: "#10110f",
     titleBarStyle: "hiddenInset",
     webPreferences: {
@@ -196,7 +355,7 @@ function createWindow(): void {
   mainWindow.webContents.on("will-navigate", (event, url) => {
     const allowed =
       process.env.VITE_DEV_SERVER_URL ??
-      `file://${path.join(projectRoot(), "dist", "index.html")}`;
+      `file://${path.join(appRoot(), "dist", "index.html")}`;
     if (!url.startsWith(allowed)) event.preventDefault();
   });
 
@@ -206,7 +365,7 @@ function createWindow(): void {
   } else {
     electronLog("window.load.package");
     // Actual ingress -> index.html
-    void mainWindow.loadFile(path.join(projectRoot(), "dist", "index.html"));
+    void mainWindow.loadFile(path.join(appRoot(), "dist", "index.html"));
   }
 }
 
@@ -319,13 +478,29 @@ if (!hasSingleInstanceLock) {
 
   // App Entrance
   app.whenReady().then(() => {
-    void readSettings().then((settings) => {
-      appLocale = settings.locale ?? normalizeLocale(app.getLocale());
-      electronLog("app.ready", { locale: appLocale });
-      startService();
-      installApplicationMenu();
-      createWindow();
-    });
+    // Paint a real window before any optional settings, extension, or model
+    // work. React DevTools can touch the network and must never gate startup.
+    installApplicationMenu();
+    createWindow();
+
+    void readSettings()
+      .then((settings) => {
+        appLocale = settings.locale ?? normalizeLocale(app.getLocale());
+        electronLog("app.ready", { locale: appLocale });
+        installApplicationMenu();
+        startService(settings.service.showConsole);
+        startPackagedModelPreparation(settings.service.showConsole);
+        void installReactDevTools();
+      })
+      .catch((error) => {
+        // A damaged settings file should not strand the app at a blank window.
+        // The renderer can still recover with its defaults and expose the
+        // local-service error through the startup gate.
+        console.error("[Stereovisor][electron] Settings unavailable; using defaults", error);
+        startService(false);
+        startPackagedModelPreparation(false);
+        void installReactDevTools();
+      });
     app.on("activate", () => {
       if (BrowserWindow.getAllWindows().length === 0) createWindow();
     });
@@ -337,6 +512,7 @@ if (!hasSingleInstanceLock) {
 
   app.on("before-quit", () => {
     electronLog("app.quitting");
+    modelPreparationProcess?.kill();
     serviceProcess?.kill();
   });
 }

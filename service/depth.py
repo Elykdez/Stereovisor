@@ -6,6 +6,7 @@ import numpy as np
 from PIL import Image, ImageFilter
 
 from .ai_models import DA3_PATH, begin_vram_stage, peak_vram_mb, release_cuda, resolve_device, verify_vram_peak
+from .config import snapshot_ready
 
 
 logger = logging.getLogger(__name__)
@@ -36,7 +37,7 @@ def normalize_depth(depth: np.ndarray, size: tuple[int, int]) -> np.ndarray:
 
 
 def estimate_near_map(image: Image.Image) -> tuple[np.ndarray, int]:
-    if not DA3_PATH.is_dir():
+    if not snapshot_ready(DA3_PATH):
         raise RuntimeError("Depth Anything 3 weights are missing. Run scripts/ensure-ready.ps1.")
     try:
         import torch

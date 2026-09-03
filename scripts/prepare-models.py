@@ -14,6 +14,45 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
+
+def completed_providers() -> list[str]:
+    """Stages already finished, including those the parent launcher prepared."""
+    return [key for key in os.environ.get("STEREOVISOR_BOOTSTRAP_COMPLETED", "").split(",") if key]
+
+
+def complete_provider(provider: str) -> None:
+    completed = completed_providers()
+    if provider not in completed:
+        completed.append(provider)
+    os.environ["STEREOVISOR_BOOTSTRAP_COMPLETED"] = ",".join(completed)
+
+
+def publish_bootstrap_status(
+    model_root: Path,
+    state: str,
+    detail: str,
+    provider: str | None = None,
+    progress: int | None = None,
+) -> None:
+    """Publish a small atomic status file consumed by /api/health."""
+    status_path = model_root / ".stereovisor-bootstrap-status"
+    lines = [state, detail]
+    if provider:
+        lines.append(f"provider={provider}")
+    if progress is not None:
+        lines.append(f"progress={max(0, min(100, int(progress)))}")
+    completed = completed_providers()
+    if completed:
+        lines.append(f"completed={','.join(completed)}")
+    temporary = status_path.with_name(f"{status_path.name}.tmp")
+    try:
+        temporary.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        temporary.replace(status_path)
+    except OSError:
+        # Status is diagnostic only; a read-only model directory must not stop
+        # an otherwise valid model preparation.
+        temporary.unlink(missing_ok=True)
+
 from service.config import MODEL_ROOT  # noqa: E402
 from service.ai_models import (  # noqa: E402
     DA3_ID,
@@ -43,14 +82,34 @@ def file_md5(path: Path) -> str:
     return digest.hexdigest()
 
 
-def ensure_verified_model(path: Path, url: str, expected_md5: str) -> None:
+def ensure_verified_model(
+    path: Path,
+    url: str,
+    expected_md5: str,
+    model_root: Path,
+    provider: str,
+    label: str,
+) -> None:
+    publish_bootstrap_status(model_root, "initializing", f"Validating {label}.", provider)
     if path.is_file() and file_md5(path) == expected_md5:
         print(f"Ready: {path.name}")
         return
     if path.exists():
         path.unlink()
+    publish_bootstrap_status(model_root, "downloading", f"Downloading {label}.", provider)
     print(f"Downloading: {path.name}")
-    _download_with_resume(url, path, expected_md5)
+    _download_with_resume(
+        url,
+        path,
+        expected_md5,
+        lambda progress: publish_bootstrap_status(
+            model_root,
+            "downloading",
+            f"Downloading {label} ({progress}%).",
+            provider,
+            progress,
+        ),
+    )
     print(f"Ready: {path.name}")
 
 
@@ -71,7 +130,15 @@ def _resume_seed(path: Path, sha256: str, part: Path, total: int) -> None:
         candidates[0].replace(part)
 
 
-def _download_lfs_file(repo_id: str, filename: str, path: Path, total: int, sha256: str) -> None:
+def _download_lfs_file(
+    repo_id: str,
+    filename: str,
+    path: Path,
+    total: int,
+    sha256: str,
+    model_root: Path,
+    provider: str,
+) -> None:
     target = (path / filename).resolve()
     if path.resolve() not in target.parents:
         raise RuntimeError(f"Unsafe model path in {repo_id}: {filename}")
@@ -88,6 +155,7 @@ def _download_lfs_file(repo_id: str, filename: str, path: Path, total: int, sha2
         raise RuntimeError("curl is required for resumable model downloads")
     url = f"https://huggingface.co/{repo_id}/resolve/main/{quote(filename, safe='/')}"
     chunk_bytes = 8 * 1024 * 1024
+    max_stalled_attempts = 10
     stalled_attempts = 0
     while (part.stat().st_size if part.is_file() else 0) < total:
         offset = part.stat().st_size if part.is_file() else 0
@@ -102,7 +170,9 @@ def _download_lfs_file(repo_id: str, filename: str, path: Path, total: int, sha2
                 "--silent",
                 "--show-error",
                 "--connect-timeout", "30",
-                "--max-time", "300",
+                "--max-time", "600",
+                "--speed-limit", "1024",
+                "--speed-time", "30",
                 "--range", f"{offset}-{end}",
                 "--output", str(chunk_path),
                 "--write-out", "%{http_code}",
@@ -123,31 +193,50 @@ def _download_lfs_file(repo_id: str, filename: str, path: Path, total: int, sha2
             chunk_path.unlink()
             stalled_attempts = 0
             percent = part.stat().st_size * 100.0 / total
+            publish_bootstrap_status(
+                model_root,
+                "downloading",
+                f"Downloading {filename} ({percent:.0f}%).",
+                provider,
+                round(percent),
+            )
             print(f"  {filename}: {percent:5.1f}%", flush=True)
             continue
 
         chunk_path.unlink(missing_ok=True)
         stalled_attempts += 1
-        if stalled_attempts >= 5:
+        if stalled_attempts >= max_stalled_attempts:
             detail = completed.stderr.strip() or f"HTTP {http_status or 'unknown'}"
             raise RuntimeError(
                 f"Download failed for {repo_id}/{filename} at {offset} bytes "
                 f"after {stalled_attempts} attempts: {detail}"
             )
         detail = completed.stderr.strip() or f"HTTP {http_status or 'unknown'}"
-        print(f"  Connection stalled; retrying ({stalled_attempts}/5): {detail}", flush=True)
-        time.sleep(2)
+        print(
+            f"  Connection stalled; retrying ({stalled_attempts}/{max_stalled_attempts}): {detail}",
+            flush=True,
+        )
+        time.sleep(min(15, 2**stalled_attempts))
     if _sha256(part) != sha256:
         raise RuntimeError(f"SHA-256 verification failed for {repo_id}/{filename}")
     part.replace(target)
 
 
-def ensure_snapshot(repo_id: str, path: Path, allow_patterns: list[str] | None = None) -> None:
+def ensure_snapshot(
+    repo_id: str,
+    path: Path,
+    allow_patterns: list[str] | None = None,
+    *,
+    model_root: Path,
+    provider: str,
+    label: str,
+) -> None:
     from huggingface_hub import HfApi, hf_hub_download
 
     if (path / ".stereovisor-ready").is_file():
         print(f"Ready: {repo_id}")
         return
+    publish_bootstrap_status(model_root, "downloading", f"Downloading {label}.", provider)
     print(f"Downloading: {repo_id}")
     path.mkdir(parents=True, exist_ok=True)
     siblings = HfApi().model_info(repo_id, files_metadata=True).siblings
@@ -157,10 +246,11 @@ def ensure_snapshot(repo_id: str, path: Path, allow_patterns: list[str] | None =
             continue
         lfs_sha = getattr(sibling.lfs, "sha256", None) if sibling.lfs else None
         if lfs_sha and sibling.size:
-            _download_lfs_file(repo_id, filename, path, int(sibling.size), lfs_sha)
+            _download_lfs_file(repo_id, filename, path, int(sibling.size), lfs_sha, model_root, provider)
         else:
             hf_hub_download(repo_id=repo_id, filename=filename, local_dir=path)
     (path / ".stereovisor-ready").write_text(repo_id, encoding="utf-8")
+    publish_bootstrap_status(model_root, "initializing", f"Initializing {label}.", provider)
     print(f"Ready: {repo_id}")
 
 
@@ -188,19 +278,61 @@ def main() -> None:
     inspyrenet_path = model_root / "inspyrenet" / "ckpt_base.pth"
 
     transformer_assets = ["*.json", "*.txt", "*.model", "*.safetensors", "*.py"]
-    ensure_snapshot(GROUNDING_DINO_ID, GROUNDING_DINO_PATH, transformer_assets)
-    ensure_snapshot(SAM2_ID, SAM2_PATH, transformer_assets)
-    ensure_snapshot(DA3_ID, DA3_PATH, transformer_assets)
-    ensure_verified_model(lama_path, LAMA_URL, LAMA_MD5)
-    ensure_verified_model(inspyrenet_path, INSPYRENET_MODEL_URL, INSPYRENET_MODEL_MD5)
+    publish_bootstrap_status(model_root, "starting", "Preparing the local AI runtime.")
+    ensure_snapshot(
+        GROUNDING_DINO_ID,
+        GROUNDING_DINO_PATH,
+        transformer_assets,
+        model_root=model_root,
+        provider="segmentation",
+        label="segmentation models",
+    )
+    ensure_snapshot(
+        SAM2_ID,
+        SAM2_PATH,
+        transformer_assets,
+        model_root=model_root,
+        provider="segmentation",
+        label="segmentation models",
+    )
+    complete_provider("segmentation")
+    ensure_snapshot(
+        DA3_ID,
+        DA3_PATH,
+        transformer_assets,
+        model_root=model_root,
+        provider="depth",
+        label="depth model",
+    )
+    complete_provider("depth")
+    ensure_verified_model(lama_path, LAMA_URL, LAMA_MD5, model_root, "inpainting", "Big LaMa")
+    ensure_verified_model(inspyrenet_path, INSPYRENET_MODEL_URL, INSPYRENET_MODEL_MD5, model_root, "matting", "InSPyReNet")
 
     if os.environ.get("STEREOVISOR_SKIP_HQ", "0") != "1":
-        ensure_snapshot(QWEN_ID, QWEN_PATH, transformer_assets)
-        ensure_snapshot("JunhaoZhuang/PowerPaint-v2-1", POWERPAINT_PATH)
+        ensure_snapshot(
+            QWEN_ID,
+            QWEN_PATH,
+            transformer_assets,
+            model_root=model_root,
+            provider="prompting",
+            label="optional Qwen3-VL model",
+        )
+        ensure_snapshot(
+            "JunhaoZhuang/PowerPaint-v2-1",
+            POWERPAINT_PATH,
+            model_root=model_root,
+            provider="refinement",
+            label="optional PowerPaint model",
+        )
 
     print("Validating local model files...")
+    publish_bootstrap_status(model_root, "initializing", "Validating Big LaMa.", "inpainting")
     validate_lama(lama_path)
+    complete_provider("inpainting")
+    publish_bootstrap_status(model_root, "initializing", "Validating InSPyReNet.", "matting")
     validate_inspyrenet(inspyrenet_path)
+    complete_provider("matting")
+    publish_bootstrap_status(model_root, "ready", "Required local AI models are ready.", progress=100)
     print(f"All local models are ready in {model_root}")
 
 

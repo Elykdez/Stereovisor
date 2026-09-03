@@ -9,24 +9,26 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-from .config import DEVICE, MODEL_ROOT
+from .config import DEVICE, MODEL_ROOT, snapshot_ready
 
 
 logger = logging.getLogger(__name__)
 
 
-GROUNDING_DINO_ID = "IDEA-Research/grounding-dino-tiny"
+GROUNDING_DINO_ID = "IDEA-Research/grounding-dino-base"
 SAM2_ID = "facebook/sam2.1-hiera-small"
 DA3_ID = "depth-anything/DA3-SMALL"
 QWEN_ID = "Qwen/Qwen3-VL-2B-Instruct"
 
-GROUNDING_DINO_PATH = MODEL_ROOT / "grounding-dino-tiny"
+GROUNDING_DINO_PATH = MODEL_ROOT / "grounding-dino-base"
 SAM2_PATH = MODEL_ROOT / "sam2.1-hiera-small"
 DA3_PATH = MODEL_ROOT / "da3-small"
 QWEN_PATH = MODEL_ROOT / "qwen3-vl-2b-instruct"
 POWERPAINT_PATH = MODEL_ROOT / "powerpaint-v2-1"
 
 CUSTOM_OBJECT_LABELS = os.environ.get("STEREOVISOR_OBJECT_LABELS", "").strip()
+MAX_OBJECT_LABELS = 64
+MAX_OBJECT_LABEL_LENGTH = 64
 COMMON_OBJECT_LABELS = (
     "person",
     "animal",
@@ -49,11 +51,6 @@ DETAILED_OBJECT_LABELS = COMMON_OBJECT_LABELS + (
     "chair",
     "table",
     "foreground object",
-)
-DEFAULT_OBJECT_LABELS = tuple(
-    label.strip()
-    for label in (CUSTOM_OBJECT_LABELS or ",".join(DETAILED_OBJECT_LABELS)).split(",")
-    if label.strip()
 )
 FALLBACK_OBJECT_LABELS = ("animal", "character", "vehicle", "furniture", "plant", "foreground object")
 MAX_INSTANCE_LAYERS = 24
@@ -100,6 +97,9 @@ def release_cuda(torch_module: object) -> None:
     gc.collect()
     cuda = getattr(torch_module, "cuda")
     if cuda.is_available():
+        synchronize = getattr(cuda, "synchronize", None)
+        if callable(synchronize):
+            synchronize()
         cuda.empty_cache()
 
 
@@ -128,8 +128,22 @@ def normalize_segmentation_density(value: str | None) -> str:
     return value if value in SEGMENTATION_PROFILES else DEFAULT_SEGMENTATION_DENSITY
 
 
+def normalize_segmentation_labels(value: str | None) -> tuple[str, ...]:
+    if not value:
+        return ()
+    labels: list[str] = []
+    for raw_label in value.replace("\n", ",").split(","):
+        label = " ".join(raw_label.strip().lower().rstrip(".").split())
+        if not label or len(label) > MAX_OBJECT_LABEL_LENGTH or label in labels:
+            continue
+        labels.append(label)
+        if len(labels) == MAX_OBJECT_LABELS:
+            break
+    return tuple(labels)
+
+
 def _require_model(path: Path, label: str) -> None:
-    if not path.is_dir():
+    if not snapshot_ready(path):
         logger.warning("model unavailable: label=%s path=%s", label, path)
         raise RuntimeError(f"{label} weights are missing. Run scripts/ensure-ready.ps1.")
 
@@ -201,6 +215,7 @@ def _deduplicate_detections(
 def grounded_sam_instances(
     image: Image.Image,
     density: str = DEFAULT_SEGMENTATION_DENSITY,
+    segmentation_labels: str | None = None,
 ) -> tuple[list[InstanceMask], dict[str, int]]:
     try:
         import torch
@@ -208,11 +223,16 @@ def grounded_sam_instances(
     except ImportError as error:
         raise RuntimeError("Grounding DINO and SAM 2.1 are unavailable. Run scripts/setup-ai.ps1.") from error
 
-    _require_model(GROUNDING_DINO_PATH, "Grounding DINO-T")
+    _require_model(GROUNDING_DINO_PATH, "Grounding DINO-B")
     _require_model(SAM2_PATH, "SAM 2.1 Small")
     device = resolve_device(torch)
     profile = SEGMENTATION_PROFILES[normalize_segmentation_density(density)]
-    label_set = DEFAULT_OBJECT_LABELS if CUSTOM_OBJECT_LABELS else profile.labels
+    label_set = normalize_segmentation_labels(segmentation_labels)
+    if not label_set:
+        label_set = normalize_segmentation_labels(CUSTOM_OBJECT_LABELS)
+    has_custom_labels = bool(label_set)
+    if not label_set:
+        label_set = profile.labels
     # Models are loaded locally only; this summary makes density/profile and
     # device decisions visible without logging image contents or detections.
     logger.info("Grounding/SAM preflight: density=%s device=%s labels=%s", density, device, len(label_set))
@@ -263,11 +283,11 @@ def grounded_sam_instances(
             )
 
         boxes, scores, labels = detect(label_set)
-        if not boxes and not CUSTOM_OBJECT_LABELS:
+        if not boxes and not has_custom_labels:
             logger.info("Grounding DINO primary labels produced no boxes; retrying fallback labels")
             boxes, scores, labels = detect(FALLBACK_OBJECT_LABELS)
         logger.info("Grounding DINO detections accepted: count=%s", len(boxes))
-        metrics["groundingDino"] = verify_vram_peak("Grounding DINO-T", peak_vram_mb(torch))
+        metrics["groundingDino"] = verify_vram_peak("Grounding DINO-B", peak_vram_mb(torch))
     finally:
         del outputs, inputs, detector, detector_processor
         release_cuda(torch)

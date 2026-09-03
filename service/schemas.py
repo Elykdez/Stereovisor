@@ -17,6 +17,8 @@ class ErrorPayload(BaseModel):
 class ProviderStatus(BaseModel):
     available: bool
     detail: str
+    state: Literal["waiting", "starting", "downloading", "initializing", "ready", "blocked"] = "waiting"
+    progress: int | None = Field(default=None, ge=0, le=100)
 
 
 class HealthPayload(BaseModel):
@@ -29,6 +31,10 @@ class HealthPayload(BaseModel):
     localOnly: bool = True
     providers: dict[str, ProviderStatus]
     message: str
+    startupState: Literal["starting", "downloading", "initializing", "ready", "blocked"] = "blocked"
+    startupDetail: str | None = None
+    startupProvider: str | None = None
+    startupProgress: int | None = Field(default=None, ge=0, le=100)
 
 
 class LayerPayload(BaseModel):
@@ -43,10 +49,16 @@ class LayerPayload(BaseModel):
     maskRevision: int = Field(default=0, ge=0)  # Cache-busting revision for edited alpha assets.
     depth: float
     order: int
+    # Anchor nudge as a fraction of the composition size, applied on top of the
+    # parallax transform so a repositioned layer survives export/import.
+    offsetX: float = Field(default=0.0, ge=-1, le=1)
+    offsetY: float = Field(default=0.0, ge=-1, le=1)
     selected: bool = True
     visible: bool = True
     bounds: tuple[int, int, int, int]
-    kind: Literal["instance", "depth-plane"] = "instance"
+    # "manual" marks a hand-brushed layer: it is refined by edge-guided
+    # segmentation instead of salient-subject matting.
+    kind: Literal["instance", "depth-plane", "manual"] = "instance"
     confidence: float = 1.0
 
 
@@ -81,6 +93,16 @@ class InpaintHistoryPayload(BaseModel):
     canRedo: bool
 
 
+class MergeLayersRequest(BaseModel):
+    """Layer IDs selected for a destructive-but-reversible mask merge."""
+    layerIds: list[str] = Field(min_length=2)
+
+
+class RenameLayerRequest(BaseModel):
+    """User-supplied layer name, bounded before it reaches project storage."""
+    name: str = Field(min_length=1, max_length=80)
+
+
 class CameraPayload(BaseModel):
     """Portable camera state with bounds matching renderer transforms."""
     x: float = Field(ge=-1, le=1)
@@ -93,6 +115,8 @@ class LayerEditorPayload(BaseModel):
     id: str
     depth: float = Field(ge=0, le=1)
     order: int = Field(ge=0)
+    offsetX: float = Field(default=0.0, ge=-1, le=1)
+    offsetY: float = Field(default=0.0, ge=-1, le=1)
     selected: bool
     visible: bool
 

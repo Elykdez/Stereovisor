@@ -12,6 +12,23 @@ describe("parallax transforms", () => {
     expect(near.scale).toBeGreaterThan(distant.scale);
   });
 
+  it("offsets an anchored layer without dropping its parallax travel", () => {
+    const plain = layerTransform(camera, 0.5, 1000, 600);
+    const nudged = layerTransform(camera, 0.5, 1000, 600, { offsetX: 0.1, offsetY: -0.2 });
+
+    expect(nudged.x - plain.x).toBeCloseTo(100, 6);
+    expect(nudged.y - plain.y).toBeCloseTo(-120, 6);
+    expect(nudged.scale).toBe(plain.scale);
+  });
+
+  it("clamps an out-of-range anchor instead of flinging the layer off stage", () => {
+    const transform = layerTransform(camera, 0.5, 1000, 600, { offsetX: 9, offsetY: -9 });
+    const limit = layerTransform(camera, 0.5, 1000, 600, { offsetX: 1, offsetY: -1 });
+
+    expect(transform.x).toBeCloseTo(limit.x, 6);
+    expect(transform.y).toBeCloseTo(limit.y, 6);
+  });
+
   it("keeps the background overscanned", () => {
     expect(backgroundTransform(camera).scale).toBeGreaterThan(camera.zoom);
   });

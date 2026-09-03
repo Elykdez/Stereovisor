@@ -10,19 +10,30 @@ export function clamp(value: number, minimum: number, maximum: number): number {
   return Math.max(minimum, Math.min(maximum, value));
 }
 
+export interface LayerAnchor {
+  offsetX: number;
+  offsetY: number;
+}
+
+export const NO_ANCHOR: LayerAnchor = { offsetX: 0, offsetY: 0 };
+
 export function layerTransform(
   camera: CameraState,
   depth: number,
   width: number,
-  height: number
+  height: number,
+  anchor: LayerAnchor = NO_ANCHOR
 ): LayerTransform {
   // Depth affects both lateral travel and a tiny scale correction; clamping
   // keeps malformed imported layer values from producing runaway transforms.
   const normalizedDepth = clamp(depth, 0, 1);
   const travel = camera.strength * 0.0015 * normalizedDepth;
+  // The anchor is a plain composition-space nudge: it rides along with the
+  // parallax travel rather than replacing it, so a repositioned layer still
+  // moves with the camera.
   return {
-    x: -camera.x * travel * width,
-    y: -camera.y * travel * height,
+    x: -camera.x * travel * width + clamp(anchor.offsetX, -1, 1) * width,
+    y: -camera.y * travel * height + clamp(anchor.offsetY, -1, 1) * height,
     scale: camera.zoom * (1 + normalizedDepth * (camera.zoom - 1) * 0.08)
   };
 }

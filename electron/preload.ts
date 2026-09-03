@@ -24,5 +24,5 @@ contextBridge.exposeInMainWorld("stereovisor", {
     ipcRenderer.on("stereovisor:open-about", handler);
     return () => ipcRenderer.removeListener("stereovisor:open-about", handler);
   },
-  setLocale: (locale: "en" | "zh-CN" | "ja" | "ko"): void => ipcRenderer.send("stereovisor:set-locale", locale)
+  setLocale: (locale: "en" | "ja" | "ko" | "zh-CN"): void => ipcRenderer.send("stereovisor:set-locale", locale)
 });

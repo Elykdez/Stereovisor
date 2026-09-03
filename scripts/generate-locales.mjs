@@ -4,7 +4,7 @@ import process from "node:process";
 import { fileURLToPath } from "node:url";
 import Papa from "papaparse";
 
-const LOCALES = ["en", "zh-CN", "ja", "ko"];
+const LOCALES = ["en", "ja", "ko", "zh-CN"];
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const sourcePath = path.join(root, "src", "web", "i18n", "translations.csv");
 const outputPath = path.join(root, "src", "web", "i18n", "generated.ts");

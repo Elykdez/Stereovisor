@@ -37,6 +37,8 @@ describe("SettingsDialog", () => {
 
     fireEvent.click(getByRole("button", { name: /Inference/ }));
     fireEvent.change(getByRole("combobox", { name: /Segmentation density/ }), { target: { value: "dense" } });
+    fireEvent.change(getByRole("textbox", { name: /Object vocabulary/ }), { target: { value: "person, keyboard, cup" } });
+    fireEvent.click(getByRole("checkbox", { name: /Use VLM vocabulary proposer/ }));
     fireEvent.change(getByRole("combobox", { name: /Default background method/ }), { target: { value: "powerpaint" } });
     fireEvent.change(getByRole("spinbutton", { name: /Inpainting steps/ }), { target: { value: "48" } });
     fireEvent.click(getByRole("button", { name: "Save" }));
@@ -45,6 +47,8 @@ describe("SettingsDialog", () => {
     expect(onSave.mock.calls[0][0].processing.defaultRefinement).toBe("powerpaint");
     expect(onSave.mock.calls[0][0].processing.inpaintingSteps).toBe(48);
     expect(onSave.mock.calls[0][0].processing.segmentationDensity).toBe("dense");
+    expect(onSave.mock.calls[0][0].processing.segmentationLabels).toBe("person, keyboard, cup");
+    expect(onSave.mock.calls[0][0].processing.useVlmVocabularyProposer).toBe(true);
   });
 
   it("keeps numeric sliders and value fields synchronized", async () => {
@@ -65,5 +69,18 @@ describe("SettingsDialog", () => {
 
     fireEvent.change(getByRole("spinbutton", { name: /Default strength/ }), { target: { value: "999" } });
     expect(getByRole("slider", { name: /Default strength slider/ })).toHaveValue("100");
+  });
+
+  it("persists the service console visibility setting", async () => {
+    await i18n.changeLanguage("en");
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    const { getByRole } = render(<SettingsDialog settings={DEFAULT_APP_SETTINGS} onSave={onSave} onCancel={vi.fn()} />);
+
+    fireEvent.click(getByRole("button", { name: /Advanced/ }));
+    fireEvent.click(getByRole("checkbox", { name: /Show service console/ }));
+    fireEvent.click(getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
+    expect(onSave.mock.calls[0][0].service.showConsole).toBe(true);
   });
 });

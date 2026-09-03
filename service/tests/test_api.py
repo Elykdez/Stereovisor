@@ -9,6 +9,7 @@ from PIL import Image, ImageDraw
 import service.app as service_module
 import service.pipeline as pipeline
 from service.app import app
+from service.config import BootstrapStatus
 from service.jobs import JobCancelled, ProcessingJobStore
 from service.storage import ProjectStore
 
@@ -29,7 +30,81 @@ def test_health_declares_local_engine() -> None:
     assert response.status_code == 200
     assert payload["localOnly"] is True
     assert payload["activeEngine"] in {"preview", "ai"}
+    assert payload["startupState"] in {"starting", "downloading", "initializing", "ready", "blocked"}
+    assert payload["startupProgress"] is None or 0 <= payload["startupProgress"] <= 100
     assert ": ." not in payload["message"]
+
+
+def _preparing_dependencies() -> dict[str, object]:
+    return {
+        "runtime": service_module.ProviderStatus(available=False, detail="Missing local AI runtime packages: PyTorch"),
+        "segmentation": service_module.ProviderStatus(available=False, detail="Missing model assets"),
+        "matting": service_module.ProviderStatus(available=True, detail="InSPyReNet installed"),
+        "depth": service_module.ProviderStatus(available=False, detail="Missing model assets"),
+        "inpainting": service_module.ProviderStatus(available=False, detail="Missing model assets"),
+        "prompting": service_module.ProviderStatus(available=False, detail="Optional"),
+        "refinement": service_module.ProviderStatus(available=False, detail="Optional"),
+    }
+
+
+def test_health_reports_active_bootstrap_provider_progress(monkeypatch) -> None:
+    monkeypatch.setattr(service_module, "ai_dependencies", _preparing_dependencies)
+    monkeypatch.setattr(service_module, "active_engine", lambda: "preview")
+    monkeypatch.setattr(service_module, "runtime_device", lambda: "cuda")
+    monkeypatch.setattr(
+        service_module,
+        "bootstrap_status",
+        lambda: BootstrapStatus("downloading", "Downloading DA3 (42%).", "depth", 42),
+    )
+
+    payload = client.get("/api/health").json()
+
+    assert payload["startupState"] == "downloading"
+    assert payload["startupProvider"] == "depth"
+    assert payload["startupProgress"] == 42
+    assert payload["providers"]["depth"]["state"] == "downloading"
+    assert payload["providers"]["depth"]["progress"] == 42
+    assert payload["providers"]["segmentation"]["state"] == "waiting"
+    assert payload["providers"]["matting"]["state"] == "ready"
+
+
+def test_health_reports_stages_the_running_bootstrap_already_finished(monkeypatch) -> None:
+    # The core-only service that answers during preparation cannot import the
+    # AI packages, so a finished stage is only visible through the bootstrap.
+    monkeypatch.setattr(service_module, "ai_dependencies", _preparing_dependencies)
+    monkeypatch.setattr(service_module, "active_engine", lambda: "preview")
+    monkeypatch.setattr(service_module, "runtime_device", lambda: "cuda")
+    monkeypatch.setattr(
+        service_module,
+        "bootstrap_status",
+        lambda: BootstrapStatus("downloading", "Downloading DA3 (42%).", "depth", 42, ("runtime",)),
+    )
+
+    payload = client.get("/api/health").json()
+
+    assert payload["providers"]["runtime"]["state"] == "ready"
+    assert payload["providers"]["runtime"]["progress"] == 100
+    assert payload["providers"]["runtime"]["available"] is False
+
+
+def test_analyze_downsamples_oversized_source_preserving_aspect_ratio(monkeypatch) -> None:
+    monkeypatch.setenv("STEREOVISOR_MODE", "preview")
+    # Reuse the structured preview fixture so the test reaches project storage
+    # instead of being rejected for having no distinct color regions.
+    source = pipeline.create_sample_image().resize((4096, 1600), Image.Resampling.BICUBIC)
+
+    response = client.post(
+        "/api/analyze",
+        files={"file": ("wide.png", png_bytes(source), "image/png")},
+    )
+
+    assert response.status_code == 200
+    project = response.json()
+    assert (project["width"], project["height"]) == (3200, 1250)
+    stored = client.get(project["sourceUrl"])
+    assert stored.status_code == 200
+    with Image.open(io.BytesIO(stored.content)) as saved:
+        assert saved.size == (3200, 1250)
 
 
 def test_sample_to_inpaint_api_flow(monkeypatch) -> None:
@@ -55,6 +130,144 @@ def test_sample_to_inpaint_api_flow(monkeypatch) -> None:
     asset_response = client.get(result["backgroundUrl"])
     assert asset_response.status_code == 200
     assert asset_response.headers["content-type"] == "image/png"
+
+
+def test_analyze_job_waits_for_ai_readiness_before_enqueueing(monkeypatch) -> None:
+    monkeypatch.setattr(service_module, "active_engine", lambda: "ai")
+    monkeypatch.setattr(service_module, "production_available", lambda: False)
+    monkeypatch.setattr(service_module, "ai_dependencies", lambda: {
+        key: service_module.ProviderStatus(available=False, detail="starting")
+        for key in service_module.REQUIRED_PROVIDERS
+    })
+
+    response = client.post(
+        "/api/jobs/analyze",
+        files={"file": ("scene.png", png_bytes(pipeline.create_sample_image()), "image/png")},
+    )
+
+    assert response.status_code == 503
+    assert response.json()["detail"]["code"] == "AI_STACK_STARTING"
+
+
+def _brushed_mask(project: dict) -> bytes:
+    mask = Image.new("L", (project["width"], project["height"]), 0)
+    ImageDraw.Draw(mask).rectangle((40, 40, 240, 240), fill=255)
+    return png_bytes(mask.convert("RGB"))
+
+
+def test_brushed_area_becomes_a_named_layer(monkeypatch) -> None:
+    monkeypatch.setenv("STEREOVISOR_MODE", "preview")
+    project = client.post("/api/sample").json()
+
+    created = client.post(
+        f"/api/projects/{project['id']}/layers",
+        files={"file": ("area.png", _brushed_mask(project), "image/png")},
+        data={"name": "  Snow   drift  "},
+    )
+    payload = created.json()
+
+    assert created.status_code == 200
+    assert len(payload["layers"]) == len(project["layers"]) + 1
+    added = payload["layers"][-1]
+    # Whitespace is collapsed so the name cannot break the list or the manifest.
+    assert added["name"] == "Snow drift"
+    assert added["kind"] == "manual"
+    assert added["id"] not in {layer["id"] for layer in project["layers"]}
+    assert added["order"] > max(layer["order"] for layer in project["layers"])
+    assert client.get(added["maskUrl"]).status_code == 200
+    assert client.get(added["cutoutUrl"]).status_code == 200
+
+
+def test_created_layer_without_a_name_gets_the_next_area_number(monkeypatch) -> None:
+    monkeypatch.setenv("STEREOVISOR_MODE", "preview")
+    project = client.post("/api/sample").json()
+
+    created = client.post(
+        f"/api/projects/{project['id']}/layers",
+        files={"file": ("area.png", _brushed_mask(project), "image/png")},
+    ).json()
+
+    # Naming is optional: an unnamed brush still lands as an identifiable layer.
+    added = created["layers"][-1]
+    assert added["name"] == f"Area {len(project['layers']) + 1:02d}"
+
+
+def test_created_layer_rejects_an_empty_brush(monkeypatch) -> None:
+    monkeypatch.setenv("STEREOVISOR_MODE", "preview")
+    project = client.post("/api/sample").json()
+    blank = Image.new("RGB", (project["width"], project["height"]), (0, 0, 0))
+
+    response = client.post(
+        f"/api/projects/{project['id']}/layers",
+        files={"file": ("area.png", png_bytes(blank), "image/png")},
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"]["code"] == "LAYER_CREATE_FAILED"
+
+
+def test_layer_rename_persists_and_rejects_blank_names(monkeypatch) -> None:
+    monkeypatch.setenv("STEREOVISOR_MODE", "preview")
+    project = client.post("/api/sample").json()
+    layer_id = project["layers"][0]["id"]
+
+    renamed = client.post(
+        f"/api/projects/{project['id']}/layers/{layer_id}/name",
+        json={"name": "Lantern"},
+    )
+    assert renamed.status_code == 200
+    assert renamed.json()["layers"][0]["name"] == "Lantern"
+
+    reloaded = client.post(f"/api/projects/{project['id']}/layers/{layer_id}/confirm").json()
+    assert reloaded["layers"][0]["name"] == "Lantern"
+    assert client.post(
+        f"/api/projects/{project['id']}/layers/{layer_id}/name",
+        json={"name": "   "},
+    ).status_code == 422
+
+
+def test_layer_delete_removes_assets_and_stays_undoable(monkeypatch) -> None:
+    monkeypatch.setenv("STEREOVISOR_MODE", "preview")
+    project = client.post("/api/sample").json()
+    doomed = project["layers"][0]
+
+    deleted = client.post(f"/api/projects/{project['id']}/layers/{doomed['id']}/delete")
+    payload = deleted.json()
+
+    assert deleted.status_code == 200
+    assert doomed["id"] not in {layer["id"] for layer in payload["layers"]}
+    assert client.get(doomed["maskUrl"]).status_code == 404
+
+    # Deletion destroys image assets, so it shares the reversible layer history.
+    restored = client.post(f"/api/projects/{project['id']}/layers/undo-merge")
+    assert restored.status_code == 200
+    assert doomed["id"] in {layer["id"] for layer in restored.json()["layers"]}
+    assert client.get(doomed["maskUrl"]).status_code == 200
+
+
+def test_sample_layer_merge_api_supports_history(monkeypatch) -> None:
+    monkeypatch.setenv("STEREOVISOR_MODE", "preview")
+    project = client.post("/api/sample").json()
+    layer_ids = [layer["id"] for layer in project["layers"][:2]]
+
+    merged_response = client.post(
+        f"/api/projects/{project['id']}/layers/merge",
+        json={"layerIds": layer_ids},
+    )
+    assert merged_response.status_code == 200
+    merged = merged_response.json()
+    assert len(merged["layers"]) == len(project["layers"]) - 1
+    history = client.get(f"/api/projects/{project['id']}/layer-merge-history")
+    assert history.status_code == 200
+    assert history.json() == [{"targetId": "layers", "canUndo": True, "canRedo": False}]
+
+    undone_response = client.post(f"/api/projects/{project['id']}/layers/undo-merge")
+    assert undone_response.status_code == 200
+    assert len(undone_response.json()["layers"]) == len(project["layers"])
+
+    redone_response = client.post(f"/api/projects/{project['id']}/layers/redo-merge")
+    assert redone_response.status_code == 200
+    assert len(redone_response.json()["layers"]) == len(merged["layers"])
 
 
 def test_processing_job_reports_completion() -> None:
@@ -333,6 +546,8 @@ def test_project_package_round_trip_restores_images_and_editor_state(monkeypatch
             "id": layer["id"],
             "depth": 0.42 if index == 0 else layer["depth"],
             "order": layer["order"],
+            "offsetX": 0.18 if index == 0 else 0.0,
+            "offsetY": -0.09 if index == 0 else 0.0,
             "selected": layer["selected"],
             "visible": index != 0,
         }
@@ -365,6 +580,8 @@ def test_project_package_round_trip_restores_images_and_editor_state(monkeypatch
     assert imported["camera"] == camera
     assert imported["project"]["layers"][0]["depth"] == 0.42
     assert imported["project"]["layers"][0]["visible"] is False
+    assert imported["project"]["layers"][0]["offsetX"] == 0.18
+    assert imported["project"]["layers"][0]["offsetY"] == -0.09
     assert imported["project"]["layers"][0]["proposalMaskUrl"]
     assert imported["project"]["layers"][0]["confirmed"] is True
     assert client.get(imported["project"]["sourceUrl"]).status_code == 200

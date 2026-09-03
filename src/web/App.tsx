@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type DragEvent } from "react";
 import { CameraControls } from "./components/CameraControls";
 import { LayerInspector } from "./components/LayerInspector";
 import type { MaskBrushMode, MaskEditorTarget } from "./components/MaskEditorOverlay";
@@ -8,18 +8,25 @@ import {
   analyzeSample,
   cancelProcessingJob,
   confirmProjectLayer,
+  createProjectLayer,
+  deleteProjectLayer,
   exportProjectPackage,
-  getHealth,
+  probeHealth,
   getInpaintHistory,
+  getLayerMergeHistory,
   getMaskHistory,
   importProjectPackage,
   inpaintProject,
   inpaintProjectTarget,
+  mergeProjectLayers,
   redoProjectLayerRefine,
+  redoProjectLayerMerge,
   redoProjectTargetInpaint,
   refineProjectLayer,
+  renameProjectLayer,
   undoProjectTargetInpaint,
   undoProjectLayerRefine,
+  undoProjectLayerMerge,
   updateProjectMask,
   ProcessingCancelledError,
   setJobPollIntervalMs
@@ -30,15 +37,27 @@ import { useAppTranslation, type AppTranslate } from "./i18n";
 import { DEFAULT_APP_SETTINGS, loadAppSettings, persistAppSettings, sanitizeAppSettings, type AppSettings } from "./settings";
 import { SettingsDialog } from "./components/SettingsDialog";
 import { AboutDialog } from "./components/AboutDialog";
+import { StartupGate, type StartupPhase } from "./components/StartupGate";
 import type { CameraState, HealthStatus, InpaintHistoryState, InpaintRefinement, ProcessingProgress, SceneLayer, SceneProject, WorkflowPhase } from "./types";
+import { isLocalAiReady } from "./lib/startup";
 import "./styles.css";
 
 const DEFAULT_CAMERA: CameraState = { x: 0, y: 0, zoom: 1, strength: 68 };
+// Health is polled once per second; this covers the local service restart the
+// launcher performs when the prepared AI runtime takes over from the core one.
+const RECONNECT_GRACE_POLLS = 8;
+// Upper bound on the build button's handover guard. Moving the pointer off the
+// button clears it sooner; this only covers a pointer that never moves.
+const BUILD_HANDOVER_COOLDOWN_MS = 600;
 
 interface ActiveMaskEditor extends MaskEditorTarget {
-  kind: "layer" | "extra" | "inpaint";
+  // "new-layer" brushes a foreground layer that does not exist yet; it becomes
+  // a real layer, with a name, only once the brush is applied.
+  kind: "layer" | "extra" | "inpaint" | "new-layer";
   layerId: string | null;
 }
+
+type CollapsedPanel = "left" | "right";
 
 function downloadBlob(blob: Blob, name: string): void {
   // Browser downloads need a temporary object URL; release it after the click
@@ -69,6 +88,8 @@ function phaseLabel(phase: WorkflowPhase, t: AppTranslate): string {
 export default function App() {
   const { locale, setLocale, t, runtimeText, layerName } = useAppTranslation();
   const [health, setHealth] = useState<HealthStatus | null>(null);
+  const [startupPhase, setStartupPhase] = useState<StartupPhase | "ready">("connecting");
+  const [startupError, setStartupError] = useState<string | null>(null);
   const [project, setProject] = useState<SceneProject | null>(null);
   const [phase, setPhase] = useState<WorkflowPhase>("idle");
   const [camera, setCamera] = useState<CameraState>(DEFAULT_CAMERA);
@@ -76,6 +97,7 @@ export default function App() {
   const [showOptions, setShowOptions] = useState(false);
   const [showAbout, setShowAbout] = useState(false);
   const [appVersion, setAppVersion] = useState("0.1.0");
+  const [openPanel, setOpenPanel] = useState<CollapsedPanel | null>(null);
   const [moving, setMoving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [refinement, setRefinement] = useState<InpaintRefinement>("lama");
@@ -84,6 +106,9 @@ export default function App() {
   const [showInpaintMask, setShowInpaintMask] = useState(false);
   const [backgroundRetouchPending, setBackgroundRetouchPending] = useState(false);
   const [maskEditor, setMaskEditor] = useState<ActiveMaskEditor | null>(null);
+  const [maskEditorName, setMaskEditorName] = useState("");
+  const [renamingLayer, setRenamingLayer] = useState(false);
+  const [deletingLayerId, setDeletingLayerId] = useState<string | null>(null);
   const [maskBrushMode, setMaskBrushMode] = useState<MaskBrushMode>("add");
   const [maskBrushSize, setMaskBrushSize] = useState(48);
   const [maskBlurRadius, setMaskBlurRadius] = useState(0);
@@ -94,12 +119,22 @@ export default function App() {
   const [maskCanRedo, setMaskCanRedo] = useState(false);
   const [refiningLayerId, setRefiningLayerId] = useState<string | null>(null);
   const [confirmingLayerId, setConfirmingLayerId] = useState<string | null>(null);
+  const [confirmingAll, setConfirmingAll] = useState(false);
+  const [buildCooldown, setBuildCooldown] = useState(false);
+  // Refs, not state: a re-entry guard has to be readable and settable inside the
+  // same click that sets it, before React has re-rendered anything.
+  const buildActionLock = useRef(false);
   const [focusedInpaintTargetId, setFocusedInpaintTargetId] = useState<string | null>(null);
+  const [anchorLayerId, setAnchorLayerId] = useState<string | null>(null);
   const [inpaintHistory, setInpaintHistory] = useState<Record<string, InpaintHistoryState>>({});
   const [inpaintHistoryBusy, setInpaintHistoryBusy] = useState<"undo" | "redo" | null>(null);
   const [focusedMaskLayerId, setFocusedMaskLayerId] = useState<string | null>(null);
   const [maskHistory, setMaskHistory] = useState<Record<string, InpaintHistoryState>>({});
   const [maskHistoryBusy, setMaskHistoryBusy] = useState<{ layerId: string; action: "undo" | "redo" } | null>(null);
+  const [layerSelection, setLayerSelection] = useState<string[]>([]);
+  const [mergeHistory, setMergeHistory] = useState<InpaintHistoryState | null>(null);
+  const [mergeHistoryBusy, setMergeHistoryBusy] = useState<"undo" | "redo" | null>(null);
+  const [mergingLayers, setMergingLayers] = useState(false);
   const [processingProgress, setProcessingProgress] = useState<ProcessingProgress | null>(null);
   const [processingJobId, setProcessingJobId] = useState<string | null>(null);
   const [cancellingJob, setCancellingJob] = useState(false);
@@ -107,6 +142,7 @@ export default function App() {
   const canvasRef = useRef<SceneCanvasHandle>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const projectFileRef = useRef<HTMLInputElement>(null);
+  const pendingFileRef = useRef<File | null>(null);
   const cameraDefaults: CameraState = {
     ...DEFAULT_CAMERA,
     zoom: settings.camera.defaultZoom,
@@ -114,8 +150,8 @@ export default function App() {
   };
 
   useEffect(() => {
-    // Settings are loaded before controls become interactive. Applying the
-    // persisted values here also keeps polling, camera defaults, and locale in sync.
+    // Settings are loaded before controls become interactive.
+    // Applying the persisted values here also keeps polling, camera defaults, and locale in sync.
     let cancelled = false;
     void loadAppSettings().then((loaded) => {
       if (cancelled) return;
@@ -140,6 +176,17 @@ export default function App() {
   }), []);
 
   useEffect(() => {
+    if (openPanel === null) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      setOpenPanel(null);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [openPanel]);
+
+  useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (!(event.ctrlKey || event.metaKey) || event.altKey || event.shiftKey || event.repeat || event.key !== ",") return;
       event.preventDefault();
@@ -154,28 +201,79 @@ export default function App() {
   }, [locale]);
 
   useEffect(() => {
-    // Health is intentionally checked once on mount; the service reports both
-    // the selected engine and provider readiness used by the UI guards.
+    // Keep the app visible while the local service starts, then hold the editor
+    // behind the gate until every required AI provider is ready. Keep polling
+    // after the first ready response too: the local service can be restarted
+    // or replaced while the editor is open, and the editor must fail closed.
     let cancelled = false;
-    const load = async () => {
+    let retryTimer: number | null = null;
+    let wasReady = false;
+    let failures = 0;
+    const poll = async () => {
       try {
-        const status = await getHealth();
-        if (!cancelled) {
-          setHealth(status);
-          appLog.info("ui.health-state.updated", { engine: status.activeEngine, device: status.device });
+        const status = await probeHealth();
+        if (cancelled) return;
+        failures = 0;
+        setHealth(status);
+        setStartupError(null);
+        if (isLocalAiReady(status)) {
+          setStartupPhase("ready");
+          if (!wasReady) {
+            appLog.info("ui.startup.ready", { engine: status.activeEngine, device: status.device });
+          }
+          wasReady = true;
+        } else {
+          wasReady = false;
+          setMoving(false);
+          setStartupPhase(
+            status.startupState === "starting" || status.startupState === "downloading" || status.startupState === "initializing" || status.activeEngine === "ai"
+              ? "checking"
+              : "blocked",
+          );
+          appLog.info("ui.startup.readiness.updated", {
+            engine: status.activeEngine,
+            providers: Object.fromEntries(Object.entries(status.providers).map(([name, provider]) => [name, provider.available]))
+          });
         }
       } catch (requestError) {
-        if (!cancelled) {
-          appLog.error("ui.health-state.unavailable", requestError);
-          setError(requestError instanceof Error ? requestError.message : "The local vision service is unavailable.");
-        }
+        if (cancelled) return;
+        failures += 1;
+        wasReady = false;
+        setMoving(false);
+        setStartupPhase("connecting");
+        // The launcher replaces the core health service with the prepared CUDA
+        // runtime, so a short outage is expected on every launch. Keep the last
+        // readout and stay quiet until the gap is longer than that handover.
+        setStartupError(
+          failures < RECONNECT_GRACE_POLLS
+            ? null
+            : requestError instanceof Error ? requestError.message : "The local vision service is unavailable.",
+        );
+        appLog.warn("ui.startup.service-unavailable", {
+          attempt: failures,
+          error: requestError instanceof Error ? requestError.message : requestError,
+        });
       }
+      if (!cancelled) retryTimer = window.setTimeout(() => void poll(), 1000);
     };
-    void load();
+    void poll();
     return () => {
       cancelled = true;
+      if (retryTimer !== null) window.clearTimeout(retryTimer);
     };
   }, []);
+
+  useEffect(() => {
+    if (startupPhase !== "ready") return;
+    const pendingFile = pendingFileRef.current;
+    if (!pendingFile) return;
+    pendingFileRef.current = null;
+    appLog.info("workflow.analysis.startup-queue-drained", { name: pendingFile.name, bytes: pendingFile.size });
+    void onFile(pendingFile);
+    // The queue drains once, on the readiness transition; onFile remains the
+    // single entry point for file validation and processing.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [startupPhase]);
 
   useEffect(() => {
     if (!moving) return;
@@ -199,7 +297,7 @@ export default function App() {
   }, [moving, settings.appearance.reduceMotion, settings.motion]);
 
   useEffect(() => {
-    if (!project || phase !== "editing") return;
+    if (startupPhase !== "ready" || !project || phase !== "editing") return;
     let cancelled = false;
     void getInpaintHistory(project.id)
       .then((history) => {
@@ -211,10 +309,10 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [project?.id, phase]);
+  }, [startupPhase, project?.id, phase]);
 
   useEffect(() => {
-    if (!project || phase !== "selecting") return;
+    if (startupPhase !== "ready" || !project || phase !== "selecting") return;
     let cancelled = false;
     void getMaskHistory(project.id)
       .then((history) => {
@@ -226,10 +324,25 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [project?.id, phase]);
+  }, [startupPhase, project?.id, phase]);
 
   useEffect(() => {
-    if (!project || phase !== "editing" || maskEditor || !focusedInpaintTargetId || inpaintHistoryBusy) return;
+    if (startupPhase !== "ready" || !project || phase !== "selecting") return;
+    let cancelled = false;
+    void getLayerMergeHistory(project.id)
+      .then((history) => {
+        if (!cancelled) setMergeHistory(history[0] ?? null);
+      })
+      .catch(() => {
+        if (!cancelled) setMergeHistory(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [startupPhase, project?.id, phase]);
+
+  useEffect(() => {
+    if (startupPhase !== "ready" || !project || phase !== "editing" || maskEditor || !focusedInpaintTargetId || inpaintHistoryBusy) return;
     const onKeyDown = (event: KeyboardEvent) => {
       if (!(event.ctrlKey || event.metaKey) || event.altKey || event.repeat) return;
       const eventTarget = event.target as HTMLElement | null;
@@ -243,10 +356,10 @@ export default function App() {
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [project, phase, maskEditor, focusedInpaintTargetId, inpaintHistory, inpaintHistoryBusy]);
+  }, [startupPhase, project, phase, maskEditor, focusedInpaintTargetId, inpaintHistory, inpaintHistoryBusy]);
 
   useEffect(() => {
-    if (!project || phase !== "selecting" || maskEditor || refiningLayerId || confirmingLayerId || !focusedMaskLayerId || maskHistoryBusy) return;
+    if (startupPhase !== "ready" || !project || phase !== "selecting" || maskEditor || refiningLayerId || confirmingLayerId || !focusedMaskLayerId || maskHistoryBusy) return;
     const onKeyDown = (event: KeyboardEvent) => {
       if (!(event.ctrlKey || event.metaKey) || event.altKey || event.repeat) return;
       const eventTarget = event.target as HTMLElement | null;
@@ -260,7 +373,25 @@ export default function App() {
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [project, phase, maskEditor, refiningLayerId, confirmingLayerId, focusedMaskLayerId, maskHistory, maskHistoryBusy]);
+  }, [startupPhase, project, phase, maskEditor, refiningLayerId, confirmingLayerId, focusedMaskLayerId, maskHistory, maskHistoryBusy]);
+
+  useEffect(() => {
+    if (startupPhase !== "ready" || !project || phase !== "selecting" || maskEditor || refiningLayerId || confirmingLayerId || mergingLayers || mergeHistoryBusy) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (!(event.ctrlKey || event.metaKey) || event.altKey || event.repeat) return;
+      const eventTarget = event.target as HTMLElement | null;
+      if (eventTarget?.closest("textarea, select, [contenteditable='true'], input:not([type='range']):not([type='checkbox']):not([type='radio'])")) return;
+      const redo = event.key.toLowerCase() === "y" || (event.key.toLowerCase() === "z" && event.shiftKey);
+      const undo = event.key.toLowerCase() === "z" && !event.shiftKey;
+      const focusedMaskHistory = focusedMaskLayerId ? maskHistory[focusedMaskLayerId] : null;
+      if (focusedMaskHistory && ((undo && focusedMaskHistory.canUndo) || (redo && focusedMaskHistory.canRedo))) return;
+      if ((!undo || !mergeHistory?.canUndo) && (!redo || !mergeHistory?.canRedo)) return;
+      event.preventDefault();
+      void restoreLayerMerge(redo ? "redo" : "undo");
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [startupPhase, project, phase, maskEditor, refiningLayerId, confirmingLayerId, mergingLayers, mergeHistoryBusy, mergeHistory, focusedMaskLayerId, maskHistory]);
 
   async function process(
     operation: (
@@ -268,6 +399,7 @@ export default function App() {
       onJobStarted: (jobId: string) => void
     ) => Promise<SceneProject>
   ): Promise<void> {
+    if (startupPhase !== "ready") return;
     // A new analysis invalidates all transient editor/history state. Reset it
     // before changing phase so stale controls cannot target the next project.
     appLog.info("workflow.analysis.started");
@@ -277,10 +409,15 @@ export default function App() {
     setShowInpaintMask(false);
     setBackgroundRetouchPending(false);
     setFocusedInpaintTargetId(null);
+    setAnchorLayerId(null);
     setInpaintHistory({});
     setFocusedMaskLayerId(null);
     setMaskHistory({});
     setMaskHistoryBusy(null);
+    setLayerSelection([]);
+    setMergeHistory(null);
+    setMergeHistoryBusy(null);
+    setMergingLayers(false);
     setProcessingJobId(null);
     setCancellingJob(false);
     setMaskBlurRadius(0);
@@ -310,9 +447,21 @@ export default function App() {
 
   async function onFile(file: File | undefined): Promise<void> {
     if (!file) return;
-    // Keep the density choice with the request so the service and the visible
+    if (startupPhase !== "ready") {
+      pendingFileRef.current = file;
+      appLog.info("workflow.analysis.queued-until-startup", { name: file.name, bytes: file.size });
+      return;
+    }
+    // Keep the detector choices with the request so the service and visible
     // settings remain a single source of truth for this analysis.
-    await process((onProgress, onJobStarted) => analyzeImage(file, onProgress, onJobStarted, settings.processing.segmentationDensity));
+    await process((onProgress, onJobStarted) => analyzeImage(
+      file,
+      onProgress,
+      onJobStarted,
+      settings.processing.segmentationDensity,
+      settings.processing.segmentationLabels,
+      settings.processing.useVlmVocabularyProposer,
+    ));
   }
 
   async function cancelProcessing(): Promise<void> {
@@ -337,7 +486,7 @@ export default function App() {
   }
 
   async function buildScene(): Promise<void> {
-    if (!project) return;
+    if (startupPhase !== "ready" || !project) return;
     // These checks mirror the service invariants: selected layers must be
     // confirmed, and PowerPaint needs either a prompt or its local captioner.
     if (maskEditor || refiningLayerId) {
@@ -407,10 +556,105 @@ export default function App() {
   }
 
   function updateLayers(layers: SceneProject["layers"]): void {
-    if (project) setProject({ ...project, layers });
+    if (startupPhase !== "ready" || !project) return;
+    setProject({ ...project, layers });
+  }
+
+  useEffect(() => {
+    // Focusing a different card (or the background) leaves the drag pointing at
+    // a layer the user is no longer looking at, so drop out of anchor mode.
+    setAnchorLayerId((current) => current && current === focusedInpaintTargetId ? current : null);
+  }, [focusedInpaintTargetId]);
+
+  useEffect(() => {
+    if (!buildCooldown) return;
+    const timer = window.setTimeout(() => setBuildCooldown(false), BUILD_HANDOVER_COOLDOWN_MS);
+    return () => window.clearTimeout(timer);
+  }, [buildCooldown]);
+
+  function runBuildAction(): void {
+    // One button, two actions. The lock stops a burst of clicks from stacking
+    // requests, and the cooldown that follows a bulk confirm keeps the last
+    // click of that burst from landing on the generative build that replaces it.
+    if (buildActionLock.current) return;
+    buildActionLock.current = true;
+    if (unconfirmedMaskCount > 0) {
+      void confirmAllLayers().finally(() => {
+        buildActionLock.current = false;
+        setBuildCooldown(true);
+      });
+      return;
+    }
+    void buildScene().finally(() => {
+      buildActionLock.current = false;
+    });
+  }
+
+  function moveLayerAnchor(layerId: string, offsetX: number, offsetY: number): void {
+    if (startupPhase !== "ready") return;
+    // Anchors live in project state like depth and order do, so the canvas, the
+    // PNG/video exports, and the saved package all read the same numbers.
+    setProject((current) => current && ({
+      ...current,
+      layers: current.layers.map((layer) => layer.id === layerId ? { ...layer, offsetX, offsetY } : layer)
+    }));
+  }
+
+  function selectLayer(layerId: string): void {
+    if (startupPhase !== "ready") return;
+    setLayerSelection((current) => current.includes(layerId)
+      ? current.filter((id) => id !== layerId)
+      : [...current, layerId]);
+  }
+
+  function clearLayerSelection(): void {
+    if (startupPhase !== "ready") return;
+    setLayerSelection([]);
+  }
+
+  function toggleSelectedLayers(): void {
+    if (startupPhase !== "ready" || !project || layerSelection.length === 0) return;
+    const selected = new Set(layerSelection);
+    setProject({
+      ...project,
+      layers: project.layers.map((layer) => selected.has(layer.id)
+        ? { ...layer, selected: !layer.selected }
+        : layer)
+    });
+  }
+
+  async function mergeSelectedLayers(): Promise<void> {
+    if (startupPhase !== "ready" || !project || phase !== "selecting" || layerSelection.length < 2 || mergingLayers) return;
+    const selected = new Set(layerSelection);
+    const layerIds = project.layers.filter((layer) => selected.has(layer.id)).map((layer) => layer.id);
+    if (layerIds.length < 2) {
+      setLayerSelection([]);
+      setError(t("layers.mergeRequiresMultiple"));
+      return;
+    }
+    const survivorId = layerIds[0];
+    setError(null);
+    setMergingLayers(true);
+    setMergeHistoryBusy(null);
+    appLog.info("workflow.layer-merge.started", { projectId: project.id, layerCount: layerIds.length });
+    try {
+      const result = await mergeProjectLayers(project.id, layerIds);
+      const merged = mergeProjectResult(project, result, { refreshLayerId: survivorId });
+      setProject(merged);
+      setLayerSelection(merged.layers.some((layer) => layer.id === survivorId) ? [survivorId] : []);
+      setFocusedMaskLayerId(null);
+      await Promise.all([refreshMaskHistory(project.id), refreshMergeHistory(project.id)]);
+      appLog.info("workflow.layer-merge.completed", { projectId: project.id, layerCount: layerIds.length, survivorId });
+    } catch (operationError) {
+      appLog.error("workflow.layer-merge.failed", operationError, { projectId: project.id, layerCount: layerIds.length });
+      setError(operationError instanceof Error ? operationError.message : t("error.mergeFailed"));
+    } finally {
+      setMergingLayers(false);
+    }
   }
 
   function editLayerMask(layer: SceneLayer): void {
+    if (startupPhase !== "ready") return;
     setError(null);
     setMoving(false);
     setCamera(cameraDefaults);
@@ -422,11 +666,36 @@ export default function App() {
     setMaskCanUndo(false);
     setMaskCanRedo(false);
     setFocusedMaskLayerId(layer.id);
+    setMaskEditorName(layer.name);
     setMaskEditor({ kind: "layer", layerId: layer.id, key: `layer:${layer.id}`, name: layer.name, maskUrl: layer.maskUrl });
   }
 
+  function addLayerMask(): void {
+    if (startupPhase !== "ready" || !project) return;
+    setError(null);
+    setMoving(false);
+    setCamera(cameraDefaults);
+    setShowInpaintMask(false);
+    setMaskBrushMode("add");
+    setMaskBlurRadius(0);
+    setMaskDirty(false);
+    setMaskReady(false);
+    setMaskCanUndo(false);
+    setMaskCanRedo(false);
+    // An empty name lets the service assign the next "Area NN"; the heading
+    // input above the canvas names it before it is created.
+    setMaskEditorName("");
+    setMaskEditor({
+      kind: "new-layer",
+      layerId: null,
+      key: `new-layer:${Date.now()}`,
+      name: "new foreground layer",
+      maskUrl: null
+    });
+  }
+
   function editExtraMask(): void {
-    if (!project) return;
+    if (startupPhase !== "ready" || !project) return;
     setError(null);
     setMoving(false);
     setCamera(cameraDefaults);
@@ -447,7 +716,7 @@ export default function App() {
   }
 
   function editInpaintTarget(layerId: string | null): void {
-    if (!project?.backgroundUrl) return;
+    if (startupPhase !== "ready" || !project?.backgroundUrl) return;
     const layer = layerId ? project.layers.find((candidate) => candidate.id === layerId) : null;
     if (layerId && !layer) {
       setError("The selected scene layer no longer exists.");
@@ -488,7 +757,7 @@ export default function App() {
   }
 
   async function refineLayerMask(layer: SceneLayer): Promise<void> {
-    if (!project) return;
+    if (startupPhase !== "ready" || !project) return;
     if (project.engine !== "ai") {
       setError("Refine requires the Local AI engine and InSPyReNet.");
       return;
@@ -518,8 +787,87 @@ export default function App() {
     }
   }
 
+  async function createLayerFromActiveMask(): Promise<SceneLayer | null> {
+    if (startupPhase !== "ready" || !project || maskEditor?.kind !== "new-layer" || !canvasRef.current) return null;
+    if (!maskDirty) {
+      setError("Paint an area before adding it as a layer.");
+      return null;
+    }
+    setError(null);
+    setMaskSaving(true);
+    appLog.info("workflow.layer-create.started", { projectId: project.id });
+    try {
+      const mask = await canvasRef.current.exportEditedMask();
+      const result = await createProjectLayer(project.id, mask, maskEditorName.trim() || undefined);
+      // The created layer is the one the project did not have before.
+      const known = new Set(project.layers.map((layer) => layer.id));
+      const created = result.layers.find((layer) => !known.has(layer.id)) ?? null;
+      setProject(mergeProjectResult(project, result));
+      setFocusedMaskLayerId(created?.id ?? null);
+      cancelMaskEdit();
+      appLog.info("workflow.layer-create.completed", { projectId: project.id, layerId: created?.id });
+      return created;
+    } catch (operationError) {
+      appLog.error("workflow.layer-create.failed", operationError, { projectId: project.id });
+      setError(operationError instanceof Error ? operationError.message : "The painted area could not be added as a layer.");
+      return null;
+    } finally {
+      setMaskSaving(false);
+    }
+  }
+
+  async function renameActiveLayer(): Promise<void> {
+    if (startupPhase !== "ready" || !project || maskEditor?.kind !== "layer" || !maskEditor.layerId) return;
+    const name = maskEditorName.trim();
+    const current = project.layers.find((layer) => layer.id === maskEditor.layerId);
+    if (!current || !name || name === current.name) {
+      // Restore the stored name so an abandoned edit cannot leave the heading
+      // showing something the project never accepted.
+      setMaskEditorName(current?.name ?? "");
+      return;
+    }
+    setRenamingLayer(true);
+    appLog.info("workflow.layer-rename.started", { projectId: project.id, layerId: current.id });
+    try {
+      const result = await renameProjectLayer(project.id, current.id, name);
+      setProject(mergeProjectResult(project, result));
+      setMaskEditor((editor) => editor && editor.layerId === current.id ? { ...editor, name } : editor);
+      appLog.info("workflow.layer-rename.completed", { projectId: project.id, layerId: current.id });
+    } catch (operationError) {
+      appLog.error("workflow.layer-rename.failed", operationError, { projectId: project.id, layerId: current.id });
+      setError(operationError instanceof Error ? operationError.message : "The layer could not be renamed.");
+      setMaskEditorName(current.name);
+    } finally {
+      setRenamingLayer(false);
+    }
+  }
+
+  async function deleteLayer(layerId: string): Promise<void> {
+    if (startupPhase !== "ready" || !project || deletingLayerId) return;
+    const layer = project.layers.find((candidate) => candidate.id === layerId);
+    if (!layer) return;
+    setError(null);
+    setDeletingLayerId(layerId);
+    appLog.info("workflow.layer-delete.started", { projectId: project.id, layerId });
+    try {
+      const result = await deleteProjectLayer(project.id, layerId);
+      setProject(mergeProjectResult(project, result));
+      setLayerSelection((selection) => selection.filter((id) => id !== layerId));
+      if (focusedMaskLayerId === layerId) setFocusedMaskLayerId(null);
+      if (maskEditor?.layerId === layerId) cancelMaskEdit();
+      // Deletion is stored in the reversible layer history, so refresh it.
+      await refreshMergeHistory(project.id);
+      appLog.info("workflow.layer-delete.completed", { projectId: project.id, layerId });
+    } catch (operationError) {
+      appLog.error("workflow.layer-delete.failed", operationError, { projectId: project.id, layerId });
+      setError(operationError instanceof Error ? operationError.message : "The layer could not be deleted.");
+    } finally {
+      setDeletingLayerId(null);
+    }
+  }
+
   async function confirmLayer(layer: SceneLayer): Promise<void> {
-    if (!project) return;
+    if (startupPhase !== "ready" || !project) return;
     setError(null);
     setConfirmingLayerId(layer.id);
     appLog.info("workflow.mask-confirm.started", { projectId: project.id, layerId: layer.id });
@@ -535,8 +883,35 @@ export default function App() {
     }
   }
 
+  async function confirmAllLayers(): Promise<void> {
+    if (startupPhase !== "ready" || !project) return;
+    const pending = project.layers.filter((layer) => layer.selected && !layer.confirmed);
+    if (!pending.length) return;
+    setError(null);
+    setConfirmingAll(true);
+    appLog.info("workflow.mask-confirm-all.started", { projectId: project.id, count: pending.length });
+    // Each confirm returns its own project snapshot, so fold them one after the
+    // other instead of racing several writes against the same scene metadata.
+    let current = project;
+    try {
+      for (const layer of pending) {
+        setConfirmingLayerId(layer.id);
+        const result = await confirmProjectLayer(project.id, layer.id);
+        current = mergeProjectResult(current, result);
+        setProject(current);
+      }
+      appLog.info("workflow.mask-confirm-all.completed", { projectId: project.id, count: pending.length });
+    } catch (operationError) {
+      appLog.error("workflow.mask-confirm-all.failed", operationError, { projectId: project.id });
+      setError(operationError instanceof Error ? operationError.message : "The selected mask could not be confirmed.");
+    } finally {
+      setConfirmingLayerId(null);
+      setConfirmingAll(false);
+    }
+  }
+
   async function applyMaskEdit(): Promise<boolean> {
-    if (!project || !maskEditor || !canvasRef.current) return false;
+    if (startupPhase !== "ready" || !project || !maskEditor || !canvasRef.current) return false;
     if (maskEditor.kind === "inpaint") return false;
     const retouchingBuiltBackground = phase === "editing" && maskEditor.kind === "extra" && Boolean(project.backgroundUrl);
     setError(null);
@@ -571,7 +946,7 @@ export default function App() {
   }
 
   async function inpaintActiveTarget(): Promise<void> {
-    if (!project || maskEditor?.kind !== "inpaint" || !canvasRef.current) return;
+    if (startupPhase !== "ready" || !project || maskEditor?.kind !== "inpaint" || !canvasRef.current) return;
     if (!maskDirty) {
       setError("Paint an area before inpainting this layer.");
       return;
@@ -642,8 +1017,44 @@ export default function App() {
     setMaskHistory(Object.fromEntries(history.map((state) => [state.targetId, state])));
   }
 
+  async function refreshMergeHistory(projectId: string): Promise<void> {
+    const history = await getLayerMergeHistory(projectId);
+    setMergeHistory(history[0] ?? null);
+  }
+
+  async function restoreLayerMerge(action: "undo" | "redo"): Promise<void> {
+    if (startupPhase !== "ready" || !project || mergeHistoryBusy || mergingLayers || maskEditor || refiningLayerId || confirmingLayerId) return;
+    if ((action === "undo" && !mergeHistory?.canUndo) || (action === "redo" && !mergeHistory?.canRedo)) return;
+    setError(null);
+    setMergeHistoryBusy(action);
+    setLayerSelection([]);
+    appLog.info("workflow.layer-merge-history.started", { projectId: project.id, action });
+    try {
+      const result = action === "undo"
+        ? await undoProjectLayerMerge(project.id)
+        : await redoProjectLayerMerge(project.id);
+      const refreshed = {
+        ...result,
+        layers: result.layers.map((layer) => ({
+          ...layer,
+          maskUrl: refreshedAssetUrl(layer.maskUrl),
+          cutoutUrl: refreshedAssetUrl(layer.cutoutUrl),
+          proposalMaskUrl: layer.proposalMaskUrl ? refreshedAssetUrl(layer.proposalMaskUrl) : null
+        }))
+      };
+      setProject(refreshed);
+      await Promise.all([refreshMaskHistory(project.id), refreshMergeHistory(project.id)]);
+      appLog.info("workflow.layer-merge-history.completed", { projectId: project.id, action });
+    } catch (operationError) {
+      appLog.error("workflow.layer-merge-history.failed", operationError, { projectId: project.id, action });
+      setError(operationError instanceof Error ? operationError.message : t("error.mergeHistoryFailed"));
+    } finally {
+      setMergeHistoryBusy(null);
+    }
+  }
+
   async function restoreLayerRefine(layerId: string, action: "undo" | "redo"): Promise<void> {
-    if (!project || maskHistoryBusy || maskEditor || refiningLayerId || confirmingLayerId) return;
+    if (startupPhase !== "ready" || !project || maskHistoryBusy || maskEditor || refiningLayerId || confirmingLayerId) return;
     const state = maskHistory[layerId];
     if ((action === "undo" && !state?.canUndo) || (action === "redo" && !state?.canRedo)) return;
     setFocusedMaskLayerId(layerId);
@@ -666,7 +1077,7 @@ export default function App() {
   }
 
   async function restoreFocusedInpaint(action: "undo" | "redo"): Promise<void> {
-    if (!project || !focusedInpaintTargetId || inpaintHistoryBusy || maskEditor) return;
+    if (startupPhase !== "ready" || !project || !focusedInpaintTargetId || inpaintHistoryBusy || maskEditor) return;
     const targetLayerId = focusedInpaintTargetId === "background" ? null : focusedInpaintTargetId;
     const state = inpaintHistory[focusedInpaintTargetId];
     if ((action === "undo" && !state?.canUndo) || (action === "redo" && !state?.canRedo)) return;
@@ -694,12 +1105,20 @@ export default function App() {
   }
 
   function resetActiveMask(): void {
+    if (startupPhase !== "ready") return;
     canvasRef.current?.resetEditedMask();
     setMaskBlurRadius(0);
   }
 
   async function refineActiveMask(): Promise<void> {
-    if (!project || !maskEditor?.layerId) return;
+    if (startupPhase !== "ready" || !project || !maskEditor) return;
+    if (maskEditor.kind === "new-layer") {
+      // A brushed area has to exist as a layer before it can be optimized.
+      const created = await createLayerFromActiveMask();
+      if (created) await refineLayerMask(created);
+      return;
+    }
+    if (!maskEditor.layerId) return;
     const layer = project.layers.find((candidate) => candidate.id === maskEditor.layerId);
     if (!layer) return;
     if (maskDirty) {
@@ -715,6 +1134,7 @@ export default function App() {
     operation: NonNullable<typeof fileOperation>,
     action: () => Promise<void>
   ): Promise<void> {
+    if (startupPhase !== "ready") return;
     setError(null);
     setFileOperation(operation);
     appLog.info("workflow.file-operation.started", { operation });
@@ -748,6 +1168,10 @@ export default function App() {
     setFocusedMaskLayerId(null);
     setMaskHistory({});
     setMaskHistoryBusy(null);
+    setLayerSelection([]);
+    setMergeHistory(null);
+    setMergeHistoryBusy(null);
+    setMergingLayers(false);
     setProcessingJobId(null);
     setCancellingJob(false);
     setMaskBlurRadius(0);
@@ -819,11 +1243,16 @@ export default function App() {
     setRefiningLayerId(null);
     setConfirmingLayerId(null);
     setFocusedInpaintTargetId(null);
+    setAnchorLayerId(null);
     setInpaintHistory({});
     setInpaintHistoryBusy(null);
     setFocusedMaskLayerId(null);
     setMaskHistory({});
     setMaskHistoryBusy(null);
+    setLayerSelection([]);
+    setMergeHistory(null);
+    setMergeHistoryBusy(null);
+    setMergingLayers(false);
     setProcessingJobId(null);
     setCancellingJob(false);
     setRefinement(settings.processing.defaultRefinement);
@@ -863,24 +1292,71 @@ export default function App() {
     ? "Background"
     : project?.layers.find((layer) => layer.id === focusedInpaintTargetId)?.name ?? null;
   const focusedInpaintHistory = focusedInpaintTargetId ? inpaintHistory[focusedInpaintTargetId] : null;
+  // The background plate has no anchor of its own; it is the reference everything
+  // else is positioned against.
+  const anchorTargetLayer = focusedInpaintTargetId && focusedInpaintTargetId !== "background"
+    ? project?.layers.find((layer) => layer.id === focusedInpaintTargetId) ?? null
+    : null;
   const maskHasChanges = maskDirty || maskBlurRadius > 0;
   const unconfirmedMaskCount = selectedLayers.filter((layer) => !layer.confirmed).length;
   const maskOperationActive = maskEditor !== null || refiningLayerId !== null || confirmingLayerId !== null;
-  const inpaintDisabled = maskOperationActive || unconfirmedMaskCount > 0 || selectedLayers.length === 0;
-  const inpaintLabel = unconfirmedMaskCount > 0
-    ? t("build.confirmMasks", { count: unconfirmedMaskCount })
-    : backgroundRetouchPending
-      ? t("build.rebuildBackground")
-      : t("build.inpaintHoles");
-  const busy = phase === "analyzing" || phase === "inpainting" || processingJobId !== null || fileOperation !== null || maskSaving || refiningLayerId !== null || confirmingLayerId !== null || inpaintHistoryBusy !== null || maskHistoryBusy !== null;
+  // The button drives two actions, so it stays shut through the handover from
+  // confirming to building as well as while either one runs.
+  const inpaintDisabled = maskOperationActive || selectedLayers.length === 0 || buildCooldown;
+  const inpaintLabel = confirmingAll
+    ? t("layers.confirming")
+    : unconfirmedMaskCount > 0
+      ? t("build.confirmMasks", { count: unconfirmedMaskCount })
+      : backgroundRetouchPending
+        ? t("build.rebuildBackground")
+        : t("build.inpaintHoles");
+  const startupReady = startupPhase === "ready";
+  const startupGatePhase = startupPhase === "ready" ? "checking" : startupPhase;
+  const busy = !startupReady || phase === "analyzing" || phase === "inpainting" || processingJobId !== null || fileOperation !== null || maskSaving || refiningLayerId !== null || confirmingLayerId !== null || inpaintHistoryBusy !== null || maskHistoryBusy !== null;
   const engine = project?.engine ?? health?.activeEngine;
 
+  const acceptDroppedFile = (event: DragEvent<HTMLElement>) => {
+    event.preventDefault();
+    void onFile(event.dataTransfer.files[0]);
+  };
+
   return (
-    <main className="app-shell" onDragOver={(event) => event.preventDefault()} onDrop={(event) => {
-      event.preventDefault();
-      void onFile(event.dataTransfer.files[0]);
-    }}>
-      <aside className="workflow-rail">
+    <>
+    {/* The shell renders from the first frame so the startup gate masks the
+        real editor instead of replacing it. `inert` keeps that masked UI out of
+        reach of the pointer, the keyboard, and assistive technology. */}
+    <main className="app-shell" aria-busy={!startupReady} inert={!startupReady} onDragOver={(event) => event.preventDefault()} onDrop={acceptDroppedFile}>
+      <button
+        type="button"
+        className={`panel-toggle panel-toggle-left ${openPanel === "left" ? "panel-open" : ""}`}
+        aria-label={openPanel === "left" ? t("responsive.closePanel") : t("source.title")}
+        aria-expanded={openPanel === "left"}
+        aria-controls="workflow-rail"
+        title={openPanel === "left" ? t("responsive.closePanel") : t("source.title")}
+        onClick={() => setOpenPanel((current) => current === "left" ? null : "left")}
+      >
+        <span aria-hidden="true">{openPanel === "left" ? "‹" : "›"}</span>
+      </button>
+      <button
+        type="button"
+        className={`panel-toggle panel-toggle-right ${openPanel === "right" ? "panel-open" : ""}`}
+        aria-label={openPanel === "right" ? t("responsive.closePanel") : t("inspector.title")}
+        aria-expanded={openPanel === "right"}
+        aria-controls="inspector-panel"
+        title={openPanel === "right" ? t("responsive.closePanel") : t("inspector.title")}
+        onClick={() => setOpenPanel((current) => current === "right" ? null : "right")}
+      >
+        <span aria-hidden="true">{openPanel === "right" ? "›" : "‹"}</span>
+      </button>
+      {openPanel !== null && (
+        <button
+          type="button"
+          className="panel-scrim"
+          aria-label={t("responsive.closePanel")}
+          onClick={() => setOpenPanel(null)}
+        />
+      )}
+      <aside id="workflow-rail" className={`workflow-rail ${openPanel === "left" ? "panel-open" : ""}`}>
         <div className="rail-heading">
           <div className="brand-block">
             <img className="brand-mark" src="./app-icon.png" alt="" />
@@ -928,6 +1404,8 @@ export default function App() {
               onProgress,
               onJobStarted,
               settings.processing.segmentationDensity,
+              settings.processing.segmentationLabels,
+              settings.processing.useVlmVocabularyProposer,
             ))}
           >
             {t("source.sample")}
@@ -952,8 +1430,9 @@ export default function App() {
       </aside>
 
       <section className="workspace">
-        {processingProgress && (
-          <div className="processing-status" aria-live="polite">
+        <div className="workspace-content">
+            {processingProgress && (
+              <div className="processing-status" aria-live="polite">
             <div className="processing-copy">
               <span className="eyebrow">{t("processing.local")}</span>
               <strong>{runtimeText(processingProgress.stage)}</strong>
@@ -980,63 +1459,92 @@ export default function App() {
             >
               <i style={{ width: `${processingProgress.progress}%` }} />
             </div>
-          </div>
-        )}
-        {project ? (
-          <>
-            <div className="stage-header">
-              <div>
-                <span className="eyebrow">{t("composition.title")}</span>
-                <strong>{project.width} x {project.height}</strong>
               </div>
+            )}
+            {project ? (
+              <>
+            {/* Inpainting locks every control in this row and the processing
+                banner above already reports the state, so drop it entirely and
+                give the stage the height back. */}
+            {phase !== "inpainting" && (
+            <div className="stage-header">
+              {/* The phase readout sits with the composition size so the action
+                  row on the right keeps a single line on a narrow window. */}
+              <div className="stage-summary">
+                <span className="phase-label"><i className={busy ? "working" : ""} /> {backgroundRetouchPending && phase === "selecting" ? t("phase.retouchReady") : phaseLabel(phase, t)}</span>
+                <div className="stage-summary-size">
+                  <span className="eyebrow">{t("composition.title")}</span>
+                  <strong>{project.width} x {project.height}</strong>
+                </div>
+              </div>
+              {maskEditor && (
+                <div className="mask-editor-heading" aria-live="polite">
+                  {maskEditor.kind === "layer" || maskEditor.kind === "new-layer" ? (
+                    // The heading is where a layer is named: on creation, and
+                    // whenever its mask is reopened for editing.
+                    <input
+                      type="text"
+                      className="mask-editor-name"
+                      value={maskEditorName}
+                      maxLength={80}
+                      disabled={renamingLayer || maskSaving}
+                      aria-label={t("layers.renameLabel")}
+                      title={t("layers.renameTitle")}
+                      placeholder={t("layers.namePlaceholder")}
+                      onChange={(event) => setMaskEditorName(event.target.value)}
+                      onBlur={() => void renameActiveLayer()}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter") event.currentTarget.blur();
+                        if (event.key === "Escape") {
+                          setMaskEditorName(maskEditor.name);
+                          event.currentTarget.blur();
+                        }
+                      }}
+                    />
+                  ) : (
+                    <strong>{layerName(maskEditor.name)}</strong>
+                  )}
+                </div>
+              )}
               <div className="stage-status">
                 <div className="stage-actions">
-                  <button type="button" className="secondary-button compact" disabled={busy} onClick={resetProject}>
+                  {/* The labels are trimmed to one word so the row still fits a
+                      narrow window; the titles carry what each one exports. */}
+                  <button type="button" className="secondary-button compact" disabled={busy} title={t("file.resetProjectTitle")} onClick={resetProject}>
                     {t("file.resetProject")}
                   </button>
-                  <button type="button" className="secondary-button compact" disabled={busy} onClick={() => void saveProjectPackage()}>
+                  <button type="button" className="secondary-button compact" disabled={busy} title={t("file.projectFileTitle")} onClick={() => void saveProjectPackage()}>
                     {fileOperation === "project" ? t("file.packing") : t("file.projectFile")}
                   </button>
                   {phase === "editing" && (
                     <>
-                      <button type="button" className="secondary-button compact" disabled={busy} onClick={() => void saveCanvas("video")}>
+                      <button type="button" className="secondary-button compact" disabled={busy} title={t("file.demoVideoTitle")} onClick={() => void saveCanvas("video")}>
                         {fileOperation === "video" ? t("file.rendering") : t("file.demoVideo")}
                       </button>
-                      <button type="button" className="primary-button compact" disabled={busy} onClick={() => void saveCanvas("png")}>
+                      <button type="button" className="primary-button compact" disabled={busy} title={t("file.pngTitle")} onClick={() => void saveCanvas("png")}>
                         {fileOperation === "png" ? t("file.saving") : t("file.png")}
                       </button>
                     </>
                   )}
                 </div>
-                {phase === "selecting" && (
-                  <button
-                    type="button"
-                    className="stage-build-button"
-                    onPointerEnter={() => setShowInpaintMask(true)}
-                    onPointerLeave={() => setShowInpaintMask(false)}
-                    onFocus={() => setShowInpaintMask(true)}
-                    onBlur={() => setShowInpaintMask(false)}
-                    disabled={inpaintDisabled}
-                    onClick={() => void buildScene()}
-                  >
-                    {inpaintLabel}
-                  </button>
-                )}
-                <span className="phase-label"><i className={busy ? "working" : ""} /> {backgroundRetouchPending && phase === "selecting" ? t("phase.retouchReady") : phaseLabel(phase, t)}</span>
               </div>
             </div>
+            )}
             <SceneCanvas
               ref={canvasRef}
               project={project}
               camera={camera}
-              interactive={(phase === "selecting" || phase === "editing") && maskEditor === null}
+              interactive={startupReady && (phase === "selecting" || phase === "editing") && maskEditor === null}
               reviewingSource={phase === "selecting"}
+              processing={phase === "inpainting"}
               showInpaintMask={phase === "selecting" && showInpaintMask && maskEditor === null}
               maskEditor={maskEditor}
               showCompositionWhileMaskEditing={maskEditor?.kind === "inpaint"}
               brushMode={maskBrushMode}
               brushSize={maskBrushSize}
               maskBlurRadius={maskBlurRadius}
+              anchorLayerId={phase === "editing" && !maskEditor ? anchorLayerId : null}
+              onLayerAnchorChange={moveLayerAnchor}
               onMaskDirtyChange={setMaskDirty}
               onMaskHistoryChange={({ canUndo, canRedo }) => {
                 setMaskCanUndo(canUndo);
@@ -1048,65 +1556,87 @@ export default function App() {
             />
             {(phase === "selecting" || phase === "editing") && maskEditor && (
               <div className="mask-toolbar" role="region" aria-label={t("mask.controls")}>
-                <div className="mask-toolbar-title">
-                  <span className="eyebrow">{t("mask.brush")}</span>
-                  <strong>{layerName(maskEditor.name)}</strong>
-                  <span>{maskEditor.kind === "inpaint"
-                    ? t("mask.inpaintHelp")
-                    : maskEditor.kind === "extra"
-                    ? phase === "editing"
-                      ? t("mask.extraRetouchHelp")
-                      : t("mask.extraHelp")
-                    : t("mask.layerHelp")}</span>
+                <div className="brush-tool-controls">
+                  <div className="brush-modes" aria-label={t("mask.brushMode")}>
+                    <button type="button" className={maskBrushMode === "add" ? "active" : ""} onClick={() => setMaskBrushMode("add")}>{t("mask.add")}</button>
+                    <button type="button" className={maskBrushMode === "erase" ? "active" : ""} onClick={() => setMaskBrushMode("erase")}>{t("mask.erase")}</button>
+                  </div>
+                  <div className="brush-history" aria-label={t("mask.history")}>
+                    <button type="button" disabled={!maskCanUndo || maskSaving} onClick={() => canvasRef.current?.undoEditedMask()} title={t("mask.undoTitle")}>{t("mask.undo")}</button>
+                    <button type="button" disabled={!maskCanRedo || maskSaving} onClick={() => canvasRef.current?.redoEditedMask()} title={t("mask.redoTitle")}>{t("mask.redo")}</button>
+                  </div>
                 </div>
-                <div className="brush-modes" aria-label={t("mask.brushMode")}>
-                  <button type="button" className={maskBrushMode === "add" ? "active" : ""} onClick={() => setMaskBrushMode("add")}>{t("mask.add")}</button>
-                  <button type="button" className={maskBrushMode === "erase" ? "active" : ""} onClick={() => setMaskBrushMode("erase")}>{t("mask.erase")}</button>
+                <div className="brush-controls">
+                  <div className="brush-controls-heading">
+                    <span className="eyebrow">{t("mask.brush")}</span>
+                    <span className="brush-controls-description">{maskEditor.kind === "inpaint"
+                      ? t("mask.inpaintHelp")
+                      : maskEditor.kind === "new-layer"
+                        ? t("mask.newLayerHelp")
+                        : maskEditor.kind === "extra"
+                          ? phase === "editing"
+                            ? t("mask.extraRetouchHelp")
+                            : t("mask.extraHelp")
+                          : t("mask.layerHelp")}</span>
+                  </div>
+                  <div className="brush-slider-stack">
+                    <label className="brush-size-control">
+                      <span>{t("mask.sizeShort")}</span>
+                      <input
+                        type="range"
+                        min="6"
+                        max="180"
+                        step="2"
+                        value={maskBrushSize}
+                        onChange={(event) => setMaskBrushSize(Number(event.target.value))}
+                      />
+                      <output>{maskBrushSize}px</output>
+                    </label>
+                    <label className="brush-size-control blur-control">
+                      <span>{t("mask.edgeBlurShort")}</span>
+                      <input
+                        type="range"
+                        min="0"
+                        max="24"
+                        step="1"
+                        value={maskBlurRadius}
+                        onChange={(event) => setMaskBlurRadius(Number(event.target.value))}
+                      />
+                      <output>{maskBlurRadius}px</output>
+                    </label>
+                  </div>
                 </div>
-                <label className="brush-size-control">
-                  <span>{t("mask.size")}</span>
-                  <input
-                    type="range"
-                    min="6"
-                    max="180"
-                    step="2"
-                    value={maskBrushSize}
-                    onChange={(event) => setMaskBrushSize(Number(event.target.value))}
-                  />
-                  <output>{maskBrushSize}px</output>
-                </label>
-                <label className="brush-size-control blur-control">
-                  <span>{t("mask.edgeBlur")}</span>
-                  <input
-                    type="range"
-                    min="0"
-                    max="24"
-                    step="1"
-                    value={maskBlurRadius}
-                    onChange={(event) => setMaskBlurRadius(Number(event.target.value))}
-                  />
-                  <output>{maskBlurRadius}px</output>
-                </label>
-                <div className="brush-history" aria-label={t("mask.history")}>
-                  <button type="button" disabled={!maskCanUndo || maskSaving} onClick={() => canvasRef.current?.undoEditedMask()} title={t("mask.undoTitle")}>{t("mask.undo")}</button>
-                  <button type="button" disabled={!maskCanRedo || maskSaving} onClick={() => canvasRef.current?.redoEditedMask()} title={t("mask.redoTitle")}>{t("mask.redo")}</button>
+                <div className="mask-toolbar-actions">
+                  <div className="mask-toolbar-action-pair mask-toolbar-action-pair-primary">
+                    {((maskEditor.kind === "layer" && activeEditedLayer) || maskEditor.kind === "new-layer") && project.engine === "ai" && (
+                      <button
+                        type="button"
+                        className="secondary-button compact refine-action"
+                        disabled={!maskReady || maskSaving || (maskEditor.kind === "new-layer" && !maskDirty)}
+                        onClick={() => void refineActiveMask()}
+                      >
+                        {maskDirty ? t("mask.applyRefine") : t("mask.refine")}
+                      </button>
+                    )}
+                    {maskEditor.kind === "inpaint" ? (
+                      <button type="button" className="primary-button compact" disabled={!maskReady || !maskDirty || maskSaving} onClick={() => void inpaintActiveTarget()}>
+                        {maskSaving ? t("mask.starting") : t("mask.inpaintLayer")}
+                      </button>
+                    ) : maskEditor.kind === "new-layer" ? (
+                      <button type="button" className="primary-button compact" disabled={!maskReady || !maskDirty || maskSaving} onClick={() => void createLayerFromActiveMask()}>
+                        {maskSaving ? t("mask.adding") : t("mask.addLayer")}
+                      </button>
+                    ) : (
+                      <button type="button" className="primary-button compact" disabled={!maskReady || !maskHasChanges || maskSaving} onClick={() => void applyMaskEdit()}>
+                        {maskSaving ? t("mask.applying") : t("mask.apply")}
+                      </button>
+                    )}
+                  </div>
+                  <div className="mask-toolbar-action-pair">
+                    <button type="button" className="secondary-button compact" disabled={!maskHasChanges || maskSaving} onClick={resetActiveMask}>{t("mask.reset")}</button>
+                    <button type="button" className="secondary-button compact" disabled={maskSaving} onClick={cancelMaskEdit}>{t("mask.cancel")}</button>
+                  </div>
                 </div>
-                <button type="button" className="text-button" disabled={!maskHasChanges || maskSaving} onClick={resetActiveMask}>{t("mask.reset")}</button>
-                <button type="button" className="secondary-button compact" disabled={maskSaving} onClick={cancelMaskEdit}>{t("mask.cancel")}</button>
-                {maskEditor.kind === "layer" && activeEditedLayer && project.engine === "ai" && (
-                  <button type="button" className="secondary-button compact refine-action" disabled={!maskReady || maskSaving} onClick={() => void refineActiveMask()}>
-                    {maskDirty ? t("mask.applyRefine") : t("mask.refine")}
-                  </button>
-                )}
-                {maskEditor.kind === "inpaint" ? (
-                  <button type="button" className="primary-button compact" disabled={!maskReady || !maskDirty || maskSaving} onClick={() => void inpaintActiveTarget()}>
-                    {maskSaving ? t("mask.starting") : t("mask.inpaintLayer")}
-                  </button>
-                ) : (
-                  <button type="button" className="primary-button compact" disabled={!maskReady || !maskHasChanges || maskSaving} onClick={() => void applyMaskEdit()}>
-                    {maskSaving ? t("mask.applying") : t("mask.apply")}
-                  </button>
-                )}
               </div>
             )}
             {phase === "editing" && !maskEditor && (
@@ -1118,18 +1648,19 @@ export default function App() {
                 onReset={() => { setMoving(false); setCamera(cameraDefaults); }}
               />
             )}
-          </>
-        ) : (
-          <button type="button" className="empty-stage" onClick={() => fileRef.current?.click()} disabled={busy}>
-            <span className="empty-orbit"><i /><i /><i /></span>
-            <strong>{busy ? t("empty.analyzing") : t("empty.drop")}</strong>
-            <small>{busy ? t("empty.analyzingDetail") : t("empty.formats")}</small>
-          </button>
-        )}
-        {error && <div className="error-banner" role="alert">{runtimeText(error)}</div>}
+              </>
+            ) : (
+              <button type="button" className="empty-stage" onClick={() => fileRef.current?.click()} disabled={busy}>
+                <span className="empty-orbit"><i /><i /><i /></span>
+                <strong>{busy ? t("empty.analyzing") : t("empty.drop")}</strong>
+                <small>{busy ? t("empty.analyzingDetail") : t("empty.formats")}</small>
+              </button>
+            )}
+            {error && <div className="error-banner" role="alert">{runtimeText(error)}</div>}
+        </div>
       </section>
 
-      <aside className="inspector">
+      <aside id="inspector-panel" className={`inspector ${openPanel === "right" ? "panel-open" : ""}`}>
         {project ? (
           <>
             <LayerInspector
@@ -1138,7 +1669,6 @@ export default function App() {
               editingLayerId={maskEditor?.kind === "layer" ? maskEditor.layerId : null}
               refiningLayerId={refiningLayerId}
               confirmingLayerId={confirmingLayerId}
-              aiRefineAvailable={project.engine === "ai"}
               maskHistory={maskHistory}
               maskHistoryBusy={maskHistoryBusy}
               backgroundUrl={project.backgroundUrl}
@@ -1146,10 +1676,23 @@ export default function App() {
               focusedTargetId={focusedInpaintTargetId}
               layerInpaintAvailable={phase === "editing" && project.engine === "ai" && Boolean(health?.providers.refinement?.available)}
               onEditMask={editLayerMask}
-              onRefineMask={(layer) => void refineLayerMask(layer)}
               onUndoRefine={(layerId) => void restoreLayerRefine(layerId, "undo")}
               onRedoRefine={(layerId) => void restoreLayerRefine(layerId, "redo")}
               onConfirmMask={(layer) => void confirmLayer(layer)}
+              selectedLayerIds={layerSelection}
+              mergeHistory={mergeHistory}
+              mergeHistoryBusy={mergeHistoryBusy}
+              merging={mergingLayers}
+              deletingLayerId={deletingLayerId}
+              disabled={!startupReady}
+              onCancelEdit={cancelMaskEdit}
+              onDeleteLayer={(layerId) => void deleteLayer(layerId)}
+              onSelectLayer={selectLayer}
+              onClearSelection={clearLayerSelection}
+              onToggleSelected={toggleSelectedLayers}
+              onMergeSelected={() => void mergeSelectedLayers()}
+              onUndoMerge={() => void restoreLayerMerge("undo")}
+              onRedoMerge={() => void restoreLayerMerge("redo")}
               onInpaintTarget={editInpaintTarget}
               onFocusTarget={setFocusedInpaintTargetId}
               onChange={updateLayers}
@@ -1160,13 +1703,25 @@ export default function App() {
                   <strong>{t("build.title")}</strong>
                   <div className="extra-mask-option">
                     <div>
+                      <span>{t("build.newLayer")}</span>
+                      <small>{t("build.newLayerHelp")}</small>
+                    </div>
+                    <button type="button" disabled={maskEditor !== null} onClick={addLayerMask}>
+                      {t("build.addLayer")}
+                    </button>
+                  </div>
+                  {/* An area brushed before this became a layer stays editable. */}
+                  {project.extraMaskUrl && (
+                  <div className="extra-mask-option">
+                    <div>
                       <span>{t("build.extraArea")}</span>
                       <small>{t("build.extraAreaHelp")}</small>
                     </div>
                     <button type="button" disabled={maskEditor !== null} onClick={editExtraMask}>
-                      {project.extraMaskUrl ? t("build.editArea") : t("build.addArea")}
+                      {t("build.editArea")}
                     </button>
                   </div>
+                  )}
                   <label>
                     <span>{t("build.inpainter")}</span>
                     <select value={refinement} onChange={(event) => changeRefinement(event.target.value as InpaintRefinement)}>
@@ -1199,11 +1754,17 @@ export default function App() {
                   type="button"
                   className="primary-button"
                   onPointerEnter={() => setShowInpaintMask(true)}
-                  onPointerLeave={() => setShowInpaintMask(false)}
+                  onPointerLeave={() => {
+                    setShowInpaintMask(false);
+                    // Leaving the button is the deliberate gesture that ends a
+                    // click burst, so the next press is unambiguously intended.
+                    setBuildCooldown(false);
+                  }}
                   onFocus={() => setShowInpaintMask(true)}
                   onBlur={() => setShowInpaintMask(false)}
                   disabled={inpaintDisabled}
-                  onClick={() => void buildScene()}
+                  title={unconfirmedMaskCount > 0 ? t("build.confirmMasksTitle") : undefined}
+                  onClick={runBuildAction}
                 >
                   {inpaintLabel}
                 </button>
@@ -1244,6 +1805,32 @@ export default function App() {
                       {inpaintHistoryBusy === "redo" ? t("build.redoing") : t("build.redoInpaint")}
                     </button>
                   </div>
+                  {/* Anchoring targets the focused layer, matching how the undo
+                      controls above already work. */}
+                  <div className="inpaint-history-controls">
+                    <span>{t("build.layerAnchor", {
+                      x: (anchorTargetLayer?.offsetX ?? 0).toFixed(2),
+                      y: (anchorTargetLayer?.offsetY ?? 0).toFixed(2)
+                    })}</span>
+                    <button
+                      type="button"
+                      className={anchorLayerId ? "active" : ""}
+                      disabled={!anchorTargetLayer || maskEditor !== null}
+                      aria-pressed={anchorLayerId !== null}
+                      title={t("build.moveAnchorTitle")}
+                      onClick={() => setAnchorLayerId((current) => current ? null : anchorTargetLayer?.id ?? null)}
+                    >
+                      {anchorLayerId ? t("build.stopAnchor") : t("build.moveAnchor")}
+                    </button>
+                    <button
+                      type="button"
+                      disabled={!anchorTargetLayer || (anchorTargetLayer.offsetX === 0 && anchorTargetLayer.offsetY === 0)}
+                      title={t("build.resetAnchorTitle")}
+                      onClick={() => anchorTargetLayer && moveLayerAnchor(anchorTargetLayer.id, 0, 0)}
+                    >
+                      {t("build.resetAnchor")}
+                    </button>
+                  </div>
                   <label>
                     <span>{t("build.inpaintPrompt")}</span>
                     <input
@@ -1279,8 +1866,25 @@ export default function App() {
           </div>
         )}
       </aside>
-      {showOptions && <SettingsDialog settings={settings} onSave={saveSettings} onCancel={() => setShowOptions(false)} />}
-      {showAbout && <AboutDialog version={appVersion} onClose={() => setShowAbout(false)} />}
     </main>
+    {!startupReady && (
+      // Dropping a source image while the gate is up still queues it: the
+      // overlay owns the pointer, so it carries the same drop target.
+      <div
+        className="startup-overlay"
+        role="dialog"
+        aria-modal="true"
+        aria-label={t("startup.title")}
+        onDragOver={(event) => event.preventDefault()}
+        onDrop={acceptDroppedFile}
+      >
+        <StartupGate phase={startupGatePhase} health={health} error={startupError} t={t} />
+      </div>
+    )}
+    {/* Dialogs sit outside the shell so Options and About stay usable while
+        the startup gate holds the editor. */}
+    {showOptions && <SettingsDialog settings={settings} onSave={saveSettings} onCancel={() => setShowOptions(false)} />}
+    {showAbout && <AboutDialog version={appVersion} onClose={() => setShowAbout(false)} />}
+    </>
   );
 }

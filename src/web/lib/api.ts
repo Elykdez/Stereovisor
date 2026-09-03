@@ -18,6 +18,16 @@ interface ApiErrorBody {
   message?: string;
 }
 
+export class ApiRequestError extends Error {
+  readonly status: number;
+
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = "ApiRequestError";
+    this.status = status;
+  }
+}
+
 interface ProcessingJobStart {
   jobId: string;
 }
@@ -36,7 +46,17 @@ export class ProcessingCancelledError extends Error {
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`${SERVICE_ORIGIN}${path}`, init);
+  let response: Response;
+  try {
+    response = await fetch(`${SERVICE_ORIGIN}${path}`, init);
+  } catch (error) {
+    appLog.warn("api.request.unreachable", {
+      method: init?.method ?? "GET",
+      path,
+      error: error instanceof Error ? error.message : error,
+    });
+    throw error;
+  }
   if (response.ok) {
     return (await response.json()) as T;
   }
@@ -45,12 +65,46 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   try {
     body = (await response.json()) as ApiErrorBody;
   } catch {
-    throw new Error(`Local service failed with HTTP ${response.status}.`);
+    throw new ApiRequestError(`Local service failed with HTTP ${response.status}.`, response.status);
   }
+  let message: string;
   if (typeof body.detail === "object") {
-    throw new Error([body.detail.message, body.detail.detail].filter(Boolean).join(" "));
+    message = [body.detail.message, body.detail.detail].filter(Boolean).join(" ");
+  } else {
+    message = body.message ?? body.detail ?? `Local service failed with HTTP ${response.status}.`;
   }
-  throw new Error(body.message ?? body.detail ?? `Local service failed with HTTP ${response.status}.`);
+  throw new ApiRequestError(message, response.status);
+}
+
+function isTransientStartupError(error: unknown): error is ApiRequestError {
+  return error instanceof ApiRequestError && [502, 503, 504].includes(error.status);
+}
+
+async function requestWithStartupRetry<T>(
+  path: string,
+  init: RequestInit,
+  attempts = 8,
+  retryNetworkErrors = false,
+): Promise<T> {
+  let delayMs = 350;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      return await request<T>(path, init);
+    } catch (error) {
+      const transient = isTransientStartupError(error) || (retryNetworkErrors && error instanceof TypeError);
+      if (!transient || attempt === attempts) throw error;
+      appLog.warn("api.request.startup-retry", {
+        path,
+        attempt,
+        attempts,
+        delayMs,
+        status: error instanceof ApiRequestError ? error.status : undefined,
+      });
+      await new Promise((resolve) => window.setTimeout(resolve, delayMs));
+      delayMs = Math.min(2000, delayMs * 2);
+    }
+  }
+  throw new Error("Local service request failed during startup.");
 }
 
 export function resolveAssetUrl(path: string): string {
@@ -74,6 +128,11 @@ export async function getHealth(): Promise<HealthStatus> {
     appLog.error("health.check.failed", error);
     throw error;
   }
+}
+
+/** Make one readiness request; startup owns the retry cadence and UI state. */
+export function probeHealth(): Promise<HealthStatus> {
+  return request<HealthStatus>("/api/health");
 }
 
 async function retryHealth(attempts: number): Promise<HealthStatus> {
@@ -136,23 +195,44 @@ export async function analyzeImage(
   file: File,
   onProgress: (progress: ProcessingProgress) => void,
   onJobStarted?: (jobId: string) => void,
-  density: SegmentationDensity = "balanced"
+  density: SegmentationDensity = "balanced",
+  labels = "",
+  useVlmVocabularyProposer = false,
 ): Promise<SceneProject> {
-  appLog.info("workflow.analyze-image.started", { name: file.name, bytes: file.size, density });
+  appLog.info("workflow.analyze-image.started", {
+    name: file.name,
+    bytes: file.size,
+    density,
+    hasCustomLabels: Boolean(labels.trim()),
+    useVlmVocabularyProposer,
+  });
   const form = new FormData();
   form.append("file", file);
   form.append("segmentation_density", density);
-  const job = await request<ProcessingJobStart>("/api/jobs/analyze", { method: "POST", body: form });
+  form.append("segmentation_labels", labels);
+  form.append("use_vlm_vocabulary", String(useVlmVocabularyProposer));
+  const job = await requestWithStartupRetry<ProcessingJobStart>("/api/jobs/analyze", { method: "POST", body: form });
   return waitForJob(job.jobId, onProgress, onJobStarted);
 }
 
 export async function analyzeSample(
   onProgress: (progress: ProcessingProgress) => void,
   onJobStarted?: (jobId: string) => void,
-  density: SegmentationDensity = "balanced"
+  density: SegmentationDensity = "balanced",
+  labels = "",
+  useVlmVocabularyProposer = false,
 ): Promise<SceneProject> {
-  appLog.info("workflow.analyze-sample.started", { density });
-  const job = await request<ProcessingJobStart>(`/api/jobs/sample?segmentation_density=${encodeURIComponent(density)}`, { method: "POST" });
+  appLog.info("workflow.analyze-sample.started", {
+    density,
+    hasCustomLabels: Boolean(labels.trim()),
+    useVlmVocabularyProposer,
+  });
+  const query = new URLSearchParams({
+    segmentation_density: density,
+    segmentation_labels: labels,
+    use_vlm_vocabulary: String(useVlmVocabularyProposer),
+  });
+  const job = await requestWithStartupRetry<ProcessingJobStart>(`/api/jobs/sample?${query.toString()}`, { method: "POST" });
   return waitForJob(job.jobId, onProgress, onJobStarted);
 }
 
@@ -240,6 +320,33 @@ export function redoProjectLayerRefine(projectId: string, layerId: string): Prom
   return restoreProjectLayerRefine(projectId, layerId, "redo");
 }
 
+export function mergeProjectLayers(projectId: string, layerIds: string[]): Promise<SceneProject> {
+  return request<SceneProject>(
+    `/api/projects/${encodeURIComponent(projectId)}/layers/merge`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ layerIds })
+    }
+  );
+}
+
+export function getLayerMergeHistory(projectId: string): Promise<InpaintHistoryState[]> {
+  return request<InpaintHistoryState[]>(`/api/projects/${encodeURIComponent(projectId)}/layer-merge-history`);
+}
+
+function restoreProjectLayerMerge(projectId: string, action: "undo" | "redo"): Promise<SceneProject> {
+  return request<SceneProject>(`/api/projects/${encodeURIComponent(projectId)}/layers/${action}-merge`, { method: "POST" });
+}
+
+export function undoProjectLayerMerge(projectId: string): Promise<SceneProject> {
+  return restoreProjectLayerMerge(projectId, "undo");
+}
+
+export function redoProjectLayerMerge(projectId: string): Promise<SceneProject> {
+  return restoreProjectLayerMerge(projectId, "redo");
+}
+
 export async function refineProjectLayer(
   projectId: string,
   layerId: string,
@@ -252,6 +359,31 @@ export async function refineProjectLayer(
     method: "POST"
   });
   return waitForJob(job.jobId, onProgress, onJobStarted);
+}
+
+export function createProjectLayer(projectId: string, mask: Blob, name?: string): Promise<SceneProject> {
+  const form = new FormData();
+  form.append("file", mask, "new-layer-mask.png");
+  if (name) form.append("name", name);
+  return request<SceneProject>(`/api/projects/${encodeURIComponent(projectId)}/layers`, { method: "POST", body: form });
+}
+
+export function renameProjectLayer(projectId: string, layerId: string, name: string): Promise<SceneProject> {
+  return request<SceneProject>(
+    `/api/projects/${encodeURIComponent(projectId)}/layers/${encodeURIComponent(layerId)}/name`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name })
+    }
+  );
+}
+
+export function deleteProjectLayer(projectId: string, layerId: string): Promise<SceneProject> {
+  return request<SceneProject>(
+    `/api/projects/${encodeURIComponent(projectId)}/layers/${encodeURIComponent(layerId)}/delete`,
+    { method: "POST" }
+  );
 }
 
 export function confirmProjectLayer(projectId: string, layerId: string): Promise<SceneProject> {
@@ -278,7 +410,8 @@ export async function exportProjectPackage(project: SceneProject, camera: Camera
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       camera,
-      layers: project.layers.map(({ id, depth, order, selected, visible }) => ({ id, depth, order, selected, visible }))
+      layers: project.layers.map(({ id, depth, order, offsetX, offsetY, selected, visible }) =>
+        ({ id, depth, order, offsetX, offsetY, selected, visible }))
     })
   });
   if (!response.ok) {
@@ -294,7 +427,7 @@ export function importProjectPackage(file: File): Promise<ImportedProject> {
   appLog.info("workflow.project-import.started", { name: file.name, bytes: file.size });
   const form = new FormData();
   form.append("file", file);
-  return request<ImportedProject>("/api/projects/import", { method: "POST", body: form });
+  return requestWithStartupRetry<ImportedProject>("/api/projects/import", { method: "POST", body: form }, 8, true);
 }
 
 async function throwResponseError(response: Response): Promise<never> {

@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+# Packaged Electron stores the service beside app.asar under resources. The
+# explicit root keeps imports and vendor paths stable in both modes.
+PROJECT_ROOT = Path(os.environ.get("STEREOVISOR_APP_ROOT", Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(PROJECT_ROOT))
 
 try:

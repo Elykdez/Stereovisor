@@ -28,10 +28,15 @@ export function mergeProjectResult(
         ...layer,
         depth: local?.depth ?? layer.depth,
         order: local?.order ?? layer.order,
+        offsetX: local?.offsetX ?? layer.offsetX,
+        offsetY: local?.offsetY ?? layer.offsetY,
         selected: local?.selected ?? layer.selected,
         visible: local?.visible ?? layer.visible,
         maskUrl: refreshLayerId === layer.id ? refreshedAssetUrl(layer.maskUrl) : local?.maskUrl ?? layer.maskUrl,
-        cutoutUrl: refreshLayerId === layer.id ? refreshedAssetUrl(layer.cutoutUrl) : local?.cutoutUrl ?? layer.cutoutUrl
+        cutoutUrl: refreshLayerId === layer.id ? refreshedAssetUrl(layer.cutoutUrl) : local?.cutoutUrl ?? layer.cutoutUrl,
+        proposalMaskUrl: refreshLayerId === layer.id && layer.proposalMaskUrl
+          ? refreshedAssetUrl(layer.proposalMaskUrl)
+          : local?.proposalMaskUrl ?? layer.proposalMaskUrl
       };
     }),
     extraMaskUrl: refreshExtra && result.extraMaskUrl

@@ -14,9 +14,9 @@ export { SUPPORTED_LOCALES } from "../settings";
 export type { AppLocale } from "../settings";
 export const LOCALE_LABEL_KEYS = {
   en: "language.en",
-  "zh-CN": "language.zhCN",
   ja: "language.ja",
-  ko: "language.ko"
+  ko: "language.ko",
+  "zh-CN": "language.zhCN"
 } as const satisfies Record<AppLocale, TranslationKey>;
 export type TranslationValues = Record<string, string | number>;
 export type AppTranslate = (key: TranslationKey, values?: TranslationValues) => string;
@@ -117,10 +117,12 @@ const RUNTIME_KEYS: Readonly<Record<string, MessageKey>> = {
   "Local processing finished.": "runtime.finished",
   "Processing cancelled by the user.": "processing.cancelled",
   "Normalizing orientation and color.": "runtime.normalizing",
+  "Describing objects": "runtime.describingObjects",
   "Finding distinct foreground regions.": "runtime.findingRegions",
   "Combining the selected foreground mattes.": "runtime.combiningMattes",
   "Synthesizing the hidden background plate.": "runtime.synthesizingPlate",
-  "Grounding DINO-T and SAM 2.1 are finding individual objects.": "runtime.findingObjects",
+  "Grounding DINO-B and SAM 2.1 are finding individual objects.": "runtime.findingObjects",
+  "Qwen3-VL is proposing a scene vocabulary.": "runtime.proposingVocabulary",
   "Depth Anything 3 is mapping near and distant regions.": "runtime.mappingDepth",
   "Preparing depth ordering and transparent cutouts.": "runtime.preparingCutouts",
   "InSPyReNet is removing the local background and resolving soft edges.": "runtime.refiningEdges",
@@ -220,6 +222,9 @@ export function translateLayerName(name: string, t: AppTranslate): string {
   if (name === "Foreground depth plane") return t("layerName.depthPlane");
   const object = name.match(/^Object (\d+)$/);
   if (object) return t("layerName.object", { number: object[1] });
+  // Default name for a hand-brushed layer; a renamed one passes through.
+  const area = name.match(/^Area (\d+)$/);
+  if (area) return t("layerName.area", { number: area[1] });
   if (name === "extra inpaint area") return t("mask.extraAreaName");
   const inpaintArea = name.match(/^(.+) inpaint area$/);
   if (inpaintArea) return t("mask.inpaintAreaName", { name: translateLayerName(inpaintArea[1], t) });

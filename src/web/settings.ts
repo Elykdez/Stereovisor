@@ -1,4 +1,4 @@
-export const SUPPORTED_LOCALES = ["en", "zh-CN", "ja", "ko"] as const;
+export const SUPPORTED_LOCALES = ["en", "ja", "ko", "zh-CN"] as const;
 export type AppLocale = (typeof SUPPORTED_LOCALES)[number];
 export type SegmentationDensity = "sparse" | "balanced" | "dense";
 
@@ -10,6 +10,9 @@ export interface AppSettings {
   locale: AppLocale;
   appearance: {
     reduceMotion: boolean;
+  };
+  service: {
+    showConsole: boolean;
   };
   camera: {
     defaultZoom: number;
@@ -25,6 +28,8 @@ export interface AppSettings {
     defaultRefinement: "lama" | "powerpaint";
     inpaintingSteps: number;
     segmentationDensity: SegmentationDensity;
+    segmentationLabels: string;
+    useVlmVocabularyProposer: boolean;
   };
 }
 
@@ -32,6 +37,7 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
   version: 1,
   locale: "en",
   appearance: { reduceMotion: false },
+  service: { showConsole: false },
   camera: { defaultZoom: 1, defaultStrength: 68 },
   motion: { speed: 1, horizontalAmount: 0.74, verticalAmount: 0.28 },
   processing: {
@@ -39,6 +45,8 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
     defaultRefinement: "lama",
     inpaintingSteps: 25,
     segmentationDensity: "balanced",
+    segmentationLabels: "",
+    useVlmVocabularyProposer: false,
   },
 };
 
@@ -47,6 +55,12 @@ export const SETTINGS_REGISTRY = [
   {
     key: "appearance.reduceMotion",
     category: "appearance",
+    type: "boolean",
+    defaultValue: false,
+  },
+  {
+    key: "service.showConsole",
+    category: "advanced",
     type: "boolean",
     defaultValue: false,
   },
@@ -125,6 +139,18 @@ export const SETTINGS_REGISTRY = [
     type: "select",
     defaultValue: "balanced",
   },
+  {
+    key: "processing.segmentationLabels",
+    category: "inference",
+    type: "text",
+    defaultValue: "",
+  },
+  {
+    key: "processing.useVlmVocabularyProposer",
+    category: "inference",
+    type: "boolean",
+    defaultValue: false,
+  },
 ] as const;
 
 type RecordLike = Record<string, unknown>;
@@ -148,6 +174,10 @@ function numberSetting(
     typeof value === "number" && Number.isFinite(value) ? value : fallback;
   const clamped = Math.min(max, Math.max(min, parsed));
   return Math.round(clamped / step) * step;
+}
+
+function textSetting(value: unknown, fallback: string, maxLength: number): string {
+  return typeof value === "string" ? value.trim().slice(0, maxLength) : fallback;
 }
 
 export function isAppLocale(value: unknown): value is AppLocale {
@@ -179,6 +209,7 @@ export function sanitizeAppSettings(value: unknown): AppSettings {
   // keeps newly added fields deterministic and makes migrations idempotent.
   const source = record(value);
   const appearance = record(source.appearance);
+  const service = record(source.service);
   const camera = record(source.camera);
   const motion = record(source.motion);
   const processing = record(source.processing);
@@ -189,6 +220,11 @@ export function sanitizeAppSettings(value: unknown): AppSettings {
     processing.segmentationDensity === "dense"
       ? processing.segmentationDensity
       : "balanced";
+  const segmentationLabels = textSetting(processing.segmentationLabels, "", 4096);
+  const useVlmVocabularyProposer =
+    typeof processing.useVlmVocabularyProposer === "boolean"
+      ? processing.useVlmVocabularyProposer
+      : DEFAULT_APP_SETTINGS.processing.useVlmVocabularyProposer;
   return {
     version: 1,
     locale: normalizeAppLocale(source.locale) ?? DEFAULT_APP_SETTINGS.locale,
@@ -197,6 +233,12 @@ export function sanitizeAppSettings(value: unknown): AppSettings {
         typeof appearance.reduceMotion === "boolean"
           ? appearance.reduceMotion
           : DEFAULT_APP_SETTINGS.appearance.reduceMotion,
+    },
+    service: {
+      showConsole:
+        typeof service.showConsole === "boolean"
+          ? service.showConsole
+          : DEFAULT_APP_SETTINGS.service.showConsole,
     },
     camera: {
       defaultZoom: numberSetting(
@@ -254,6 +296,8 @@ export function sanitizeAppSettings(value: unknown): AppSettings {
         1,
       ),
       segmentationDensity,
+      segmentationLabels,
+      useVlmVocabularyProposer,
     },
   };
 }

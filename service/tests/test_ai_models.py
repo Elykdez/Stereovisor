@@ -1,12 +1,24 @@
 import numpy as np
 
-from service.ai_models import _deduplicate_detections, normalize_segmentation_density
+from service.ai_models import (
+    _deduplicate_detections,
+    normalize_segmentation_density,
+    normalize_segmentation_labels,
+)
 
 
 def test_segmentation_density_falls_back_to_balanced() -> None:
     assert normalize_segmentation_density("unknown") == "balanced"
     assert normalize_segmentation_density(None) == "balanced"
     assert normalize_segmentation_density("dense") == "dense"
+
+
+def test_segmentation_labels_normalize_delimiters_case_and_duplicates() -> None:
+    assert normalize_segmentation_labels(" Person, keyboard.\nKEYBOARD, cup ") == (
+        "person",
+        "keyboard",
+        "cup",
+    )
 
 
 def test_detector_deduplication_removes_nested_boxes_and_respects_limit() -> None:

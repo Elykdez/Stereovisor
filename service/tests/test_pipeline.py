@@ -1,3 +1,6 @@
+import hashlib
+import urllib.error
+from io import BytesIO
 from pathlib import Path
 
 import numpy as np
@@ -70,6 +73,37 @@ def test_union_rejects_unconfirmed_layers(tmp_path: Path) -> None:
         pipeline.build_union_mask(project, tmp_path, [project.layers[0].id])
 
 
+def test_layer_mask_merge_round_trips_with_undo_and_redo(tmp_path: Path) -> None:
+    image = pipeline.create_sample_image()
+    image.save(tmp_path / "source.png")
+    project = pipeline.PreviewPipeline().analyze(image, tmp_path, "project-id")
+    selected = project.layers[:2]
+    expected = np.maximum.reduce([
+        np.asarray(Image.open(tmp_path / Path(layer.maskUrl).name).convert("L"), dtype=np.uint8)
+        for layer in selected
+    ])
+
+    merged = pipeline.merge_layer_masks(project, tmp_path, [layer.id for layer in selected])
+    assert len(merged.layers) == len(project.layers) - 1
+    assert merged.layers[0].id == selected[0].id
+    assert merged.layers[0].name == "Merged (2 objects)"
+    assert merged.layers[0].confirmed is False
+    assert np.array_equal(
+        np.asarray(Image.open(tmp_path / Path(merged.layers[0].maskUrl).name).convert("L")),
+        expected,
+    )
+    assert pipeline.layer_merge_history(merged, tmp_path)[0].canUndo
+
+    undone = pipeline.restore_layer_merge_history(merged, tmp_path, "undo")
+    assert len(undone.layers) == len(project.layers)
+    assert all((tmp_path / Path(layer.maskUrl).name).is_file() for layer in undone.layers)
+    assert pipeline.layer_merge_history(undone, tmp_path)[0].canRedo
+
+    redone = pipeline.restore_layer_merge_history(undone, tmp_path, "redo")
+    assert len(redone.layers) == len(merged.layers)
+    assert redone.layers[0].name == "Merged (2 objects)"
+
+
 def test_inpaint_input_erases_every_masked_source_pixel() -> None:
     source = Image.new("RGB", (3, 1))
     source.putdata([(10, 20, 30), (40, 50, 60), (70, 80, 90)])
@@ -91,7 +125,7 @@ def test_production_analysis_keeps_rough_sam_masks_without_running_inspyrenet(mo
     monkeypatch.setattr(
         pipeline,
         "grounded_sam_instances",
-        lambda _image, _density="balanced": ([
+        lambda _image, _density="balanced", _labels=None: ([
             InstanceMask("person", 0.9, rejected),
             InstanceMask("person", 0.8, accepted),
         ], {"groundingDino": 100, "sam2": 200}),
@@ -116,12 +150,66 @@ def test_production_analysis_keeps_rough_sam_masks_without_running_inspyrenet(mo
     assert result.vramPeaksMb["depthAnything3"] == 300
 
 
+def test_production_analysis_forwards_segmentation_options(monkeypatch, tmp_path: Path) -> None:
+    seen: dict[str, object] = {}
+    mask = proposal(10, 10, 50, 50)
+
+    def fake_instances(_image, density="balanced", labels=None):
+        seen.update({"density": density, "labels": labels})
+        return [InstanceMask("person", 0.9, mask)], {"groundingDino": 100, "sam2": 200}
+
+    monkeypatch.setattr(pipeline, "grounded_sam_instances", fake_instances)
+    monkeypatch.setattr(pipeline, "propose_object_vocabulary", pytest.fail)
+    monkeypatch.setattr(pipeline, "estimate_near_map", lambda _image: (np.full((100, 100), 0.6), 300))
+    monkeypatch.setattr(pipeline, "foreground_depth_plane", lambda _depth, _masks: None)
+
+    pipeline.ProductionPipeline().analyze(
+        Image.new("RGB", (100, 100), "white"),
+        tmp_path,
+        "project-id",
+        segmentation_density="dense",
+        segmentation_labels="person, keyboard",
+        use_vlm_vocabulary=True,
+    )
+
+    assert seen == {"density": "dense", "labels": "person, keyboard"}
+
+
+def test_production_analysis_uses_vlm_vocabulary_before_detection(monkeypatch, tmp_path: Path) -> None:
+    seen: list[str] = []
+    mask = proposal(10, 10, 50, 50)
+
+    def fake_proposer(_image, density="balanced"):
+        seen.append(f"vlm:{density}")
+        return "person, keyboard", 321
+
+    def fake_instances(_image, density="balanced", labels=None):
+        seen.append(f"detector:{density}:{labels}")
+        return [InstanceMask("person", 0.9, mask)], {"groundingDino": 100, "sam2": 200}
+
+    monkeypatch.setattr(pipeline, "propose_object_vocabulary", fake_proposer)
+    monkeypatch.setattr(pipeline, "grounded_sam_instances", fake_instances)
+    monkeypatch.setattr(pipeline, "estimate_near_map", lambda _image: (np.full((100, 100), 0.6), 300))
+    monkeypatch.setattr(pipeline, "foreground_depth_plane", lambda _depth, _masks: None)
+
+    result = pipeline.ProductionPipeline().analyze(
+        Image.new("RGB", (100, 100), "white"),
+        tmp_path,
+        "project-id",
+        segmentation_density="dense",
+        use_vlm_vocabulary=True,
+    )
+
+    assert seen == ["vlm:dense", "detector:dense:person, keyboard"]
+    assert result.vramPeaksMb["qwen3VlVocabulary"] == 321
+
+
 def test_production_refine_keeps_runtime_matting_failures_explicit(monkeypatch, tmp_path: Path) -> None:
     mask = proposal(10, 10, 50, 50)
     monkeypatch.setattr(
         pipeline,
         "grounded_sam_instances",
-        lambda _image, _density="balanced": ([InstanceMask("person", 0.9, mask)], {}),
+        lambda _image, _density="balanced", _labels=None: ([InstanceMask("person", 0.9, mask)], {}),
     )
     monkeypatch.setattr(pipeline, "estimate_near_map", lambda _image: (np.full((100, 100), 0.6), 300))
     monkeypatch.setattr(pipeline, "foreground_depth_plane", lambda _depth, _masks: None)
@@ -145,7 +233,7 @@ def test_production_refine_updates_only_the_requested_layer(monkeypatch, tmp_pat
     monkeypatch.setattr(
         pipeline,
         "grounded_sam_instances",
-        lambda _image, _density="balanced": ([InstanceMask("person", 0.9, first), InstanceMask("person", 0.8, second)], {}),
+        lambda _image, _density="balanced", _labels=None: ([InstanceMask("person", 0.9, first), InstanceMask("person", 0.8, second)], {}),
     )
     monkeypatch.setattr(pipeline, "estimate_near_map", lambda _image: (np.full((100, 100), 0.6), 300))
     monkeypatch.setattr(pipeline, "foreground_depth_plane", lambda _depth, _masks: None)
@@ -171,7 +259,7 @@ def test_production_refine_supports_depth_plane_layers(monkeypatch, tmp_path: Pa
     monkeypatch.setattr(
         pipeline,
         "grounded_sam_instances",
-        lambda _image, _density="balanced": ([InstanceMask("person", 0.9, person)], {}),
+        lambda _image, _density="balanced", _labels=None: ([InstanceMask("person", 0.9, person)], {}),
     )
     monkeypatch.setattr(pipeline, "estimate_near_map", lambda _image: (np.full((100, 100), 0.6), 300))
     monkeypatch.setattr(pipeline, "foreground_depth_plane", lambda _depth, _masks: depth_plane)
@@ -197,7 +285,7 @@ def test_refine_uses_stable_edited_proposal_after_previous_refinement(monkeypatc
     monkeypatch.setattr(
         pipeline,
         "grounded_sam_instances",
-        lambda _image, _density="balanced": ([InstanceMask("person", 0.9, rough)], {}),
+        lambda _image, _density="balanced", _labels=None: ([InstanceMask("person", 0.9, rough)], {}),
     )
     monkeypatch.setattr(pipeline, "estimate_near_map", lambda _image: (np.full((100, 100), 0.6), 300))
     monkeypatch.setattr(pipeline, "foreground_depth_plane", lambda _depth, _masks: None)
@@ -220,7 +308,7 @@ def test_refine_backfills_a_missing_proposal_for_legacy_projects(monkeypatch, tm
     monkeypatch.setattr(
         pipeline,
         "grounded_sam_instances",
-        lambda _image, _density="balanced": ([InstanceMask("person", 0.9, rough)], {}),
+        lambda _image, _density="balanced", _labels=None: ([InstanceMask("person", 0.9, rough)], {}),
     )
     monkeypatch.setattr(pipeline, "estimate_near_map", lambda _image: (np.full((100, 100), 0.6), 300))
     monkeypatch.setattr(pipeline, "foreground_depth_plane", lambda _depth, _masks: None)
@@ -494,3 +582,110 @@ def test_target_inpaint_writes_only_to_the_selected_scene_layer(monkeypatch, tmp
         ".layer-inpaint-mask.png",
         ".layer-inpaint-result.png",
     ))
+
+
+def test_guided_refine_pulls_a_rough_brush_onto_real_edges(tmp_path: Path) -> None:
+    # Guards the band width: when the region GrabCut may decide is a fixed few
+    # pixels, refinement is a visual no-op no matter how rough the brush is.
+    cv2 = pytest.importorskip("cv2", reason="OpenCV ships with the local AI runtime")
+    image = pipeline.create_sample_image()
+    image.save(tmp_path / "source.png")
+    project = pipeline.PreviewPipeline().analyze(image, tmp_path, "project-id")
+    # Refinement can only find edges that exist, so the target is a real object.
+    layer = next(candidate for candidate in project.layers if candidate.kind == "instance")
+    truth = np.asarray(Image.open(tmp_path / Path(layer.maskUrl).name).convert("L"), dtype=np.uint8)
+    reference = truth > 8
+
+    slop = 24
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (slop * 2 + 1, slop * 2 + 1))
+    rough = cv2.dilate((reference * 255).astype(np.uint8), kernel, iterations=1) > 8
+
+    def overlap(mask: np.ndarray) -> float:
+        union = np.count_nonzero(mask | reference)
+        return float(np.count_nonzero(mask & reference)) / union if union else 0.0
+
+    refined = pipeline._guided_mask_refine(image, (rough * 255).astype(np.uint8)) > 8
+
+    assert overlap(refined) > overlap(rough) + 0.05
+    # The brush stays the outer bound: refinement tightens, it never spreads.
+    assert not np.any(refined & ~rough)
+
+
+def test_guided_refine_keeps_a_thin_mask_that_erodes_away() -> None:
+    pytest.importorskip("cv2", reason="OpenCV ships with the local AI runtime")
+    image = pipeline.create_sample_image()
+    # A wiry selection disappears under a wide erosion; the band has to narrow
+    # until a definite-foreground core survives instead of giving up.
+    thin = np.zeros((image.height, image.width), dtype=np.uint8)
+    thin[200:203, 100:600] = 255
+
+    refined = pipeline._guided_mask_refine(image, thin)
+
+    assert np.count_nonzero(refined > 8)
+
+
+class _StubResponse:
+    """Minimal stand-in for the urlopen context manager used by the downloader."""
+
+    def __init__(self, payload: bytes) -> None:
+        self._body = BytesIO(payload)
+        self.status = 200
+        self.headers = {"Content-Length": str(len(payload))}
+
+    def read(self, size: int = -1) -> bytes:
+        return self._body.read(size)
+
+    def __enter__(self) -> "_StubResponse":
+        return self
+
+    def __exit__(self, *_: object) -> bool:
+        return False
+
+
+def test_download_with_resume_discards_a_partial_that_fails_its_checksum(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "model.pt"
+    monkeypatch.setattr(
+        pipeline.urllib.request, "urlopen", lambda request, timeout=0: _StubResponse(b"corrupted")
+    )
+
+    with pytest.raises(pipeline.PipelineError):
+        pipeline._download_with_resume(
+            "https://example.invalid/model.pt", target, hashlib.md5(b"expected").hexdigest()
+        )
+
+    # A surviving full-length .part would make every later attempt request a
+    # range past the end of the file, which the server rejects forever.
+    assert not (tmp_path / "model.pt.part").exists()
+    assert not target.exists()
+
+
+def test_download_with_resume_restarts_when_a_stale_partial_is_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "model.pt"
+    stale = b"stale-bytes-from-an-older-release"
+    (tmp_path / "model.pt.part").write_bytes(stale)
+    payload = b"the-current-model-bytes"
+    ranges: list[str | None] = []
+
+    def fake_urlopen(request: object, timeout: int = 0) -> _StubResponse:
+        requested = request.headers.get("Range")
+        ranges.append(requested)
+        if requested:
+            raise urllib.error.HTTPError(
+                "https://example.invalid/model.pt", 416, "Range Not Satisfiable", {}, None
+            )
+        return _StubResponse(payload)
+
+    monkeypatch.setattr(pipeline.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(pipeline.time, "sleep", lambda _seconds: None)
+
+    pipeline._download_with_resume(
+        "https://example.invalid/model.pt", target, hashlib.md5(payload).hexdigest()
+    )
+
+    assert ranges == [f"bytes={len(stale)}-", None]
+    assert target.read_bytes() == payload
+    assert not (tmp_path / "model.pt.part").exists()

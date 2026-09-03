@@ -3,6 +3,8 @@ export type Engine = "ai" | "preview";
 export interface ProviderStatus {
   available: boolean;
   detail: string;
+  state?: "waiting" | "starting" | "downloading" | "initializing" | "ready" | "blocked";
+  progress?: number | null;
 }
 
 export interface HealthStatus {
@@ -14,6 +16,10 @@ export interface HealthStatus {
   localOnly: true;
   providers: Record<string, ProviderStatus>; // Feature gates use readiness details without instantiating models.
   message: string;
+  startupState: "starting" | "downloading" | "initializing" | "ready" | "blocked";
+  startupDetail: string | null;
+  startupProvider: string | null;
+  startupProgress: number | null;
 }
 
 export interface SceneLayer {
@@ -27,10 +33,14 @@ export interface SceneLayer {
   maskRevision: number;
   depth: number;
   order: number;
+  // Anchor nudge applied on top of the parallax transform, as a fraction of the
+  // composition size, so it survives a canvas resize.
+  offsetX: number;
+  offsetY: number;
   selected: boolean;
   visible: boolean;
   bounds: [number, number, number, number];
-  kind: "instance" | "depth-plane";
+  kind: "instance" | "depth-plane" | "manual";
   confidence: number;
 }
 

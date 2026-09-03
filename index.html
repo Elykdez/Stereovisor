@@ -6,9 +6,17 @@
     <meta name="theme-color" content="#10110f" />
     <link rel="icon" type="image/png" href="./app-icon.png" />
     <title>Stereovisor</title>
+    <style>
+      html, body, #root { background: #10110f; color: #eeeadd; }
+      #boot-splash { position: fixed; inset: 0; display: grid; place-items: center; background: #10110f; color: #eeeadd; font: 11px Consolas, monospace; letter-spacing: .08em; text-transform: uppercase; }
+      #boot-splash > div { display: grid; justify-items: center; gap: 14px; }
+      #boot-splash i { width: 24px; height: 24px; border: 2px solid #3e4036; border-top-color: #c7f15a; border-radius: 50%; animation: boot-spin .8s linear infinite; }
+      @keyframes boot-spin { to { transform: rotate(360deg); } }
+    </style>
   </head>
   <body>
     <div id="root"></div>
+    <div id="boot-splash" aria-live="polite"><div><i aria-hidden="true"></i><span>Starting Stereovisor</span></div></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

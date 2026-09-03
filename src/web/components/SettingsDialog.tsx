@@ -1,6 +1,6 @@
 import { useState, type CSSProperties } from "react";
-import { useAppTranslation, type AppTranslate } from "../i18n";
-import { sanitizeAppSettings, type AppSettings } from "../settings";
+import { LOCALE_LABEL_KEYS, useAppTranslation, type AppTranslate } from "../i18n";
+import { sanitizeAppSettings, SUPPORTED_LOCALES, type AppSettings } from "../settings";
 
 type SettingsSection = "general" | "inference" | "appearance" | "camera" | "advanced";
 
@@ -145,10 +145,9 @@ export function SettingsDialog({ settings, onSave, onCancel }: SettingsDialogPro
                     const next = event.target.value as AppSettings["locale"];
                     updateDraft((current) => ({ ...current, locale: next }));
                   }}>
-                    <option value="en">{t("language.en")}</option>
-                    <option value="zh-CN">{t("language.zhCN")}</option>
-                    <option value="ja">{t("language.ja")}</option>
-                    <option value="ko">{t("language.ko")}</option>
+                    {SUPPORTED_LOCALES.map((locale) => (
+                      <option key={locale} value={locale}>{t(LOCALE_LABEL_KEYS[locale])}</option>
+                    ))}
                   </select>
                   <small>{t("settings.languageHelp")}</small>
                 </label>
@@ -177,6 +176,35 @@ export function SettingsDialog({ settings, onSave, onCancel }: SettingsDialogPro
                     <option value="dense">{t("settings.segmentationDense")}</option>
                   </select>
                   <small>{t("settings.segmentationDensityHelp")}</small>
+                </label>
+                <label className="settings-field settings-textarea">
+                  <span>{t("settings.segmentationLabels")} <SettingKey>processing.segmentationLabels</SettingKey></span>
+                  <textarea
+                    value={draft.processing.segmentationLabels}
+                    aria-label={t("settings.segmentationLabels")}
+                    placeholder={t("settings.segmentationLabelsPlaceholder")}
+                    rows={4}
+                    onChange={(event) => updateDraft((current) => ({
+                      ...current,
+                      processing: { ...current.processing, segmentationLabels: event.target.value }
+                    }))}
+                  />
+                  <small>{t("settings.segmentationLabelsHelp")}</small>
+                </label>
+                <label className="settings-toggle">
+                  <span>
+                    <strong>{t("settings.vlmVocabularyProposer")}</strong>
+                    <small>{t("settings.vlmVocabularyProposerHelp")} <SettingKey>processing.useVlmVocabularyProposer</SettingKey></small>
+                  </span>
+                  <input
+                    type="checkbox"
+                    checked={draft.processing.useVlmVocabularyProposer}
+                    aria-label={t("settings.vlmVocabularyProposer")}
+                    onChange={(event) => updateDraft((current) => ({
+                      ...current,
+                      processing: { ...current.processing, useVlmVocabularyProposer: event.target.checked }
+                    }))}
+                  />
                 </label>
                 <label className="settings-field">
                   <span>{t("settings.defaultRefinement")} <SettingKey>processing.defaultRefinement</SettingKey></span>
@@ -284,6 +312,21 @@ export function SettingsDialog({ settings, onSave, onCancel }: SettingsDialogPro
                 <span className="eyebrow">{t("settings.advanced")}</span>
                 <h3>{t("settings.advancedTitle")}</h3>
                 <p className="settings-description">{t("settings.advancedDescription")}</p>
+                <label className="settings-toggle">
+                  <span>
+                    <strong>{t("settings.showServiceConsole")}</strong>
+                    <small>{t("settings.showServiceConsoleHelp")} <SettingKey>service.showConsole</SettingKey></small>
+                  </span>
+                  <input
+                    type="checkbox"
+                    checked={draft.service.showConsole}
+                    aria-label={t("settings.showServiceConsole")}
+                    onChange={(event) => updateDraft((current) => ({
+                      ...current,
+                      service: { ...current.service, showConsole: event.target.checked }
+                    }))}
+                  />
+                </label>
                 <NumericSetting
                   label={t("settings.pollInterval")}
                   settingKey="processing.pollIntervalMs"

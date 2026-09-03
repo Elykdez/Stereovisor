@@ -50,12 +50,15 @@ describe("SceneCanvas camera interaction", () => {
         camera={{ x: 0, y: 0, zoom: 1, strength: 68 }}
         interactive
         reviewingSource
+        processing={false}
         showInpaintMask={false}
         maskEditor={null}
         showCompositionWhileMaskEditing={false}
         brushMode="add"
         brushSize={48}
         maskBlurRadius={0}
+        anchorLayerId={null}
+        onLayerAnchorChange={vi.fn()}
         onMaskDirtyChange={vi.fn()}
         onMaskHistoryChange={vi.fn()}
         onMaskReadyChange={vi.fn()}
@@ -79,12 +82,15 @@ describe("SceneCanvas camera interaction", () => {
         camera={{ x: 0, y: 0, zoom: 1, strength: 68 }}
         interactive
         reviewingSource={false}
+        processing={false}
         showInpaintMask={false}
         maskEditor={null}
         showCompositionWhileMaskEditing={false}
         brushMode="add"
         brushSize={48}
         maskBlurRadius={0}
+        anchorLayerId={null}
+        onLayerAnchorChange={vi.fn()}
         onMaskDirtyChange={vi.fn()}
         onMaskHistoryChange={vi.fn()}
         onMaskReadyChange={vi.fn()}
@@ -108,12 +114,15 @@ describe("SceneCanvas camera interaction", () => {
         camera={{ x: 0, y: 0, zoom: 1, strength: 68 }}
         interactive={false}
         reviewingSource={false}
+        processing={false}
         showInpaintMask={false}
         maskEditor={null}
         showCompositionWhileMaskEditing={false}
         brushMode="add"
         brushSize={48}
         maskBlurRadius={0}
+        anchorLayerId={null}
+        onLayerAnchorChange={vi.fn()}
         onMaskDirtyChange={vi.fn()}
         onMaskHistoryChange={vi.fn()}
         onMaskReadyChange={vi.fn()}
@@ -162,6 +171,8 @@ describe("SceneCanvas camera interaction", () => {
         maskRevision: 0,
         depth: 0.8,
         order: 0,
+        offsetX: 0,
+        offsetY: 0,
         selected: true,
         visible: true,
         bounds: [0, 0, 100, 100],
@@ -226,6 +237,8 @@ describe("SceneCanvas camera interaction", () => {
       maskRevision: 0,
       depth: 0.8,
       order: 0,
+      offsetX: 0,
+      offsetY: 0,
       selected: true,
       visible: true,
       bounds: [0, 0, 100, 100] as [number, number, number, number],

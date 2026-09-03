@@ -4,8 +4,9 @@ import path from "node:path";
 
 export interface PersistedSettings {
   version: 1;
-  locale: "en" | "zh-CN" | "ja" | "ko";
+  locale: "en" | "ja" | "ko" | "zh-CN";
   appearance: { reduceMotion: boolean };
+  service: { showConsole: boolean };
   camera: { defaultZoom: number; defaultStrength: number };
   motion: { speed: number; horizontalAmount: number; verticalAmount: number };
   processing: {
@@ -13,6 +14,8 @@ export interface PersistedSettings {
     defaultRefinement: "lama" | "powerpaint";
     inpaintingSteps: number;
     segmentationDensity: "sparse" | "balanced" | "dense";
+    segmentationLabels: string;
+    useVlmVocabularyProposer: boolean;
   };
 }
 
@@ -20,6 +23,7 @@ export const DEFAULT_SETTINGS: PersistedSettings = {
   version: 1,
   locale: "en",
   appearance: { reduceMotion: false },
+  service: { showConsole: false },
   camera: { defaultZoom: 1, defaultStrength: 68 },
   motion: { speed: 1, horizontalAmount: 0.74, verticalAmount: 0.28 },
   processing: {
@@ -27,6 +31,8 @@ export const DEFAULT_SETTINGS: PersistedSettings = {
     defaultRefinement: "lama",
     inpaintingSteps: 25,
     segmentationDensity: "balanced",
+    segmentationLabels: "",
+    useVlmVocabularyProposer: false,
   },
 };
 
@@ -42,6 +48,10 @@ function clamp(
   const rounded =
     Math.round(Math.min(max, Math.max(min, parsed)) / step) * step;
   return Number(rounded.toFixed(4));
+}
+
+function textSetting(value: unknown, fallback: string, maxLength: number): string {
+  return typeof value === "string" ? value.trim().slice(0, maxLength) : fallback;
 }
 
 function object(value: unknown): Record<string, unknown> {
@@ -69,6 +79,7 @@ function normalizeLocale(value: unknown): PersistedSettings["locale"] {
 export function normalizeSettings(value: unknown): PersistedSettings {
   const source = object(value);
   const appearance = object(source.appearance);
+  const service = object(source.service);
   const camera = object(source.camera);
   const motion = object(source.motion);
   const processing = object(source.processing);
@@ -80,6 +91,12 @@ export function normalizeSettings(value: unknown): PersistedSettings {
         typeof appearance.reduceMotion === "boolean"
           ? appearance.reduceMotion
           : DEFAULT_SETTINGS.appearance.reduceMotion,
+    },
+    service: {
+      showConsole:
+        typeof service.showConsole === "boolean"
+          ? service.showConsole
+          : DEFAULT_SETTINGS.service.showConsole,
     },
     camera: {
       defaultZoom: clamp(camera.defaultZoom, 1, 1, 1.35, 0.01),
@@ -106,6 +123,11 @@ export function normalizeSettings(value: unknown): PersistedSettings {
         processing.segmentationDensity === "dense"
           ? processing.segmentationDensity
           : "balanced",
+      segmentationLabels: textSetting(processing.segmentationLabels, "", 4096),
+      useVlmVocabularyProposer:
+        typeof processing.useVlmVocabularyProposer === "boolean"
+          ? processing.useVlmVocabularyProposer
+          : DEFAULT_SETTINGS.processing.useVlmVocabularyProposer,
     },
   };
 }

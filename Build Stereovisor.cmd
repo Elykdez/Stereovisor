@@ -23,18 +23,19 @@ if not exist "node_modules\.package-lock.json" (
     )
 )
 
-echo Building Stereovisor...
+echo Building and packaging Stereovisor...
 echo.
-call npm run build
+call npm run package
 set "STEREOVISOR_BUILD_EXIT=%ERRORLEVEL%"
 
 echo.
 if not "%STEREOVISOR_BUILD_EXIT%"=="0" (
     echo Build failed with exit code %STEREOVISOR_BUILD_EXIT%.
 ) else (
-    echo Build complete.
+    echo Package complete.
     echo Renderer: %~dp0dist
     echo Electron: %~dp0dist-electron
+    echo Installer and portable executable: %~dp0release
 )
 
 if not defined STEREOVISOR_NO_PAUSE pause

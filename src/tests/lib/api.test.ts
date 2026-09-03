@@ -2,6 +2,7 @@ import {
   cancelProcessingJob,
   confirmProjectLayer,
   inpaintProjectTarget,
+  importProjectPackage,
   JOB_POLL_INTERVAL_MS,
   ProcessingCancelledError,
   refineProjectLayer,
@@ -140,5 +141,25 @@ describe("mask updates", () => {
     expect(form.get("prompt")).toBe("rebuild detail");
     expect(form.get("steps")).toBe("12");
     expect(fetchMock.mock.calls[1][0]).toBe("/api/jobs/inpaint-job");
+  });
+});
+
+describe("startup request resilience", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("retries a project import while the local service is restarting", async () => {
+    vi.useFakeTimers();
+    const imported = { project, camera: { x: 0, y: 0, zoom: 1, strength: 68 } };
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ detail: { message: "Local AI is starting" } }), { status: 503 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(imported), { status: 200, headers: { "Content-Type": "application/json" } }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const resultPromise = importProjectPackage(new File(["package"], "scene.stereovisor"));
+    await vi.advanceTimersByTimeAsync(350);
+
+    await expect(resultPromise).resolves.toEqual(imported);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    vi.useRealTimers();
   });
 });

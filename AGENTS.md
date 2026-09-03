@@ -39,7 +39,8 @@ Define a concrete success check for each behavior change, then run the narrowest
 3. Run `npm run typecheck` and `npm run i18n:check` when TypeScript, settings, or translations are involved.
 4. Run `npm run test:service` for service, pipeline, model, or API changes.
 5. Run `npm run build` before handing off a user-visible application change.
-6. Report exactly which checks passed, which were not run, and any remaining risk.
+6. Run `npm run package` for Electron packaging changes and smoke-test the generated `release/win-unpacked/Stereovisor.exe` before handing off an executable.
+7. Report exactly which checks passed, which were not run, and any remaining risk.
 
 ## Communication
 

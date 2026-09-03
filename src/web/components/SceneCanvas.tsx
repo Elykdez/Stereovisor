@@ -10,8 +10,8 @@ import {
 import { resolveAssetUrl } from "../lib/api";
 import { appLog } from "../lib/logger";
 import { useAppTranslation } from "../i18n";
-import { backgroundTransform, clamp, demoCameraAt, fitCanvasDimensions, fitVideoDimensions, layerTransform, visibleLayers } from "../lib/parallax";
-import type { CameraState, SceneProject } from "../types";
+import { backgroundTransform, clamp, demoCameraAt, fitCanvasDimensions, fitVideoDimensions, layerTransform, visibleLayers, type LayerTransform } from "../lib/parallax";
+import type { CameraState, SceneLayer, SceneProject } from "../types";
 
 export interface SceneCanvasHandle {
   exportPng: () => Promise<void>;
@@ -28,12 +28,19 @@ interface Props {
   camera: CameraState;
   interactive: boolean;
   reviewingSource: boolean;
+  // Purely cosmetic: softens the stage while a build is running. It is a CSS
+  // filter, so exports (which redraw offscreen) are untouched.
+  processing: boolean;
   showInpaintMask: boolean;
   maskEditor: MaskEditorTarget | null;
   showCompositionWhileMaskEditing: boolean;
   brushMode: MaskBrushMode;
   brushSize: number;
   maskBlurRadius: number;
+  // When set, a canvas drag repositions that layer's anchor instead of moving
+  // the camera.
+  anchorLayerId: string | null;
+  onLayerAnchorChange: (layerId: string, offsetX: number, offsetY: number) => void;
   onMaskDirtyChange: (dirty: boolean) => void;
   onMaskHistoryChange: (state: MaskHistoryState) => void;
   onMaskReadyChange: (ready: boolean) => void;
@@ -77,7 +84,8 @@ export function drawScene(
   images: Map<string, HTMLImageElement>,
   showInpaintMask = false,
   maskEditing = false,
-  showCompositionWhileMaskEditing = false
+  showCompositionWhileMaskEditing = false,
+  anchorLayerId: string | null = null
 ): boolean {
   // Rendering is deliberately a pure projection of the current project and
   // camera state. Asset loading happens in the effect below, so a missing image
@@ -136,14 +144,41 @@ export function drawScene(
   for (const layer of layers) {
     const image = images.get(layer.cutoutUrl);
     if (!image) continue;
-    const transform = layerTransform(camera, layer.depth, canvas.width, canvas.height);
+    const transform = layerTransform(camera, layer.depth, canvas.width, canvas.height, layer);
     context.save();
     context.translate(canvas.width / 2 + transform.x, canvas.height / 2 + transform.y);
     context.scale(transform.scale, transform.scale);
     context.drawImage(image, -canvas.width / 2, -canvas.height / 2, canvas.width, canvas.height);
     context.restore();
+    if (layer.id === anchorLayerId) drawAnchorOutline(context, canvas, layer, transform);
   }
   return true;
+}
+
+function drawAnchorOutline(
+  context: CanvasRenderingContext2D,
+  canvas: HTMLCanvasElement,
+  layer: SceneLayer,
+  transform: LayerTransform
+): void {
+  // The bounds are in composition space and never move with the anchor, so the
+  // marker rides the same transform the cutout was just drawn with.
+  const [left, top, right, bottom] = layer.bounds;
+  const edge = Math.max(2, Math.round(Math.max(canvas.width, canvas.height) / 400));
+  context.save();
+  context.translate(canvas.width / 2 + transform.x, canvas.height / 2 + transform.y);
+  context.scale(transform.scale, transform.scale);
+  context.translate(-canvas.width / 2, -canvas.height / 2);
+  context.lineWidth = edge;
+  context.setLineDash([edge * 4, edge * 3]);
+  context.strokeStyle = "#c7f15a";
+  context.strokeRect(left, top, right - left, bottom - top);
+  context.setLineDash([]);
+  context.fillStyle = "#c7f15a";
+  context.beginPath();
+  context.arc((left + right) / 2, (top + bottom) / 2, edge * 3, 0, Math.PI * 2);
+  context.fill();
+  context.restore();
 }
 
 const DEMO_VIDEO_TYPES = [
@@ -211,12 +246,15 @@ export const SceneCanvas = forwardRef<SceneCanvasHandle, Props>(function SceneCa
     camera,
     interactive,
     reviewingSource,
+    processing,
     showInpaintMask,
     maskEditor,
     showCompositionWhileMaskEditing,
     brushMode,
     brushSize,
     maskBlurRadius,
+    anchorLayerId,
+    onLayerAnchorChange,
     onMaskDirtyChange,
     onMaskHistoryChange,
     onMaskReadyChange,
@@ -231,7 +269,9 @@ export const SceneCanvas = forwardRef<SceneCanvasHandle, Props>(function SceneCa
   const maskEditorRef = useRef<MaskEditorHandle>(null);
   const imagesRef = useRef<Map<string, HTMLImageElement>>(new Map());
   const imageRevisionsRef = useRef<Map<string, string>>(new Map());
-  const dragRef = useRef<{ x: number; y: number; camera: CameraState } | null>(null);
+  const dragRef = useRef<{ x: number; y: number; camera: CameraState; anchor: { offsetX: number; offsetY: number } | null } | null>(null);
+  const anchorLayer = anchorLayerId ? project.layers.find((layer) => layer.id === anchorLayerId) ?? null : null;
+  const anchoring = anchorLayer !== null;
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [displaySize, setDisplaySize] = useState<[number, number]>([0, 0]);
@@ -261,9 +301,10 @@ export const SceneCanvas = forwardRef<SceneCanvasHandle, Props>(function SceneCa
       imagesRef.current,
       showInpaintMask,
       Boolean(maskEditor),
-      showCompositionWhileMaskEditing
+      showCompositionWhileMaskEditing,
+      anchorLayerId
     );
-  }, [camera, maskEditor, project, showCompositionWhileMaskEditing, showInpaintMask]);
+  }, [anchorLayerId, camera, maskEditor, project, showCompositionWhileMaskEditing, showInpaintMask]);
 
   useEffect(() => {
     // Cache by source plus mask revision. Edited masks keep the same URL, so
@@ -380,7 +421,12 @@ export const SceneCanvas = forwardRef<SceneCanvasHandle, Props>(function SceneCa
   function pointerDown(event: React.PointerEvent<HTMLCanvasElement>): void {
     if (!interactive) return;
     event.currentTarget.setPointerCapture(event.pointerId);
-    dragRef.current = { x: event.clientX, y: event.clientY, camera: { ...camera } };
+    dragRef.current = {
+      x: event.clientX,
+      y: event.clientY,
+      camera: { ...camera },
+      anchor: anchorLayer ? { offsetX: anchorLayer.offsetX, offsetY: anchorLayer.offsetY } : null
+    };
   }
 
   function pointerMove(event: React.PointerEvent<HTMLCanvasElement>): void {
@@ -388,6 +434,16 @@ export const SceneCanvas = forwardRef<SceneCanvasHandle, Props>(function SceneCa
     const drag = dragRef.current;
     if (!drag) return;
     const bounds = event.currentTarget.getBoundingClientRect();
+    if (drag.anchor && anchorLayer) {
+      // The canvas is drawn to fit the frame, so a pixel of pointer travel is
+      // the same fraction of the composition either way.
+      onLayerAnchorChange(
+        anchorLayer.id,
+        clamp(drag.anchor.offsetX + (event.clientX - drag.x) / bounds.width, -1, 1),
+        clamp(drag.anchor.offsetY + (event.clientY - drag.y) / bounds.height, -1, 1)
+      );
+      return;
+    }
     onCameraChange({
       ...camera,
       x: clamp(drag.camera.x + ((event.clientX - drag.x) / bounds.width) * 2, -1, 1),
@@ -408,7 +464,7 @@ export const SceneCanvas = forwardRef<SceneCanvasHandle, Props>(function SceneCa
         ref={canvasRef}
         width={project.width}
         height={project.height}
-        className={`scene-canvas ${interactive ? "interactive" : "static"}`}
+        className={`scene-canvas ${interactive ? "interactive" : "static"} ${anchoring ? "anchoring" : ""} ${processing ? "processing" : ""}`}
         style={{ width: `${displaySize[0]}px`, height: `${displaySize[1]}px` }}
         aria-label={
           maskEditor
@@ -422,9 +478,11 @@ export const SceneCanvas = forwardRef<SceneCanvasHandle, Props>(function SceneCa
             })
             : reviewingSource
               ? t("scene.originalPreviewLabel")
-              : interactive
-                ? t("scene.parallaxPreviewLabel")
-                : t("scene.processingPreviewLabel")
+              : anchorLayer
+                ? t("scene.anchorPreviewLabel", { name: layerName(anchorLayer.name) })
+                : interactive
+                  ? t("scene.parallaxPreviewLabel")
+                  : t("scene.processingPreviewLabel")
         }
         onPointerDown={pointerDown}
         onPointerMove={pointerMove}
@@ -455,9 +513,11 @@ export const SceneCanvas = forwardRef<SceneCanvasHandle, Props>(function SceneCa
             ? t(brushMode === "add" ? "scene.addTo" : "scene.eraseFrom", { name: layerName(maskEditor.name) })
             : reviewingSource
               ? t("scene.reviewHint")
-              : interactive
-                ? t("scene.dragHint")
-                : t("scene.building")}
+              : anchorLayer
+                ? t("scene.anchorHint", { name: layerName(anchorLayer.name) })
+                : interactive
+                  ? t("scene.dragHint")
+                  : t("scene.building")}
         </div>
       )}
     </div>

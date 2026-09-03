@@ -1,5 +1,6 @@
 import { fireEvent, render, waitFor } from "@testing-library/react";
 import { localeResources } from "@/web/i18n/generated";
+import { SUPPORTED_LOCALES } from "@/web/settings";
 import {
   LOCALE_STORAGE_KEY,
   detectLocale,
@@ -35,6 +36,10 @@ describe("localization", () => {
     expect(detectLocale("ko", ["ja-JP"])).toBe("ko");
     expect(detectLocale(null, ["fr-FR", "zh-CN"])).toBe("zh-CN");
     expect(detectLocale(null, ["fr-FR"])).toBe("en");
+  });
+
+  it("keeps the language list in the product order", () => {
+    expect(SUPPORTED_LOCALES).toEqual(["en", "ja", "ko", "zh-CN"]);
   });
 
   it("keeps every generated locale aligned to the English key set", () => {
