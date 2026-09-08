@@ -15,7 +15,9 @@ export type RequiredAiProvider = (typeof REQUIRED_AI_PROVIDERS)[number];
 
 const PREPARING_STATES = new Set(["starting", "downloading", "initializing"]);
 
-export function isProviderPrepared(provider: ProviderStatus | undefined): boolean {
+export function isProviderPrepared(
+  provider: ProviderStatus | undefined,
+): boolean {
   // The live probe is the authority. While the first-launch bootstrap runs,
   // the core-only service answering health cannot import the AI packages, so
   // it reports the stages that preparation has already finished instead.
@@ -37,7 +39,8 @@ export function startupProgressPercent(health: HealthStatus | null): number {
     if (isProviderPrepared(provider)) return progress + 1;
     // Only the stage being prepared right now may move the bar. A blocked or
     // waiting item must never make the gate look like it is advancing.
-    if (!provider || !PREPARING_STATES.has(provider.state ?? "")) return progress;
+    if (!provider || !PREPARING_STATES.has(provider.state ?? ""))
+      return progress;
     return progress + Math.min(100, Math.max(0, provider.progress ?? 0)) / 100;
   }, 0);
   return Math.round((completed / REQUIRED_AI_PROVIDERS.length) * 100);
@@ -48,7 +51,7 @@ export function isLocalAiReady(health: HealthStatus | null): boolean {
   // bootstrap's own report is enough to show progress, never enough to unlock.
   return Boolean(
     health &&
-      health.activeEngine === "ai" &&
-      REQUIRED_AI_PROVIDERS.every((key) => health.providers[key]?.available),
+    health.activeEngine === "ai" &&
+    REQUIRED_AI_PROVIDERS.every((key) => health.providers[key]?.available),
   );
 }

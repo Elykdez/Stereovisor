@@ -5,7 +5,7 @@ import path from "node:path";
 export interface PersistedSettings {
   version: 1;
   locale: "en" | "ja" | "ko" | "zh-CN";
-  appearance: { reduceMotion: boolean };
+  appearance: { reduceMotion: boolean; reduceEffects: boolean };
   service: { showConsole: boolean };
   camera: { defaultZoom: number; defaultStrength: number };
   motion: { speed: number; horizontalAmount: number; verticalAmount: number };
@@ -22,7 +22,7 @@ export interface PersistedSettings {
 export const DEFAULT_SETTINGS: PersistedSettings = {
   version: 1,
   locale: "en",
-  appearance: { reduceMotion: false },
+  appearance: { reduceMotion: false, reduceEffects: false },
   service: { showConsole: false },
   camera: { defaultZoom: 1, defaultStrength: 68 },
   motion: { speed: 1, horizontalAmount: 0.74, verticalAmount: 0.28 },
@@ -91,6 +91,10 @@ export function normalizeSettings(value: unknown): PersistedSettings {
         typeof appearance.reduceMotion === "boolean"
           ? appearance.reduceMotion
           : DEFAULT_SETTINGS.appearance.reduceMotion,
+      reduceEffects:
+        typeof appearance.reduceEffects === "boolean"
+          ? appearance.reduceEffects
+          : DEFAULT_SETTINGS.appearance.reduceEffects,
     },
     service: {
       showConsole:

@@ -10,6 +10,9 @@ export interface AppSettings {
   locale: AppLocale;
   appearance: {
     reduceMotion: boolean;
+    // Trades the GPU-side flourishes for cheap stand-ins: the progress mosaic
+    // becomes a plain blur and compositor blurs behind dialogs are dropped.
+    reduceEffects: boolean;
   };
   service: {
     showConsole: boolean;
@@ -36,7 +39,7 @@ export interface AppSettings {
 export const DEFAULT_APP_SETTINGS: AppSettings = {
   version: 1,
   locale: "en",
-  appearance: { reduceMotion: false },
+  appearance: { reduceMotion: false, reduceEffects: false },
   service: { showConsole: false },
   camera: { defaultZoom: 1, defaultStrength: 68 },
   motion: { speed: 1, horizontalAmount: 0.74, verticalAmount: 0.28 },
@@ -54,6 +57,12 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
 export const SETTINGS_REGISTRY = [
   {
     key: "appearance.reduceMotion",
+    category: "appearance",
+    type: "boolean",
+    defaultValue: false,
+  },
+  {
+    key: "appearance.reduceEffects",
     category: "appearance",
     type: "boolean",
     defaultValue: false,
@@ -176,8 +185,14 @@ function numberSetting(
   return Math.round(clamped / step) * step;
 }
 
-function textSetting(value: unknown, fallback: string, maxLength: number): string {
-  return typeof value === "string" ? value.trim().slice(0, maxLength) : fallback;
+function textSetting(
+  value: unknown,
+  fallback: string,
+  maxLength: number,
+): string {
+  return typeof value === "string"
+    ? value.trim().slice(0, maxLength)
+    : fallback;
 }
 
 export function isAppLocale(value: unknown): value is AppLocale {
@@ -220,7 +235,11 @@ export function sanitizeAppSettings(value: unknown): AppSettings {
     processing.segmentationDensity === "dense"
       ? processing.segmentationDensity
       : "balanced";
-  const segmentationLabels = textSetting(processing.segmentationLabels, "", 4096);
+  const segmentationLabels = textSetting(
+    processing.segmentationLabels,
+    "",
+    4096,
+  );
   const useVlmVocabularyProposer =
     typeof processing.useVlmVocabularyProposer === "boolean"
       ? processing.useVlmVocabularyProposer
@@ -233,6 +252,10 @@ export function sanitizeAppSettings(value: unknown): AppSettings {
         typeof appearance.reduceMotion === "boolean"
           ? appearance.reduceMotion
           : DEFAULT_APP_SETTINGS.appearance.reduceMotion,
+      reduceEffects:
+        typeof appearance.reduceEffects === "boolean"
+          ? appearance.reduceEffects
+          : DEFAULT_APP_SETTINGS.appearance.reduceEffects,
     },
     service: {
       showConsole:

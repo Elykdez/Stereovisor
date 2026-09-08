@@ -56,7 +56,6 @@ describe("SettingsDialog", () => {
     const { getByRole } = render(<SettingsDialog settings={DEFAULT_APP_SETTINGS} onSave={vi.fn()} onCancel={vi.fn()} />);
     const navigation = getByRole("navigation", { name: /Option sections/i });
     expect(within(navigation).getAllByRole("button").map((button) => button.querySelector("strong")?.textContent)).toEqual([
-      "General",
       "Appearance",
       "Camera",
       "Inference",
@@ -69,6 +68,22 @@ describe("SettingsDialog", () => {
 
     fireEvent.change(getByRole("spinbutton", { name: /Default strength/ }), { target: { value: "999" } });
     expect(getByRole("slider", { name: /Default strength slider/ })).toHaveValue("100");
+  });
+
+  it("opens on appearance, where language now lives beside the visual toggles", async () => {
+    await i18n.changeLanguage("en");
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    const { getByRole } = render(<SettingsDialog settings={DEFAULT_APP_SETTINGS} onSave={onSave} onCancel={vi.fn()} />);
+
+    // No navigation click: appearance is the page the dialog lands on.
+    fireEvent.change(getByRole("combobox", { name: /Language/ }), { target: { value: "ja" } });
+    fireEvent.click(getByRole("checkbox", { name: /Reduce motion/ }));
+    fireEvent.click(getByRole("checkbox", { name: /Reduce graphic effects/ }));
+    fireEvent.click(getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
+    expect(onSave.mock.calls[0][0].locale).toBe("ja");
+    expect(onSave.mock.calls[0][0].appearance).toEqual({ reduceMotion: true, reduceEffects: true });
   });
 
   it("persists the service console visibility setting", async () => {

@@ -14,7 +14,7 @@ export function refreshedAssetUrl(url: string): string {
 export function mergeProjectResult(
   current: SceneProject | null,
   result: SceneProject,
-  { refreshLayerId = null, refreshExtra = false }: MergeProjectOptions = {}
+  { refreshLayerId = null, refreshExtra = false }: MergeProjectOptions = {},
 ): SceneProject {
   if (!current) return result;
   // Server results carry authoritative generated assets while the renderer
@@ -32,15 +32,23 @@ export function mergeProjectResult(
         offsetY: local?.offsetY ?? layer.offsetY,
         selected: local?.selected ?? layer.selected,
         visible: local?.visible ?? layer.visible,
-        maskUrl: refreshLayerId === layer.id ? refreshedAssetUrl(layer.maskUrl) : local?.maskUrl ?? layer.maskUrl,
-        cutoutUrl: refreshLayerId === layer.id ? refreshedAssetUrl(layer.cutoutUrl) : local?.cutoutUrl ?? layer.cutoutUrl,
-        proposalMaskUrl: refreshLayerId === layer.id && layer.proposalMaskUrl
-          ? refreshedAssetUrl(layer.proposalMaskUrl)
-          : local?.proposalMaskUrl ?? layer.proposalMaskUrl
+        maskUrl:
+          refreshLayerId === layer.id
+            ? refreshedAssetUrl(layer.maskUrl)
+            : (local?.maskUrl ?? layer.maskUrl),
+        cutoutUrl:
+          refreshLayerId === layer.id
+            ? refreshedAssetUrl(layer.cutoutUrl)
+            : (local?.cutoutUrl ?? layer.cutoutUrl),
+        proposalMaskUrl:
+          refreshLayerId === layer.id && layer.proposalMaskUrl
+            ? refreshedAssetUrl(layer.proposalMaskUrl)
+            : (local?.proposalMaskUrl ?? layer.proposalMaskUrl),
       };
     }),
-    extraMaskUrl: refreshExtra && result.extraMaskUrl
-      ? refreshedAssetUrl(result.extraMaskUrl)
-      : current.extraMaskUrl
+    extraMaskUrl:
+      refreshExtra && result.extraMaskUrl
+        ? refreshedAssetUrl(result.extraMaskUrl)
+        : current.extraMaskUrl,
   };
 }

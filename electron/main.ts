@@ -165,7 +165,9 @@ function startPackagedModelPreparation(showConsole: boolean): void {
     {
       cwd: root,
       windowsHide: !showConsole,
-      stdio: "pipe",
+      // Same reasoning as the service above: the bootstrap shares this setting,
+      // and its first-run progress is the output most worth seeing in a console.
+      stdio: showConsole ? "inherit" : "pipe",
       env: environment,
     },
   );
@@ -234,7 +236,11 @@ function startService(showConsole: boolean): void {
     {
       cwd: root,
       windowsHide: !showConsole,
-      stdio: "pipe",
+      // A visible console is only useful if the child writes into it. Piped
+      // stdio forwards the output to this process instead, and a packaged GUI
+      // Electron has no console of its own, so the window Windows allocates for
+      // the child would stay empty. Inherit only on the opt-in path.
+      stdio: showConsole ? "inherit" : "pipe",
       env: environment,
     },
   );

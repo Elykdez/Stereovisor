@@ -1,5 +1,6 @@
 import { fireEvent, render } from "@testing-library/react";
 import { demoVideoExtension, drawScene, SceneCanvas, selectDemoVideoType } from "@/web/components/SceneCanvas";
+import type { MaskMosaicRenderer } from "@/web/lib/maskMosaic";
 import type { SceneProject } from "@/web/types";
 
 const project: SceneProject = {
@@ -204,6 +205,61 @@ describe("SceneCanvas camera interaction", () => {
     )).toBe(true);
     expect(drawImage).toHaveBeenCalledTimes(2);
     expect(drawImage.mock.calls[1][0]).toBe(foreground);
+  });
+
+  it("shatters only the area a running inpainting job is rebuilding", () => {
+    const drawImage = vi.fn();
+    const context = {
+      clearRect: vi.fn(),
+      drawImage,
+      restore: vi.fn(),
+      save: vi.fn(),
+      scale: vi.fn(),
+      translate: vi.fn(),
+      imageSmoothingEnabled: false,
+      imageSmoothingQuality: "low"
+    } as unknown as CanvasRenderingContext2D;
+    const canvas = {
+      width: 200,
+      height: 100,
+      getContext: vi.fn(() => context)
+    } as unknown as HTMLCanvasElement;
+    const background = {} as HTMLImageElement;
+    const cells = {} as HTMLCanvasElement;
+    const mask = {} as HTMLCanvasElement;
+    const renderer = {
+      configure: vi.fn(),
+      setMask: vi.fn(),
+      setPlate: vi.fn(),
+      paint: vi.fn(() => cells),
+      smoothOutput: true
+    } as unknown as MaskMosaicRenderer;
+    const images = new Map([["/source.png", background]]);
+    const camera = { x: 0, y: 0, zoom: 1, strength: 68 };
+
+    // No job running: the caller passes no mosaic and the scene is untouched.
+    expect(drawScene(canvas, project, camera, images)).toBe(true);
+    expect(drawImage.mock.calls.some((call) => call[0] === cells)).toBe(false);
+
+    // A job whose pending area is not known yet stays out of the way entirely.
+    drawImage.mockClear();
+    expect(drawScene(canvas, project, camera, images, false, false, false, null, { renderer, time: 2, mask: null, progress: 0 })).toBe(true);
+    expect(renderer.paint).not.toHaveBeenCalled();
+    expect(drawImage.mock.calls.some((call) => call[0] === cells)).toBe(false);
+
+    drawImage.mockClear();
+    expect(drawScene(canvas, project, camera, images, false, false, false, null, { renderer, time: 2, mask, progress: 0 })).toBe(true);
+    expect(renderer.paint).toHaveBeenCalledWith(2, expect.anything());
+    // The pending area is what the effect is bound to, so it marks that region.
+    expect(renderer.setMask).toHaveBeenCalledWith(mask);
+    expect(drawImage.mock.calls.at(-1)?.[0]).toBe(cells);
+
+    // Reported progress resolves the blocks: a fresh job is far coarser than one
+    // about to finish.
+    const queued = vi.mocked(renderer.configure).mock.calls.at(-1)?.[2];
+    drawScene(canvas, project, camera, images, false, false, false, null, { renderer, time: 2, mask, progress: 96 });
+    const nearlyDone = vi.mocked(renderer.configure).mock.calls.at(-1)?.[2];
+    expect(queued?.size).toBeLessThan(nearlyDone?.size ?? 0);
   });
 
   it("omits hidden layers from the built composition used as inpaint reference", () => {

@@ -1,4 +1,4 @@
-import { forwardRef, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useRef, useState } from "react";
+import { forwardRef, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   imageToAlphaMask,
   MaskEditorOverlay,
@@ -9,6 +9,7 @@ import {
 } from "./MaskEditorOverlay";
 import { resolveAssetUrl } from "../lib/api";
 import { appLog } from "../lib/logger";
+import { INPAINT_MOSAIC_STYLE, MaskMosaicRenderer, mosaicShapeForProgress } from "../lib/maskMosaic";
 import { useAppTranslation } from "../i18n";
 import { backgroundTransform, clamp, demoCameraAt, fitCanvasDimensions, fitVideoDimensions, layerTransform, visibleLayers, type LayerTransform } from "../lib/parallax";
 import type { CameraState, SceneLayer, SceneProject } from "../types";
@@ -28,15 +29,26 @@ interface Props {
   camera: CameraState;
   interactive: boolean;
   reviewingSource: boolean;
-  // Purely cosmetic: softens the stage while a build is running. It is a CSS
-  // filter, so exports (which redraw offscreen) are untouched.
+  // An inpainting job is running. Shatters the area being rebuilt into the
+  // progress mosaic. Exports redraw offscreen, so they are untouched.
   processing: boolean;
+  // Mask of a running full-redraw job. It was painted in the editor and lives
+  // nowhere else, so the caller hands it over for the mosaic to mark; a
+  // background rebuild leaves this out and the union of selected masks is used.
+  pendingInpaintMaskUrl?: string | null;
+  // How far the running job has reported, 0-100. Drives how coarse the mosaic
+  // blocks are: huge while it queues, resolving as the model works.
+  inpaintProgress?: number;
   showInpaintMask: boolean;
   maskEditor: MaskEditorTarget | null;
   showCompositionWhileMaskEditing: boolean;
   brushMode: MaskBrushMode;
   brushSize: number;
   maskBlurRadius: number;
+  reduceMotion?: boolean;
+  // Swaps the progress mosaic for a plain CSS blur. That drops the WebGL pass
+  // and the per-frame redraw it needs, which is the point on a slower GPU.
+  reduceEffects?: boolean;
   // When set, a canvas drag repositions that layer's anchor instead of moving
   // the camera.
   anchorLayerId: string | null;
@@ -47,6 +59,9 @@ interface Props {
   onMaskError: (message: string) => void;
   onCameraChange: (camera: CameraState) => void;
 }
+
+/** Progress points per second the mosaic resolves at, catching up to the job. */
+const MOSAIC_RESOLVE_RATE = 24;
 
 function loadImage(source: string): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
@@ -77,6 +92,54 @@ function downloadBlob(blob: Blob, name: string): void {
   }, 1000);
 }
 
+/**
+ * Union of everything an inpaint job is about to rebuild: every selected
+ * layer's mask plus the extra hole, flattened into one alpha mask. Returns null
+ * when nothing is marked, which is also what a runtime without a 2D canvas
+ * gives us.
+ */
+export function buildInpaintMaskCanvas(
+  project: SceneProject,
+  images: Map<string, HTMLImageElement>,
+  width: number,
+  height: number
+): HTMLCanvasElement | null {
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const context = canvas.getContext("2d", { alpha: true });
+  if (!context) return null;
+  let painted = false;
+  for (const layer of project.layers.filter((candidate) => candidate.selected)) {
+    const image = images.get(layer.maskUrl);
+    if (!image) continue;
+    context.drawImage(imageToAlphaMask(image, width, height), 0, 0);
+    painted = true;
+  }
+  if (project.extraMaskUrl) {
+    const extra = images.get(project.extraMaskUrl);
+    if (extra) {
+      context.drawImage(imageToAlphaMask(extra, width, height), 0, 0);
+      painted = true;
+    }
+  }
+  return painted ? canvas : null;
+}
+
+/**
+ * Progress mosaic, drawn over the finished frame while an inpainting job runs.
+ * The caller owns the renderer, the clock and the mask; leaving it out (exports,
+ * tests, every state that is not mid-inpaint) draws the scene untouched.
+ */
+export interface MaskMosaicFrame {
+  renderer: MaskMosaicRenderer;
+  time: number;
+  /** The area the job is rebuilding. Nothing is drawn until it is known. */
+  mask: CanvasImageSource | null;
+  /** How far along the job is, 0-100. Coarse blocks resolve as it climbs. */
+  progress: number;
+}
+
 export function drawScene(
   canvas: HTMLCanvasElement,
   project: SceneProject,
@@ -85,7 +148,8 @@ export function drawScene(
   showInpaintMask = false,
   maskEditing = false,
   showCompositionWhileMaskEditing = false,
-  anchorLayerId: string | null = null
+  anchorLayerId: string | null = null,
+  mosaic: MaskMosaicFrame | null = null
 ): boolean {
   // Rendering is deliberately a pure projection of the current project and
   // camera state. Asset loading happens in the effect below, so a missing image
@@ -111,19 +175,8 @@ export function drawScene(
 
   if (!project.backgroundUrl) {
     if (showInpaintMask) {
-      const maskCanvas = document.createElement("canvas");
-      maskCanvas.width = canvas.width;
-      maskCanvas.height = canvas.height;
-      const maskContext = maskCanvas.getContext("2d", { alpha: true });
-      if (maskContext) {
-        for (const layer of project.layers.filter((candidate) => candidate.selected)) {
-          const image = images.get(layer.maskUrl);
-          if (image) maskContext.drawImage(imageToAlphaMask(image, canvas.width, canvas.height), 0, 0);
-        }
-        if (project.extraMaskUrl) {
-          const extra = images.get(project.extraMaskUrl);
-          if (extra) maskContext.drawImage(imageToAlphaMask(extra, canvas.width, canvas.height), 0, 0);
-        }
+      const maskCanvas = buildInpaintMaskCanvas(project, images, canvas.width, canvas.height);
+      if (maskCanvas) {
         context.save();
         context.globalAlpha = 0.5;
         context.translate(canvas.width / 2 + bg.x * canvas.width, canvas.height / 2 + bg.y * canvas.height);
@@ -151,6 +204,25 @@ export function drawScene(
     context.drawImage(image, -canvas.width / 2, -canvas.height / 2, canvas.width, canvas.height);
     context.restore();
     if (layer.id === anchorLayerId) drawAnchorOutline(context, canvas, layer, transform);
+  }
+
+  if (mosaic?.mask) {
+    // Shatters the area the model is rebuilding, which is what the Unity shader
+    // does while it waits on a generation. It rides the plate's transform so the
+    // cells stay registered with the pixels they sample, and the cells resolve
+    // from huge blocks to fine ones as the job reports progress.
+    mosaic.renderer.configure(canvas.width, canvas.height, mosaicShapeForProgress(mosaic.progress));
+    mosaic.renderer.setMask(mosaic.mask);
+    mosaic.renderer.setPlate(background);
+    const cells = mosaic.renderer.paint(mosaic.time, INPAINT_MOSAIC_STYLE);
+    if (cells) {
+      context.save();
+      context.translate(canvas.width / 2 + bg.x * canvas.width, canvas.height / 2 + bg.y * canvas.height);
+      context.scale(bg.scale, bg.scale);
+      context.imageSmoothingEnabled = mosaic.renderer.smoothOutput;
+      context.drawImage(cells, -canvas.width / 2, -canvas.height / 2, canvas.width, canvas.height);
+      context.restore();
+    }
   }
   return true;
 }
@@ -247,12 +319,16 @@ export const SceneCanvas = forwardRef<SceneCanvasHandle, Props>(function SceneCa
     interactive,
     reviewingSource,
     processing,
+    pendingInpaintMaskUrl = null,
+    inpaintProgress = 0,
     showInpaintMask,
     maskEditor,
     showCompositionWhileMaskEditing,
     brushMode,
     brushSize,
     maskBlurRadius,
+    reduceMotion = false,
+    reduceEffects = false,
     anchorLayerId,
     onLayerAnchorChange,
     onMaskDirtyChange,
@@ -269,12 +345,21 @@ export const SceneCanvas = forwardRef<SceneCanvasHandle, Props>(function SceneCa
   const maskEditorRef = useRef<MaskEditorHandle>(null);
   const imagesRef = useRef<Map<string, HTMLImageElement>>(new Map());
   const imageRevisionsRef = useRef<Map<string, string>>(new Map());
+  const mosaicRef = useRef(new MaskMosaicRenderer());
+  const clockRef = useRef(0);
+  // Progress the mosaic has caught up to, and the latest figure it is heading
+  // for. Both are refs: the animation loop reads them without being rebuilt on
+  // every progress update.
+  const resolveRef = useRef(0);
+  const progressRef = useRef(inpaintProgress);
+  progressRef.current = inpaintProgress;
   const dragRef = useRef<{ x: number; y: number; camera: CameraState; anchor: { offsetX: number; offsetY: number } | null } | null>(null);
   const anchorLayer = anchorLayerId ? project.layers.find((layer) => layer.id === anchorLayerId) ?? null : null;
   const anchoring = anchorLayer !== null;
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [displaySize, setDisplaySize] = useState<[number, number]>([0, 0]);
+  const [pendingInpaintMask, setPendingInpaintMask] = useState<HTMLImageElement | null>(null);
 
   useLayoutEffect(() => {
     const frame = frameRef.current;
@@ -291,6 +376,40 @@ export const SceneCanvas = forwardRef<SceneCanvasHandle, Props>(function SceneCa
     return () => observer.disconnect();
   }, [project.height, project.width]);
 
+  useEffect(() => {
+    // A full-redraw mask is a blob the running job carries, not a project asset,
+    // so it is loaded here rather than through the cache below.
+    if (!pendingInpaintMaskUrl) {
+      setPendingInpaintMask(null);
+      return;
+    }
+    let cancelled = false;
+    loadImage(pendingInpaintMaskUrl)
+      .then((image) => {
+        if (!cancelled) setPendingInpaintMask(image);
+      })
+      .catch((error: unknown) => {
+        // The job owns the blob and may revoke it the moment it finishes, so a
+        // failure here costs the overlay and nothing else.
+        if (!cancelled) appLog.warn("scene.pending-mask.failed", { message: String(error) });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [pendingInpaintMaskUrl]);
+
+  const inpaintMask = useMemo(() => {
+    // The area the running job is rebuilding: a full redraw carries its own
+    // painted mask, a background rebuild marks every selected layer plus the
+    // extra hole. Cached rather than rebuilt per frame, because binding a new
+    // mask costs the renderer a texture upload and a bounds probe.
+    if (!processing || loading || reduceEffects) return null;
+    if (pendingInpaintMaskUrl) {
+      return pendingInpaintMask ? imageToAlphaMask(pendingInpaintMask, project.width, project.height) : null;
+    }
+    return buildInpaintMaskCanvas(project, imagesRef.current, project.width, project.height);
+  }, [loading, pendingInpaintMask, pendingInpaintMaskUrl, processing, project, reduceEffects]);
+
   const render = useCallback(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -302,9 +421,34 @@ export const SceneCanvas = forwardRef<SceneCanvasHandle, Props>(function SceneCa
       showInpaintMask,
       Boolean(maskEditor),
       showCompositionWhileMaskEditing,
-      anchorLayerId
+      anchorLayerId,
+      // The mosaic belongs to a running job, so its presence is the gate. With
+      // motion off there is no clock to walk the resolve along, so the reported
+      // figure is used as it arrives.
+      processing
+        ? {
+          renderer: mosaicRef.current,
+          time: clockRef.current,
+          mask: inpaintMask,
+          progress: reduceMotion ? inpaintProgress : resolveRef.current
+        }
+        : null
     );
-  }, [anchorLayerId, camera, maskEditor, project, showCompositionWhileMaskEditing, showInpaintMask]);
+  }, [
+    anchorLayerId,
+    camera,
+    inpaintMask,
+    inpaintProgress,
+    reduceMotion,
+    maskEditor,
+    processing,
+    project,
+    showCompositionWhileMaskEditing,
+    showInpaintMask
+  ]);
+
+  const renderRef = useRef(render);
+  renderRef.current = render;
 
   useEffect(() => {
     // Cache by source plus mask revision. Edited masks keep the same URL, so
@@ -356,8 +500,42 @@ export const SceneCanvas = forwardRef<SceneCanvasHandle, Props>(function SceneCa
   }, [project]);
 
   useEffect(() => {
+    const mosaic = mosaicRef.current;
+    return () => mosaic.dispose();
+  }, []);
+
+  useEffect(() => {
     if (!loading) render();
   }, [loading, render]);
+
+  useEffect(() => {
+    // Only the in-progress mosaic animates; everything else on the stage is a
+    // pure projection of state and stays event-driven. With effects reduced
+    // there is no mosaic to drive, so the loop never starts.
+    if (loading || !processing || reduceMotion || reduceEffects) {
+      clockRef.current = 0;
+      resolveRef.current = 0;
+      return;
+    }
+    let frame = 0;
+    const started = performance.now();
+    let previous = started;
+    const tick = (now: number) => {
+      clockRef.current = (now - started) / 1000;
+      // Walk toward the reported progress rather than snapping to it: Big LaMa
+      // holds one figure for its whole run, so the blocks would resolve in two
+      // or three jumps. This only ever lags the job, never runs ahead of it.
+      resolveRef.current = Math.min(
+        progressRef.current,
+        resolveRef.current + ((now - previous) / 1000) * MOSAIC_RESOLVE_RATE
+      );
+      previous = now;
+      renderRef.current();
+      frame = requestAnimationFrame(tick);
+    };
+    frame = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(frame);
+  }, [loading, processing, reduceEffects, reduceMotion]);
 
   useImperativeHandle(ref, () => ({
     exportPng: async () => {
@@ -464,7 +642,7 @@ export const SceneCanvas = forwardRef<SceneCanvasHandle, Props>(function SceneCa
         ref={canvasRef}
         width={project.width}
         height={project.height}
-        className={`scene-canvas ${interactive ? "interactive" : "static"} ${anchoring ? "anchoring" : ""} ${processing ? "processing" : ""}`}
+        className={`scene-canvas ${interactive ? "interactive" : "static"} ${anchoring ? "anchoring" : ""} ${processing ? "processing" : ""} ${reduceEffects ? "reduced" : ""}`}
         style={{ width: `${displaySize[0]}px`, height: `${displaySize[1]}px` }}
         aria-label={
           maskEditor

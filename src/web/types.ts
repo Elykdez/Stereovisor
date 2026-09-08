@@ -3,7 +3,13 @@ export type Engine = "ai" | "preview";
 export interface ProviderStatus {
   available: boolean;
   detail: string;
-  state?: "waiting" | "starting" | "downloading" | "initializing" | "ready" | "blocked";
+  state?:
+    | "waiting"
+    | "starting"
+    | "downloading"
+    | "initializing"
+    | "ready"
+    | "blocked";
   progress?: number | null;
 }
 
@@ -16,7 +22,12 @@ export interface HealthStatus {
   localOnly: true;
   providers: Record<string, ProviderStatus>; // Feature gates use readiness details without instantiating models.
   message: string;
-  startupState: "starting" | "downloading" | "initializing" | "ready" | "blocked";
+  startupState:
+    | "starting"
+    | "downloading"
+    | "initializing"
+    | "ready"
+    | "blocked";
   startupDetail: string | null;
   startupProvider: string | null;
   startupProgress: number | null;

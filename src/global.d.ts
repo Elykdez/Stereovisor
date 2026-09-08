@@ -13,7 +13,7 @@ declare global {
       getSettings: () => Promise<{
         version: 1;
         locale: "en" | "ja" | "ko" | "zh-CN";
-        appearance: { reduceMotion: boolean };
+        appearance: { reduceMotion: boolean; reduceEffects: boolean };
         service: { showConsole: boolean };
         camera: { defaultZoom: number; defaultStrength: number };
         motion: {
@@ -34,7 +34,7 @@ declare global {
       saveSettings: (settings: {
         version: 1;
         locale: "en" | "ja" | "ko" | "zh-CN";
-        appearance: { reduceMotion: boolean };
+        appearance: { reduceMotion: boolean; reduceEffects: boolean };
         service: { showConsole: boolean };
         camera: { defaultZoom: number; defaultStrength: number };
         motion: {

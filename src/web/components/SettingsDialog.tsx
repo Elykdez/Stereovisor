@@ -2,7 +2,7 @@ import { useState, type CSSProperties } from "react";
 import { LOCALE_LABEL_KEYS, useAppTranslation, type AppTranslate } from "../i18n";
 import { sanitizeAppSettings, SUPPORTED_LOCALES, type AppSettings } from "../settings";
 
-type SettingsSection = "general" | "inference" | "appearance" | "camera" | "advanced";
+type SettingsSection = "inference" | "appearance" | "camera" | "advanced";
 
 interface SettingsDialogProps {
   settings: AppSettings;
@@ -69,7 +69,6 @@ function NumericSetting({ label, settingKey, value, min, max, step, help, onChan
 
 function SectionNav({ active, onChange, t }: { active: SettingsSection; onChange: (section: SettingsSection) => void; t: AppTranslate }) {
   const sections: Array<{ id: SettingsSection; label: string; detail: string }> = [
-    { id: "general", label: t("settings.general"), detail: t("settings.generalDetail") },
     { id: "appearance", label: t("settings.appearance"), detail: t("settings.appearanceDetail") },
     { id: "camera", label: t("settings.camera"), detail: t("settings.cameraDetail") },
     { id: "inference", label: t("settings.inference"), detail: t("settings.inferenceDetail") },
@@ -98,7 +97,7 @@ function SettingKey({ children }: { children: string }) {
 
 export function SettingsDialog({ settings, onSave, onCancel }: SettingsDialogProps) {
   const { t } = useAppTranslation();
-  const [activeSection, setActiveSection] = useState<SettingsSection>("general");
+  const [activeSection, setActiveSection] = useState<SettingsSection>("appearance");
   const [draft, setDraft] = useState<AppSettings>(() => structuredClone(settings));
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -134,25 +133,6 @@ export function SettingsDialog({ settings, onSave, onCancel }: SettingsDialogPro
         <div className="settings-dialog-body">
           <SectionNav active={activeSection} onChange={setActiveSection} t={t} />
           <div className="settings-content">
-            {activeSection === "general" && (
-              <div className="settings-page">
-                <span className="eyebrow">{t("settings.general")}</span>
-                <h3>{t("settings.generalTitle")}</h3>
-                <p className="settings-description">{t("settings.generalDescription")}</p>
-                <label className="settings-field">
-                  <span>{t("language.label")} <SettingKey>locale</SettingKey></span>
-                  <select value={draft.locale} aria-label={t("language.label")} onChange={(event) => {
-                    const next = event.target.value as AppSettings["locale"];
-                    updateDraft((current) => ({ ...current, locale: next }));
-                  }}>
-                    {SUPPORTED_LOCALES.map((locale) => (
-                      <option key={locale} value={locale}>{t(LOCALE_LABEL_KEYS[locale])}</option>
-                    ))}
-                  </select>
-                  <small>{t("settings.languageHelp")}</small>
-                </label>
-              </div>
-            )}
             {activeSection === "inference" && (
               <div className="settings-page">
                 <span className="eyebrow">{t("settings.inference")}</span>
@@ -200,6 +180,8 @@ export function SettingsDialog({ settings, onSave, onCancel }: SettingsDialogPro
                     type="checkbox"
                     checked={draft.processing.useVlmVocabularyProposer}
                     aria-label={t("settings.vlmVocabularyProposer")}
+                    data-toggle-on={t("settings.toggleOn")}
+                    data-toggle-off={t("settings.toggleOff")}
                     onChange={(event) => updateDraft((current) => ({
                       ...current,
                       processing: { ...current.processing, useVlmVocabularyProposer: event.target.checked }
@@ -237,6 +219,18 @@ export function SettingsDialog({ settings, onSave, onCancel }: SettingsDialogPro
                 <span className="eyebrow">{t("settings.appearance")}</span>
                 <h3>{t("settings.appearanceTitle")}</h3>
                 <p className="settings-description">{t("settings.appearanceDescription")}</p>
+                <label className="settings-field">
+                  <span>{t("language.label")} <SettingKey>locale</SettingKey></span>
+                  <select value={draft.locale} aria-label={t("language.label")} onChange={(event) => {
+                    const next = event.target.value as AppSettings["locale"];
+                    updateDraft((current) => ({ ...current, locale: next }));
+                  }}>
+                    {SUPPORTED_LOCALES.map((locale) => (
+                      <option key={locale} value={locale}>{t(LOCALE_LABEL_KEYS[locale])}</option>
+                    ))}
+                  </select>
+                  <small>{t("settings.languageHelp")}</small>
+                </label>
                 <label className="settings-toggle">
                   <span>
                     <strong>{t("settings.reduceMotion")}</strong>
@@ -245,7 +239,24 @@ export function SettingsDialog({ settings, onSave, onCancel }: SettingsDialogPro
                   <input
                     type="checkbox"
                     checked={draft.appearance.reduceMotion}
+                    aria-label={t("settings.reduceMotion")}
+                    data-toggle-on={t("settings.toggleOn")}
+                    data-toggle-off={t("settings.toggleOff")}
                     onChange={(event) => updateDraft((current) => ({ ...current, appearance: { ...current.appearance, reduceMotion: event.target.checked } }))}
+                  />
+                </label>
+                <label className="settings-toggle">
+                  <span>
+                    <strong>{t("settings.reduceEffects")}</strong>
+                    <small>{t("settings.reduceEffectsHelp")} <SettingKey>appearance.reduceEffects</SettingKey></small>
+                  </span>
+                  <input
+                    type="checkbox"
+                    checked={draft.appearance.reduceEffects}
+                    aria-label={t("settings.reduceEffects")}
+                    data-toggle-on={t("settings.toggleOn")}
+                    data-toggle-off={t("settings.toggleOff")}
+                    onChange={(event) => updateDraft((current) => ({ ...current, appearance: { ...current.appearance, reduceEffects: event.target.checked } }))}
                   />
                 </label>
               </div>
@@ -321,6 +332,8 @@ export function SettingsDialog({ settings, onSave, onCancel }: SettingsDialogPro
                     type="checkbox"
                     checked={draft.service.showConsole}
                     aria-label={t("settings.showServiceConsole")}
+                    data-toggle-on={t("settings.toggleOn")}
+                    data-toggle-off={t("settings.toggleOff")}
                     onChange={(event) => updateDraft((current) => ({
                       ...current,
                       service: { ...current.service, showConsole: event.target.checked }

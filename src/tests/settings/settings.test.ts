@@ -11,6 +11,7 @@ describe("application settings", () => {
   it("registers the advanced values exposed by Options", () => {
     expect(SETTINGS_REGISTRY.map((setting) => setting.key)).toEqual([
       "appearance.reduceMotion",
+      "appearance.reduceEffects",
       "service.showConsole",
       "camera.defaultZoom",
       "camera.defaultStrength",
@@ -29,13 +30,14 @@ describe("application settings", () => {
   it("sanitizes malformed and out-of-range values", () => {
     expect(sanitizeAppSettings({
       locale: "fr",
-      appearance: { reduceMotion: true },
+      appearance: { reduceMotion: true, reduceEffects: "yes" },
       camera: { defaultZoom: 9, defaultStrength: -10 },
       motion: { speed: 0, horizontalAmount: 2, verticalAmount: -1 },
       processing: { pollIntervalMs: 99999, defaultRefinement: "powerpaint", inpaintingSteps: 999, segmentationLabels: 123, useVlmVocabularyProposer: true }
     })).toEqual({
       ...DEFAULT_APP_SETTINGS,
-      appearance: { reduceMotion: true },
+      // A non-boolean toggle falls back to its default rather than going truthy.
+      appearance: { reduceMotion: true, reduceEffects: false },
       camera: { defaultZoom: 1.35, defaultStrength: 0 },
       motion: { speed: 0.2, horizontalAmount: 1, verticalAmount: 0 },
       processing: { pollIntervalMs: 5000, defaultRefinement: "powerpaint", inpaintingSteps: 100, segmentationDensity: "balanced", segmentationLabels: "", useVlmVocabularyProposer: true }

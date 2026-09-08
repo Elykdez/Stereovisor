@@ -125,6 +125,10 @@ export default function App() {
   // same click that sets it, before React has re-rendered anything.
   const buildActionLock = useRef(false);
   const [focusedInpaintTargetId, setFocusedInpaintTargetId] = useState<string | null>(null);
+  // Blob URL of the mask a running full-redraw job is working on. The editor is
+  // closed by then, so this is the only thing that still knows which area the
+  // stage should mark as pending.
+  const [pendingInpaintMaskUrl, setPendingInpaintMaskUrl] = useState<string | null>(null);
   const [anchorLayerId, setAnchorLayerId] = useState<string | null>(null);
   const [inpaintHistory, setInpaintHistory] = useState<Record<string, InpaintHistoryState>>({});
   const [inpaintHistoryBusy, setInpaintHistoryBusy] = useState<"undo" | "redo" | null>(null);
@@ -274,6 +278,12 @@ export default function App() {
     // single entry point for file validation and processing.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [startupPhase]);
+
+  useEffect(() => {
+    // Options and About render outside the shell, so the flag lives on the
+    // document where every surface can see it.
+    document.body.classList.toggle("reduced-effects", settings.appearance.reduceEffects);
+  }, [settings.appearance.reduceEffects]);
 
   useEffect(() => {
     if (!moving) return;
@@ -958,11 +968,16 @@ export default function App() {
     setError(null);
     setMaskSaving(true);
     appLog.info("workflow.target-inpaint.started", { projectId: project.id, target: targetLayerId ?? "background" });
+    let maskPreviewUrl: string | null = null;
     try {
       const [mask, composition] = await Promise.all([
         canvasRef.current.exportEditedMask(),
         canvasRef.current.exportComposition()
       ]);
+      // Hand the painted area to the stage before the editor closes on the next
+      // line, so the progress mosaic marks exactly what this job redraws.
+      maskPreviewUrl = URL.createObjectURL(mask);
+      setPendingInpaintMaskUrl(maskPreviewUrl);
       cancelMaskEdit();
       setPhase("inpainting");
       setProcessingProgress({
@@ -1001,6 +1016,8 @@ export default function App() {
       setError(operationError instanceof ProcessingCancelledError ? null : operationError instanceof Error ? operationError.message : "The selected layer could not be inpainted.");
     } finally {
       setMaskSaving(false);
+      setPendingInpaintMaskUrl(null);
+      if (maskPreviewUrl) URL.revokeObjectURL(maskPreviewUrl);
       setProcessingProgress(null);
       setProcessingJobId(null);
       setCancellingJob(false);
@@ -1537,12 +1554,16 @@ export default function App() {
               interactive={startupReady && (phase === "selecting" || phase === "editing") && maskEditor === null}
               reviewingSource={phase === "selecting"}
               processing={phase === "inpainting"}
+              pendingInpaintMaskUrl={pendingInpaintMaskUrl}
+              inpaintProgress={processingProgress?.progress ?? 0}
               showInpaintMask={phase === "selecting" && showInpaintMask && maskEditor === null}
               maskEditor={maskEditor}
               showCompositionWhileMaskEditing={maskEditor?.kind === "inpaint"}
               brushMode={maskBrushMode}
               brushSize={maskBrushSize}
               maskBlurRadius={maskBlurRadius}
+              reduceMotion={settings.appearance.reduceMotion || Boolean(window.matchMedia?.("(prefers-reduced-motion: reduce)").matches)}
+              reduceEffects={settings.appearance.reduceEffects}
               anchorLayerId={phase === "editing" && !maskEditor ? anchorLayerId : null}
               onLayerAnchorChange={moveLayerAnchor}
               onMaskDirtyChange={setMaskDirty}

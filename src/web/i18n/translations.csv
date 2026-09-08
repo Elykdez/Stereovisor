@@ -9,10 +9,8 @@ settings.options,Options,オプション,옵션,选项
 settings.subtitle,Application preferences,アプリケーション設定,애플리케이션 환경설정,应用偏好设置
 settings.close,Close options,オプションを閉じる,옵션 닫기,关闭选项
 settings.sections,Option sections,オプションセクション,옵션 섹션,选项分区
-settings.general,General,一般,일반,常规
-settings.generalDetail,Language and workflow,言語とワークフロー,언어 및 워크플로,语言和工作流
-settings.generalTitle,Studio defaults,スタジオの既定値,스튜디오 기본값,工作室默认值
-settings.generalDescription,Choose the language and the default method used when a scene is built.,言語とシーン構築時の既定方式を選択します。,언어와 장면 생성 시 사용할 기본 방식을 선택합니다.,选择语言以及构建场景时使用的默认方法。
+settings.toggleOn,ON,ON,켜짐,开
+settings.toggleOff,OFF,OFF,꺼짐,关
 settings.languageHelp,The language is also used by the native desktop menus.,言語はデスクトップのネイティブメニューにも使用されます。,언어는 데스크톱 기본 메뉴에도 적용됩니다.,语言也会应用于桌面原生菜单。
 settings.inference,Inference,推論,추론,推理
 settings.inferenceDetail,Local AI and generation controls,ローカル AI と生成設定,로컬 AI 및 생성 설정,本地 AI 和生成控制
@@ -33,11 +31,13 @@ settings.defaultRefinementHelp,This is selected for each new scene and can still
 settings.inpaintingSteps,Inpainting steps,インペイントステップ数,인페인팅 단계,修复步数
 settings.inpaintingStepsHelp,PowerPaint uses this denoising step count; higher values take longer. Big LaMa ignores it.,PowerPaint はこのノイズ除去回数を使用します。多いほど時間がかかります。Big LaMa では無視されます。,PowerPaint는 이 디노이징 단계 수를 사용하며 높을수록 오래 걸립니다. Big LaMa에서는 무시됩니다.,PowerPaint 使用此去噪步数；数值越高耗时越长。Big LaMa 不使用此设置。
 settings.appearance,Appearance,外観,모양,外观
-settings.appearanceDetail,Motion and accessibility,モーションとアクセシビリティ,모션 및 접근성,动效和辅助功能
-settings.appearanceTitle,Motion and accessibility,モーションとアクセシビリティ,모션 및 접근성,动效和辅助功能
-settings.appearanceDescription,Control animation behavior without changing the rendered scene.,レンダリングされるシーンを変えずにアニメーションを制御します。,렌더링된 장면은 바꾸지 않고 애니메이션을 제어합니다.,控制动画行为而不改变渲染的场景。
+settings.appearanceDetail,Language and visuals,言語と表示,언어 및 화면 효과,语言和视觉效果
+settings.appearanceTitle,Language and visuals,言語と表示,언어 및 화면 효과,语言和视觉效果
+settings.appearanceDescription,Choose the interface language and how much motion and graphics the app draws.,インターフェースの言語と、モーションやグラフィックの量を選択します。,인터페이스 언어와 앱이 그리는 모션·그래픽의 양을 선택합니다.,选择界面语言以及应用绘制的动效和图形数量。
 settings.reduceMotion,Reduce motion,モーションを減らす,모션 줄이기,减少动效
 settings.reduceMotionHelp,Disables the automatic camera preview and respects the system accessibility preference.,自動カメラプレビューを無効にし、システムのアクセシビリティ設定に従います。,자동 카메라 미리보기를 끄고 시스템 접근성 설정을 따릅니다.,禁用自动相机预览并遵循系统辅助功能偏好。
+settings.reduceEffects,Reduce graphic effects,グラフィック効果を減らす,그래픽 효과 줄이기,减少图形效果
+settings.reduceEffectsHelp,Replaces the animated inpainting mosaic with a plain blur and drops the blur behind dialogs. Use this on a slower GPU.,インペイント中のモザイクを単純なぼかしに置き換え、ダイアログ背後のぼかしも無効にします。GPU が遅い場合に使用します。,인페인팅 모자이크를 단순한 흐림으로 바꾸고 대화 상자 뒤의 흐림도 끕니다. GPU가 느릴 때 사용하세요.,将修复过程中的马赛克替换为普通模糊，并关闭对话框背后的模糊。GPU 较慢时可启用。
 settings.camera,Camera,カメラ,카메라,相机
 settings.cameraDetail,Defaults and motion range,既定値とモーション範囲,기본값 및 모션 범위,默认值和运动范围
 settings.cameraTitle,Camera defaults,カメラの既定値,카메라 기본값,相机默认值
