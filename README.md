@@ -4,6 +4,12 @@ Stereovisor is a local-first Electron studio that turns one image into a layered
 
 The product contract is in [docs/SRS.md](docs/SRS.md), and the implementation design is in [docs/DESIGN.md](docs/DESIGN.md).
 
+## Repository Layout
+
+- `client/` owns the React renderer, Electron host, static assets, tests, build configuration, and client-only utilities.
+- `service/` owns the Python API and pipeline source, service tests, requirements, model/runtime utilities, and local data caches.
+- `scripts/` contains only launch, setup, and smoke-test orchestration that coordinates both sides.
+
 ## Quick Start
 
 On Windows, double-click `Run Stereovisor.cmd`. The window opens immediately and shows the real editor behind a blurred startup mask while the local CUDA Python runtime and the model weights are prepared. The mask lists all five startup items - local AI runtime, segmentation, matting, depth, and inpainting - and reports `Starting`, `Downloading`, `Initializing`, or `Ready` with per-item progress, including the one-time CUDA runtime installation. Editing stays disabled until the running local service confirms every required provider; a stage the first-run preparation has finished is shown as progress but never unlocks the editor on its own. `File > Options...` and `Help > About` stay available while the mask is up. The launcher builds the project-owned `.venv-ai` environment, reuses the CUDA Torch already installed inside it when that installation is compatible, and otherwise installs the pinned CUDA wheel. Later launches reuse the prepared environment.
@@ -85,7 +91,7 @@ Inference options include segmentation density: `Sparse` keeps broad subject lay
 When its validated checkpoint is installed, `PowerPaint - full redraw` is selected by default. It runs the complete diffusion schedule (the equivalent of denoise `1.00`) and discards original pixels throughout the expanded removal mask. `Big LaMa - structural fill` remains available as the faster non-diffusion option.
 
 ```powershell
-.\scripts\setup-ai.ps1
+.\service\scripts\setup-ai.ps1
 $env:STEREOVISOR_MODE = "ai"
 npm run dev
 ```
@@ -112,9 +118,77 @@ $env:STEREOVISOR_DEVICE = "cuda"
 npm run dev
 ```
 
+## Service API
+
+The renderer and the local Python service talk over one HTTP contract, and the
+service runs on the same machine as the app by default. It listens on
+`127.0.0.1:5772`.
+
+Start only the server from the repository root with:
+
+```powershell
+npm run dev:service
+```
+
+That command defaults to the lightweight preview engine. To run a prepared AI
+environment instead, select its Python and mode before starting it:
+
+```powershell
+$env:STEREOVISOR_PYTHON = (Resolve-Path ".venv-ai\Scripts\python.exe")
+$env:STEREOVISOR_MODE = "ai"
+$env:STEREOVISOR_DEVICE = "cuda"
+npm run dev:service
+```
+
+Server and client configuration are independent. Both default to port `5772`,
+so the shipped Electron app stays synchronized without configuration. In
+`File > Options... > Advanced`, leave **Server address** blank to use the bundled
+service at `http://127.0.0.1:5772`, or enter the full `http://host:port` origin of
+an independently running server. An explicit address also prevents Electron
+from starting its bundled service on the next launch.
+
+To make a server reachable from the LAN, bind it to all interfaces and require
+a strong shared token:
+
+```powershell
+$env:STEREOVISOR_SERVICE_HOST = "0.0.0.0"
+$env:STEREOVISOR_SERVICE_PORT = "5772"
+$env:STEREOVISOR_AUTH_TOKEN = "replace-with-a-long-random-secret"
+npm run dev:service
+```
+
+Open inbound TCP port `5772` in the server machine's firewall, then set the
+client's **Server address** to the server's LAN address, for example
+`http://192.168.1.50:5772`, and set **Server access token** to the same secret.
+If a browser renderer is served from an origin other than the defaults, add its
+exact origin to the server's comma-separated `STEREOVISOR_ALLOWED_ORIGINS`.
+
+All HTTP routes, including image assets, require `Authorization: Bearer ...`
+when the server binds beyond loopback. The event socket carries the same secret
+in a WebSocket subprotocol because browser WebSockets cannot set an
+Authorization header. This is shared-workspace authentication, not user
+isolation: every client with the token can access the server's projects. Plain
+HTTP also exposes the token to anyone able to inspect LAN traffic, so use this
+only on a trusted LAN or place the service behind a TLS reverse proxy. Do not
+publish port `5772` directly to the internet.
+
+Job progress and startup readiness arrive over a WebSocket at `/api/events`
+instead of repeated polling. If the socket is unavailable the client falls back
+to its original polling cadence, so behavior is unchanged either way.
+
+Individual AI components are addressable through
+`GET /api/capabilities` and the `POST /api/jobs/capabilities/<id>` routes -
+segmentation, depth, matting, Big LaMa fill, and the two Qwen3-VL prompts. Every
+inference request returns a job ID and shares the same observable FIFO queue,
+including requests from multiple LAN clients. Read the result from
+`GET /api/jobs/<jobId>` and cancel with `POST /api/jobs/<jobId>/cancel`. Run
+the supported single-process launcher shown above; multiple Uvicorn workers do
+not share the in-memory queue consumer. Run `npm run openapi` to write the full
+schema to `openapi.json`.
+
 ## Localization
 
-The React UI uses `i18next` and `react-i18next`. English, Japanese, Korean, and Simplified Chinese are authored together in `src/web/i18n/translations.csv`; `src/web/i18n/generated.ts` and `electron/nativeMessages.ts` are generated and must not be edited directly. Native menu/dialog rows use the `native.*` key prefix.
+The React UI uses `i18next` and `react-i18next`. English, Japanese, Korean, and Simplified Chinese are authored together in `client/src/i18n/translations.csv`; `client/src/i18n/generated.ts` and `client/electron/nativeMessages.ts` are generated and must not be edited directly. Native menu/dialog rows use the `native.*` key prefix.
 
 Keep the CSV UTF-8 with a BOM and CRLF line endings so it opens cleanly in spreadsheet tools. Every locale cell is required, and each translation must preserve the English interpolation placeholders. After editing it, run:
 
@@ -127,9 +201,9 @@ The app chooses a supported system language on first launch, persists the user's
 
 ## Options and Settings
 
-The header language selector is also available from `File > Options...` (`Ctrl+,`). Options are grouped into General, Appearance, Camera, and Advanced sections. The registered settings in `src/web/settings.ts` cover language, motion accessibility, camera defaults, automatic preview motion, the default background method, local-worker polling, and the optional local service console. The service console is hidden by default and can be enabled for the next launch from Advanced, or with `STEREOVISOR_SHOW_CONSOLE=1` when using `Run Stereovisor.cmd`.
+The header language selector is also available from `File > Options...` (`Ctrl+,`). Options are grouped into Appearance, Camera, Inference, and Advanced sections. The registered settings in `client/src/settings.ts` cover language, motion accessibility, camera defaults, automatic preview motion, inference behavior, local-worker polling, the client service address and token, and the optional local service console. The service console is hidden by default and can be enabled for the next launch from Advanced, or with `STEREOVISOR_SHOW_CONSOLE=1` when using `Run Stereovisor.cmd`. A visible service console remains running after the editor closes, and later launches reuse that compatible local server; close the console itself to stop it. With the option disabled, the hidden service remains owned by the app and stops when the app closes.
 
-Native menu and dialog labels are authored with the other locales in `src/web/i18n/translations.csv` under the `native.*` keys. The generator writes `electron/nativeMessages.ts`, so File, Edit, View, and Help commands follow the selected locale instead of the operating system menu language. `Help > About Stereovisor` opens the custom in-app About window with the current project version and a brief description.
+Native menu and dialog labels are authored with the other locales in `client/src/i18n/translations.csv` under the `native.*` keys. The generator writes `client/electron/nativeMessages.ts`, so File, Edit, View, and Help commands follow the selected locale instead of the operating system menu language. `Help > About Stereovisor` opens the custom in-app About window with the current project version and a brief description.
 
 Electron stores the normalized versioned configuration at the platform user-data location as `settings.json` (for example `%APPDATA%/stereovisor/settings.json` on Windows). Browser development uses `localStorage` with the same schema. Values are clamped to safe ranges before they are written, and Save/Cancel keeps pending edits separate from the active configuration.
 

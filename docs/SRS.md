@@ -168,7 +168,9 @@ The primary user is a designer or content creator who wants a parallax still wit
 - Default inpainting: local Big LaMa TorchScript model.
 - Optional Qwen3-VL 2B vocabulary proposal and background-prompt generation; PowerPaint v2.1 provides full-redraw refinement.
 - Model files download on first production use and remain in the user's model cache.
-- All inference runs locally. No cloud inference endpoint is supported by the service contract.
+- All inference runs in the locally operated Python service. An authenticated
+  LAN client may use that service from another machine; no third-party cloud
+  inference endpoint is supported by the service contract.
 
 ### Preview Mode
 

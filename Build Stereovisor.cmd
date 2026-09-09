@@ -33,8 +33,8 @@ if not "%STEREOVISOR_BUILD_EXIT%"=="0" (
     echo Build failed with exit code %STEREOVISOR_BUILD_EXIT%.
 ) else (
     echo Package complete.
-    echo Renderer: %~dp0dist
-    echo Electron: %~dp0dist-electron
+    echo Renderer: %~dp0client\dist
+    echo Electron: %~dp0client\dist-electron
     echo Installer and portable executable: %~dp0release
 )
 

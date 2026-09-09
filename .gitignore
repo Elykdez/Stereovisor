@@ -1,6 +1,8 @@
 node_modules/
 dist/
 dist-electron/
+client/dist/
+client/dist-electron/
 release/
 release-*/
 .vite/
@@ -10,8 +12,12 @@ release-*/
 .venv-powerpaint/
 __pycache__/
 .pytest_cache/
+.ruff_cache/
 *.pyc
 *.log
 .DS_Store
 service/.projects/
 service/.models/
+
+# Generated contract snapshot; regenerate with `npm run openapi`.
+openapi.json

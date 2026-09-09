@@ -113,14 +113,79 @@ Portable manifests store both sets of state so a load operation restores the exa
 ## 4. API
 
 - `GET /api/health`: service version, active mode, dependency and model readiness.
-- `POST /api/analyze`: multipart source image; returns a project with proposals.
-- `POST /api/projects/{id}/inpaint`: selected layer IDs, `lama`/`powerpaint` mode, and an optional prompt; returns the updated project.
+- `POST /api/jobs/analyze`: multipart source image; returns a job ID.
+- `POST /api/jobs/projects/{id}/inpaint`: selected layer IDs, `lama`/`powerpaint` mode, and an optional prompt; returns a job ID.
+- `GET /api/jobs/{id}`: authoritative state and the typed result after completion.
 - `GET /api/projects/{id}/assets/{name}`: validated project asset delivery.
 - `POST /api/projects/{id}/export`: camera/layer state in, `.stereovisor` package out.
 - `POST /api/projects/import`: `.stereovisor` package in, restored project and camera state out.
 - `POST /api/jobs/{id}/cancel`: request cooperative cancellation and return the job's cancelled state.
 
 All errors use `{ "code": string, "message": string, "detail"?: string }`.
+
+The service listens on `127.0.0.1:5772` by default. Server-side
+`STEREOVISOR_SERVICE_HOST` and `STEREOVISOR_SERVICE_PORT` are independent of the
+client's Advanced `service.origin` setting. A non-loopback bind is refused unless
+`STEREOVISOR_AUTH_TOKEN` is set; in that mode every HTTP route requires the
+matching bearer token and `/api/events` requires its WebSocket subprotocol form.
+`npm run openapi` writes the full document to `openapi.json`.
+
+### Event channel
+
+`GET /api/events` upgrades to a WebSocket that pushes state changes so clients do not poll for them. Frames carry `topic` (`job` or `health`) and a per-topic monotonic `seq`.
+
+Three rules keep HTTP authoritative:
+
+1. A job frame never carries `result`. On `state: "completed"` the client reads `GET /api/jobs/{id}` for the authoritative project or capability result.
+2. Clients read current state over HTTP, then subscribe. Frames older than the applied `seq` are discarded, so a dropped frame cannot strand the UI.
+3. If the socket is unavailable, clients fall back to the original polling cadence. Degraded mode is the pre-socket behavior exactly.
+
+Readiness has no natural push source, so one server-side watch recomputes health once a second while at least one subscriber is connected and broadcasts only on change. CORS does not cover the WebSocket handshake, so the browser-sent `Origin` is checked against the same allowlist.
+
+### Job queue
+
+Jobs are durable. `service/src/jobs.py` keeps state in SQLite beside the projects it
+produces, with results in a separate table so status polling never reads the
+payload blob. A job therefore survives a service restart: a renderer that
+reconnects reads a real terminal state instead of a 404.
+
+`service/src/jobqueue.py` puts one FIFO worker in front of the local GPU, which is
+all the hardware allows anyway. Making that explicit means a waiting job reports
+`queuePosition` - how many jobs are ahead of it, mirrored into `message` so
+existing UI needs no change - instead of silently occupying a request thread
+inside the pipeline lock. Submitting is now cheap: `POST /api/jobs/...` enqueues
+and returns without waiting on inference. Workflow and capability requests from
+every client share this queue. Cancelling a queued job removes it immediately
+and recomputes the positions behind it.
+
+Two consequences follow from durability:
+
+- **Interrupted work fails honestly.** GPU work cannot be resumed, so anything
+  left `queued` or `running` by a crash is marked failed on the next startup
+  with an explanatory message, rather than appearing to run with no worker.
+- **Finished work is swept.** Terminal jobs are evicted an hour after their last
+  update, so a long-lived install does not accumulate results forever.
+
+Splitting the API and the worker into separate processes later means replacing
+the in-process consumer with one that polls the same database. The queue
+boundary does not move. The current guarantee applies to the supported
+single-process service launcher; multiple Uvicorn worker processes are not a
+supported deployment because each would own a separate in-memory consumer.
+
+### Capability API
+
+The workflow routes above compose whole operations. These address one AI component each, for callers that need a single stage:
+
+- `GET /api/capabilities`: inventory of every component - model, gating provider, readiness, device, VRAM budget, and accepted parameters.
+- `POST /api/jobs/capabilities/segmentation:detect`: image in, queued instances with masks/labels/scores out.
+- `POST /api/jobs/capabilities/depth:estimate`: image in, queued depth preview out.
+- `POST /api/jobs/capabilities/matting:refine`: image plus rough mask in, queued alpha out.
+- `POST /api/jobs/capabilities/inpainting:fill`: image plus mask in, queued Big LaMa fill out.
+- `POST /api/jobs/capabilities/vlm:vocabulary`, `POST /api/jobs/capabilities/vlm:caption`: image in, queued labels or a background prompt out.
+
+Every route is a thin front for a function in `service/src/providers.py`, which calls the same implementation the pipeline uses; a capability must never become a second copy of a stage. The POST returns `{ "jobId": "..." }`; `GET /api/jobs/{id}` carries the typed result, with image output encoded as base64 PNG. The explicit queue provides admission control while the pipeline lock remains a defensive serialization boundary around model allocation.
+
+PowerPaint is listed in the inventory with `endpoint: null`. It remains reachable through workflow jobs because its standalone request still needs a project and prompt contract, not because the job store is limited to project results.
 
 ## 5. Renderer Design
 

@@ -1,5 +1,7 @@
 $ErrorActionPreference = "Stop"
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
+$AppVersion = (Get-Content -LiteralPath (Join-Path $ProjectRoot "package.json") -Raw | ConvertFrom-Json).version
+$ServicePort = if ($env:STEREOVISOR_SERVICE_PORT) { $env:STEREOVISOR_SERVICE_PORT } else { "5772" }
 $ShowConsole = $env:STEREOVISOR_SHOW_CONSOLE -in @("1", "true", "yes")
 $AppProcess = $null
 $BootstrapServiceProcess = $null
@@ -11,7 +13,7 @@ $env:STEREOVISOR_BOOTSTRAP_STATUS = Join-Path $ModelRoot ".stereovisor-bootstrap
 # Start from an empty set: an inherited value would claim stages this launch
 # has not verified.
 $env:STEREOVISOR_BOOTSTRAP_COMPLETED = ""
-. (Join-Path $PSScriptRoot "bootstrap-status.ps1")
+. (Join-Path $ProjectRoot "service\scripts\bootstrap-status.ps1")
 
 # A terminal hosted inside another Electron app exports this, which would make
 # our electron.exe run main.js as plain Node and exit before a window opens.
@@ -107,7 +109,7 @@ function Start-StereovisorService {
             "-ExecutionPolicy",
             "Bypass",
             "-File",
-            (Join-Path $PSScriptRoot "start-service.ps1")
+            (Join-Path $ProjectRoot "service\scripts\start-service.ps1")
         ) `
         -WorkingDirectory $ProjectRoot `
         -WindowStyle $ServiceWindowStyle `
@@ -126,8 +128,8 @@ function Test-StereovisorRenderer {
 
 function Test-StereovisorService {
     try {
-        $Health = Invoke-RestMethod -Uri "http://127.0.0.1:5179/api/health" -TimeoutSec 2
-        return $Health.status -eq "ok" -and $Health.localOnly -eq $true
+        $Health = Invoke-RestMethod -Uri "http://127.0.0.1:$($ServicePort)/api/health" -TimeoutSec 2
+        return $Health.status -eq "ok" -and $Health.version -eq $AppVersion -and $Health.localOnly -eq $true
     }
     catch {
         return $false
@@ -136,9 +138,9 @@ function Test-StereovisorService {
 
 function Stop-OrphanedStereovisorService {
     if (Test-StereovisorRenderer) { return $false }
-    $serviceScript = (Join-Path $ProjectRoot "scripts\run-service.py").ToLowerInvariant()
+    $serviceScript = (Join-Path $ProjectRoot "service\scripts\run-service.py").ToLowerInvariant()
     $managedProcessIds = @()
-    $listeners = @(Get-NetTCPConnection -State Listen -LocalPort 5179 -ErrorAction SilentlyContinue)
+    $listeners = @(Get-NetTCPConnection -State Listen -LocalPort $ServicePort -ErrorAction SilentlyContinue)
     foreach ($listener in $listeners) {
         $process = Get-CimInstance Win32_Process -Filter "ProcessId = $($listener.OwningProcess)"
         if (-not $process -or -not $process.CommandLine -or -not $process.CommandLine.ToLowerInvariant().Contains($serviceScript)) {
@@ -147,7 +149,7 @@ function Stop-OrphanedStereovisorService {
         $current = $process
         while ($current -and $current.CommandLine -and (
                 $current.CommandLine.ToLowerInvariant().Contains($serviceScript) -or
-                $current.CommandLine.ToLowerInvariant().Contains((Join-Path $ProjectRoot "scripts\start-service.ps1").ToLowerInvariant())
+                $current.CommandLine.ToLowerInvariant().Contains((Join-Path $ProjectRoot "service\scripts\start-service.ps1").ToLowerInvariant())
             )) {
             $managedProcessIds += $current.ProcessId
             if (-not $current.ParentProcessId) { break }
@@ -168,7 +170,7 @@ function Stop-OrphanedStereovisorService {
     foreach ($processId in $managedProcessIds) {
         Stop-Process -Id $processId -Force -ErrorAction SilentlyContinue
     }
-    for ($attempt = 0; $attempt -lt 20 -and (Test-TcpPort -Port 5179); $attempt++) {
+    for ($attempt = 0; $attempt -lt 20 -and (Test-TcpPort -Port $ServicePort); $attempt++) {
         Start-Sleep -Milliseconds 250
     }
     return $true
@@ -190,10 +192,23 @@ try {
         exit $LASTEXITCODE
     }
 
+    if ($ShowConsole -and $ServiceReady) {
+        if (Test-TcpPort -Port 5173) {
+            throw "Stereovisor cannot start because port 5173 is occupied by another process. Close that process and run Stereovisor again."
+        }
+        $env:STEREOVISOR_MODE = "ai"
+        $env:STEREOVISOR_DEVICE = "cuda"
+        $env:STEREOVISOR_MODEL_ROOT = Join-Path $ProjectRoot "service\.models"
+        Write-Host "Reusing the persistent Stereovisor local service..." -ForegroundColor Cyan
+        Start-StereovisorApp
+        Wait-Process -Id $AppProcess.Id
+        exit $AppProcess.ExitCode
+    }
+
     [void](Stop-OrphanedStereovisorService)
     $BusyPorts = @()
     if (Test-TcpPort -Port 5173) { $BusyPorts += "5173" }
-    if (Test-TcpPort -Port 5179) { $BusyPorts += "5179" }
+    if (Test-TcpPort -Port $ServicePort) { $BusyPorts += "$ServicePort" }
     if ($BusyPorts.Count -gt 0) {
         throw "Stereovisor cannot start because port(s) $($BusyPorts -join ', ') are occupied by another process. Close that process and run Stereovisor again."
     }
@@ -252,7 +267,7 @@ try {
     }
     Publish-BootstrapStatus -State "initializing" -Detail "Starting the local AI service." -Provider "runtime" -Progress 100
     Stop-StereovisorProcessTree -ProcessId $BootstrapServiceProcess.Id
-    for ($attempt = 0; $attempt -lt 20 -and (Test-TcpPort -Port 5179); $attempt++) {
+    for ($attempt = 0; $attempt -lt 20 -and (Test-TcpPort -Port $ServicePort); $attempt++) {
         Start-Sleep -Milliseconds 250
     }
     Write-Host "Starting Stereovisor with local AI..." -ForegroundColor Green
@@ -278,7 +293,7 @@ finally {
     if ($BootstrapServiceProcess -and -not $BootstrapServiceProcess.HasExited) {
         Stop-StereovisorProcessTree -ProcessId $BootstrapServiceProcess.Id
     }
-    if ($ServiceProcess -and -not $ServiceProcess.HasExited) {
+    if ($ServiceProcess -and -not $ServiceProcess.HasExited -and -not $ShowConsole) {
         Stop-StereovisorProcessTree -ProcessId $ServiceProcess.Id
     }
     if ($AppProcess -and -not $AppProcess.HasExited) {

@@ -7,9 +7,9 @@ import numpy as np
 import pytest
 from PIL import Image, ImageDraw
 
-from service import pipeline
-from service.ai_models import InstanceMask
-from service.depth import foreground_depth_plane, normalize_depth
+from service.src import pipeline
+from service.src.ai_models import InstanceMask
+from service.src.depth import foreground_depth_plane, normalize_depth
 
 
 def proposal(left: int, top: int, right: int, bottom: int) -> np.ndarray:
@@ -31,14 +31,28 @@ def test_preview_pipeline_builds_layered_sample(tmp_path: Path) -> None:
     )
 
     assert len(result.layers) >= 2
-    assert all((tmp_path / f"layer-{index:02d}-mask.png").is_file() for index in range(1, len(result.layers) + 1))
-    assert all((tmp_path / f"layer-{index:02d}-proposal-mask.png").is_file() for index in range(1, len(result.layers) + 1))
-    assert all((tmp_path / f"layer-{index:02d}-cutout.png").is_file() for index in range(1, len(result.layers) + 1))
-    assert all(not layer.confirmed and layer.refinementState == "rough" for layer in result.layers)
+    assert all(
+        (tmp_path / f"layer-{index:02d}-mask.png").is_file()
+        for index in range(1, len(result.layers) + 1)
+    )
+    assert all(
+        (tmp_path / f"layer-{index:02d}-proposal-mask.png").is_file()
+        for index in range(1, len(result.layers) + 1)
+    )
+    assert all(
+        (tmp_path / f"layer-{index:02d}-cutout.png").is_file()
+        for index in range(1, len(result.layers) + 1)
+    )
+    assert all(
+        not layer.confirmed and layer.refinementState == "rough"
+        for layer in result.layers
+    )
     assert progress == [(12, "Segmenting objects"), (64, "Building layers")]
 
 
-def test_joined_mask_and_preview_inpaint_preserve_unmasked_pixels(tmp_path: Path) -> None:
+def test_joined_mask_and_preview_inpaint_preserve_unmasked_pixels(
+    tmp_path: Path,
+) -> None:
     image = pipeline.create_sample_image()
     image.save(tmp_path / "source.png")
     project = pipeline.PreviewPipeline().analyze(image, tmp_path, "project-id")
@@ -78,25 +92,36 @@ def test_layer_mask_merge_round_trips_with_undo_and_redo(tmp_path: Path) -> None
     image.save(tmp_path / "source.png")
     project = pipeline.PreviewPipeline().analyze(image, tmp_path, "project-id")
     selected = project.layers[:2]
-    expected = np.maximum.reduce([
-        np.asarray(Image.open(tmp_path / Path(layer.maskUrl).name).convert("L"), dtype=np.uint8)
-        for layer in selected
-    ])
+    expected = np.maximum.reduce(
+        [
+            np.asarray(
+                Image.open(tmp_path / Path(layer.maskUrl).name).convert("L"),
+                dtype=np.uint8,
+            )
+            for layer in selected
+        ]
+    )
 
-    merged = pipeline.merge_layer_masks(project, tmp_path, [layer.id for layer in selected])
+    merged = pipeline.merge_layer_masks(
+        project, tmp_path, [layer.id for layer in selected]
+    )
     assert len(merged.layers) == len(project.layers) - 1
     assert merged.layers[0].id == selected[0].id
     assert merged.layers[0].name == "Merged (2 objects)"
     assert merged.layers[0].confirmed is False
     assert np.array_equal(
-        np.asarray(Image.open(tmp_path / Path(merged.layers[0].maskUrl).name).convert("L")),
+        np.asarray(
+            Image.open(tmp_path / Path(merged.layers[0].maskUrl).name).convert("L")
+        ),
         expected,
     )
     assert pipeline.layer_merge_history(merged, tmp_path)[0].canUndo
 
     undone = pipeline.restore_layer_merge_history(merged, tmp_path, "undo")
     assert len(undone.layers) == len(project.layers)
-    assert all((tmp_path / Path(layer.maskUrl).name).is_file() for layer in undone.layers)
+    assert all(
+        (tmp_path / Path(layer.maskUrl).name).is_file() for layer in undone.layers
+    )
     assert pipeline.layer_merge_history(undone, tmp_path)[0].canRedo
 
     redone = pipeline.restore_layer_merge_history(undone, tmp_path, "redo")
@@ -118,19 +143,26 @@ def test_inpaint_input_erases_every_masked_source_pixel() -> None:
     )
 
 
-def test_production_analysis_keeps_rough_sam_masks_without_running_inspyrenet(monkeypatch, tmp_path: Path) -> None:
+def test_production_analysis_keeps_rough_sam_masks_without_running_inspyrenet(
+    monkeypatch, tmp_path: Path
+) -> None:
     rejected = proposal(5, 5, 35, 35)
     accepted = proposal(55, 55, 90, 90)
 
     monkeypatch.setattr(
         pipeline,
         "grounded_sam_instances",
-        lambda _image, _density="balanced", _labels=None: ([
-            InstanceMask("person", 0.9, rejected),
-            InstanceMask("person", 0.8, accepted),
-        ], {"groundingDino": 100, "sam2": 200}),
+        lambda _image, _density="balanced", _labels=None: (
+            [
+                InstanceMask("person", 0.9, rejected),
+                InstanceMask("person", 0.8, accepted),
+            ],
+            {"groundingDino": 100, "sam2": 200},
+        ),
     )
-    monkeypatch.setattr(pipeline, "estimate_near_map", lambda _image: (np.full((100, 100), 0.6), 300))
+    monkeypatch.setattr(
+        pipeline, "estimate_near_map", lambda _image: (np.full((100, 100), 0.6), 300)
+    )
     monkeypatch.setattr(pipeline, "foreground_depth_plane", lambda _depth, _masks: None)
 
     matte = pytest.fail
@@ -146,11 +178,16 @@ def test_production_analysis_keeps_rough_sam_masks_without_running_inspyrenet(mo
     assert (tmp_path / "layer-01-mask.png").is_file()
     assert result.layers[0].name == "Person 01"
     assert result.layers[1].name == "Person 02"
-    assert all(layer.refinementState == "rough" and not layer.confirmed for layer in result.layers)
+    assert all(
+        layer.refinementState == "rough" and not layer.confirmed
+        for layer in result.layers
+    )
     assert result.vramPeaksMb["depthAnything3"] == 300
 
 
-def test_production_analysis_forwards_segmentation_options(monkeypatch, tmp_path: Path) -> None:
+def test_production_analysis_forwards_segmentation_options(
+    monkeypatch, tmp_path: Path
+) -> None:
     seen: dict[str, object] = {}
     mask = proposal(10, 10, 50, 50)
 
@@ -160,7 +197,9 @@ def test_production_analysis_forwards_segmentation_options(monkeypatch, tmp_path
 
     monkeypatch.setattr(pipeline, "grounded_sam_instances", fake_instances)
     monkeypatch.setattr(pipeline, "propose_object_vocabulary", pytest.fail)
-    monkeypatch.setattr(pipeline, "estimate_near_map", lambda _image: (np.full((100, 100), 0.6), 300))
+    monkeypatch.setattr(
+        pipeline, "estimate_near_map", lambda _image: (np.full((100, 100), 0.6), 300)
+    )
     monkeypatch.setattr(pipeline, "foreground_depth_plane", lambda _depth, _masks: None)
 
     pipeline.ProductionPipeline().analyze(
@@ -175,7 +214,9 @@ def test_production_analysis_forwards_segmentation_options(monkeypatch, tmp_path
     assert seen == {"density": "dense", "labels": "person, keyboard"}
 
 
-def test_production_analysis_uses_vlm_vocabulary_before_detection(monkeypatch, tmp_path: Path) -> None:
+def test_production_analysis_uses_vlm_vocabulary_before_detection(
+    monkeypatch, tmp_path: Path
+) -> None:
     seen: list[str] = []
     mask = proposal(10, 10, 50, 50)
 
@@ -189,7 +230,9 @@ def test_production_analysis_uses_vlm_vocabulary_before_detection(monkeypatch, t
 
     monkeypatch.setattr(pipeline, "propose_object_vocabulary", fake_proposer)
     monkeypatch.setattr(pipeline, "grounded_sam_instances", fake_instances)
-    monkeypatch.setattr(pipeline, "estimate_near_map", lambda _image: (np.full((100, 100), 0.6), 300))
+    monkeypatch.setattr(
+        pipeline, "estimate_near_map", lambda _image: (np.full((100, 100), 0.6), 300)
+    )
     monkeypatch.setattr(pipeline, "foreground_depth_plane", lambda _depth, _masks: None)
 
     result = pipeline.ProductionPipeline().analyze(
@@ -204,28 +247,41 @@ def test_production_analysis_uses_vlm_vocabulary_before_detection(monkeypatch, t
     assert result.vramPeaksMb["qwen3VlVocabulary"] == 321
 
 
-def test_production_refine_keeps_runtime_matting_failures_explicit(monkeypatch, tmp_path: Path) -> None:
+def test_production_refine_keeps_runtime_matting_failures_explicit(
+    monkeypatch, tmp_path: Path
+) -> None:
     mask = proposal(10, 10, 50, 50)
     monkeypatch.setattr(
         pipeline,
         "grounded_sam_instances",
-        lambda _image, _density="balanced", _labels=None: ([InstanceMask("person", 0.9, mask)], {}),
+        lambda _image, _density="balanced", _labels=None: (
+            [InstanceMask("person", 0.9, mask)],
+            {},
+        ),
     )
-    monkeypatch.setattr(pipeline, "estimate_near_map", lambda _image: (np.full((100, 100), 0.6), 300))
+    monkeypatch.setattr(
+        pipeline, "estimate_near_map", lambda _image: (np.full((100, 100), 0.6), 300)
+    )
     monkeypatch.setattr(pipeline, "foreground_depth_plane", lambda _depth, _masks: None)
-    project = pipeline.ProductionPipeline().analyze(Image.new("RGB", (100, 100), "white"), tmp_path, "project-id")
+    project = pipeline.ProductionPipeline().analyze(
+        Image.new("RGB", (100, 100), "white"), tmp_path, "project-id"
+    )
     Image.new("RGB", (100, 100), "white").save(tmp_path / "source.png")
     monkeypatch.setattr(
         pipeline,
         "_matte_mask",
-        lambda _image, _mask: (_ for _ in ()).throw(pipeline.PipelineError("InSPyReNet runtime failed")),
+        lambda _image, _mask: (_ for _ in ()).throw(
+            pipeline.PipelineError("InSPyReNet runtime failed")
+        ),
     )
 
     with pytest.raises(pipeline.PipelineError, match="InSPyReNet runtime failed"):
         pipeline.ProductionPipeline().refine(project, tmp_path, project.layers[0].id)
 
 
-def test_production_refine_updates_only_the_requested_layer(monkeypatch, tmp_path: Path) -> None:
+def test_production_refine_updates_only_the_requested_layer(
+    monkeypatch, tmp_path: Path
+) -> None:
     first = proposal(10, 10, 40, 40)
     second = proposal(60, 60, 90, 90)
     image = Image.new("RGB", (100, 100), "white")
@@ -233,16 +289,23 @@ def test_production_refine_updates_only_the_requested_layer(monkeypatch, tmp_pat
     monkeypatch.setattr(
         pipeline,
         "grounded_sam_instances",
-        lambda _image, _density="balanced", _labels=None: ([InstanceMask("person", 0.9, first), InstanceMask("person", 0.8, second)], {}),
+        lambda _image, _density="balanced", _labels=None: (
+            [InstanceMask("person", 0.9, first), InstanceMask("person", 0.8, second)],
+            {},
+        ),
     )
-    monkeypatch.setattr(pipeline, "estimate_near_map", lambda _image: (np.full((100, 100), 0.6), 300))
+    monkeypatch.setattr(
+        pipeline, "estimate_near_map", lambda _image: (np.full((100, 100), 0.6), 300)
+    )
     monkeypatch.setattr(pipeline, "foreground_depth_plane", lambda _depth, _masks: None)
     project = pipeline.ProductionPipeline().analyze(image, tmp_path, "project-id")
     second_before = (tmp_path / "layer-02-mask.png").read_bytes()
     refined = proposal(5, 5, 45, 45)
     monkeypatch.setattr(pipeline, "_matte_mask", lambda _image, _mask: refined)
 
-    result = pipeline.ProductionPipeline().refine(project, tmp_path, project.layers[0].id)
+    result = pipeline.ProductionPipeline().refine(
+        project, tmp_path, project.layers[0].id
+    )
 
     assert result.layers[0].refinementState == "refined"
     assert result.layers[0].confirmed is False
@@ -251,7 +314,9 @@ def test_production_refine_updates_only_the_requested_layer(monkeypatch, tmp_pat
     assert (tmp_path / "layer-02-mask.png").read_bytes() == second_before
 
 
-def test_production_refine_supports_depth_plane_layers(monkeypatch, tmp_path: Path) -> None:
+def test_production_refine_supports_depth_plane_layers(
+    monkeypatch, tmp_path: Path
+) -> None:
     person = proposal(35, 20, 65, 80)
     depth_plane = proposal(5, 60, 95, 95)
     image = Image.new("RGB", (100, 100), "white")
@@ -259,10 +324,17 @@ def test_production_refine_supports_depth_plane_layers(monkeypatch, tmp_path: Pa
     monkeypatch.setattr(
         pipeline,
         "grounded_sam_instances",
-        lambda _image, _density="balanced", _labels=None: ([InstanceMask("person", 0.9, person)], {}),
+        lambda _image, _density="balanced", _labels=None: (
+            [InstanceMask("person", 0.9, person)],
+            {},
+        ),
     )
-    monkeypatch.setattr(pipeline, "estimate_near_map", lambda _image: (np.full((100, 100), 0.6), 300))
-    monkeypatch.setattr(pipeline, "foreground_depth_plane", lambda _depth, _masks: depth_plane)
+    monkeypatch.setattr(
+        pipeline, "estimate_near_map", lambda _image: (np.full((100, 100), 0.6), 300)
+    )
+    monkeypatch.setattr(
+        pipeline, "foreground_depth_plane", lambda _depth, _masks: depth_plane
+    )
     project = pipeline.ProductionPipeline().analyze(image, tmp_path, "project-id")
     target = next(layer for layer in project.layers if layer.kind == "depth-plane")
     guided = proposal(8, 62, 92, 93)
@@ -275,49 +347,77 @@ def test_production_refine_supports_depth_plane_layers(monkeypatch, tmp_path: Pa
     assert refined.refinementState == "refined"
     assert refined.confirmed is False
     assert refined.maskRevision == 1
-    assert np.array_equal(np.asarray(Image.open(tmp_path / Path(refined.maskUrl).name)), guided)
+    assert np.array_equal(
+        np.asarray(Image.open(tmp_path / Path(refined.maskUrl).name)), guided
+    )
 
 
-def test_refine_uses_stable_edited_proposal_after_previous_refinement(monkeypatch, tmp_path: Path) -> None:
+def test_refine_uses_stable_edited_proposal_after_previous_refinement(
+    monkeypatch, tmp_path: Path
+) -> None:
     image = Image.new("RGB", (100, 100), "white")
     image.save(tmp_path / "source.png")
     rough = proposal(20, 20, 70, 80)
     monkeypatch.setattr(
         pipeline,
         "grounded_sam_instances",
-        lambda _image, _density="balanced", _labels=None: ([InstanceMask("person", 0.9, rough)], {}),
+        lambda _image, _density="balanced", _labels=None: (
+            [InstanceMask("person", 0.9, rough)],
+            {},
+        ),
     )
-    monkeypatch.setattr(pipeline, "estimate_near_map", lambda _image: (np.full((100, 100), 0.6), 300))
+    monkeypatch.setattr(
+        pipeline, "estimate_near_map", lambda _image: (np.full((100, 100), 0.6), 300)
+    )
     monkeypatch.setattr(pipeline, "foreground_depth_plane", lambda _depth, _masks: None)
     project = pipeline.ProductionPipeline().analyze(image, tmp_path, "project-id")
     edited = proposal(10, 10, 85, 90)
-    project = pipeline.replace_layer_mask(project, tmp_path, project.layers[0].id, Image.fromarray(edited))
+    project = pipeline.replace_layer_mask(
+        project, tmp_path, project.layers[0].id, Image.fromarray(edited)
+    )
     seen: list[np.ndarray] = []
     refined = proposal(15, 15, 80, 85)
-    monkeypatch.setattr(pipeline, "_matte_mask", lambda _image, mask: (seen.append(mask.copy()) or refined))
+    monkeypatch.setattr(
+        pipeline,
+        "_matte_mask",
+        lambda _image, mask: (seen.append(mask.copy()) or refined),
+    )
 
     pipeline.ProductionPipeline().refine(project, tmp_path, project.layers[0].id)
 
     assert np.array_equal(seen[0], edited)
 
 
-def test_refine_backfills_a_missing_proposal_for_legacy_projects(monkeypatch, tmp_path: Path) -> None:
+def test_refine_backfills_a_missing_proposal_for_legacy_projects(
+    monkeypatch, tmp_path: Path
+) -> None:
     image = Image.new("RGB", (100, 100), "white")
     image.save(tmp_path / "source.png")
     rough = proposal(20, 20, 70, 80)
     monkeypatch.setattr(
         pipeline,
         "grounded_sam_instances",
-        lambda _image, _density="balanced", _labels=None: ([InstanceMask("person", 0.9, rough)], {}),
+        lambda _image, _density="balanced", _labels=None: (
+            [InstanceMask("person", 0.9, rough)],
+            {},
+        ),
     )
-    monkeypatch.setattr(pipeline, "estimate_near_map", lambda _image: (np.full((100, 100), 0.6), 300))
+    monkeypatch.setattr(
+        pipeline, "estimate_near_map", lambda _image: (np.full((100, 100), 0.6), 300)
+    )
     monkeypatch.setattr(pipeline, "foreground_depth_plane", lambda _depth, _masks: None)
     project = pipeline.ProductionPipeline().analyze(image, tmp_path, "project-id")
-    legacy = project.model_copy(update={
-        "layers": [project.layers[0].model_copy(update={"proposalMaskUrl": None})]
-    })
+    legacy = project.model_copy(
+        update={
+            "layers": [project.layers[0].model_copy(update={"proposalMaskUrl": None})]
+        }
+    )
     seen: list[np.ndarray] = []
-    monkeypatch.setattr(pipeline, "_matte_mask", lambda _image, mask: (seen.append(mask.copy()) or rough))
+    monkeypatch.setattr(
+        pipeline,
+        "_matte_mask",
+        lambda _image, mask: (seen.append(mask.copy()) or rough),
+    )
 
     result = pipeline.ProductionPipeline().refine(legacy, tmp_path, legacy.layers[0].id)
 
@@ -342,16 +442,26 @@ def test_mask_refine_history_round_trips_layer_mask_and_state(tmp_path: Path) ->
         Image.fromarray(changed),
         update_proposal=False,
         clear_history=False,
-    ).model_copy(update={"layers": [layer.model_copy(update={"refinementState": "refined"})]})
+    ).model_copy(
+        update={"layers": [layer.model_copy(update={"refinementState": "refined"})]}
+    )
 
     undone = pipeline.restore_mask_history(updated, tmp_path, layer.id, "undo")
     undone_layer = undone.layers[0]
-    assert np.array_equal(np.asarray(Image.open(tmp_path / Path(undone_layer.maskUrl).name).convert("L")), original)
+    assert np.array_equal(
+        np.asarray(Image.open(tmp_path / Path(undone_layer.maskUrl).name).convert("L")),
+        original,
+    )
     assert undone_layer.refinementState == "rough"
     assert undone_layer.confirmed is False
 
     redone = pipeline.restore_mask_history(undone, tmp_path, layer.id, "redo")
-    assert np.array_equal(np.asarray(Image.open(tmp_path / Path(redone.layers[0].maskUrl).name).convert("L")), changed)
+    assert np.array_equal(
+        np.asarray(
+            Image.open(tmp_path / Path(redone.layers[0].maskUrl).name).convert("L")
+        ),
+        changed,
+    )
     assert redone.layers[0].refinementState == "refined"
 
 
@@ -417,7 +527,9 @@ def test_matting_keeps_saliency_inside_the_edited_mask_guidance(monkeypatch) -> 
     assert np.count_nonzero((matte > 0) & (mask == 0)) == 0
 
 
-def test_matting_falls_back_to_the_edited_mask_when_saliency_collapses(monkeypatch) -> None:
+def test_matting_falls_back_to_the_edited_mask_when_saliency_collapses(
+    monkeypatch,
+) -> None:
     class TinySaliency:
         def process(self, crop: Image.Image, type: str) -> Image.Image:
             assert type == "map"
@@ -456,15 +568,29 @@ def test_depth_plane_excludes_semantic_instance() -> None:
     assert np.count_nonzero(plane) > 100
 
 
-def test_powerpaint_mode_generates_local_prompt_and_records_provider(monkeypatch, tmp_path: Path) -> None:
+def test_powerpaint_mode_generates_local_prompt_and_records_provider(
+    monkeypatch, tmp_path: Path
+) -> None:
     image = pipeline.create_sample_image()
     image.save(tmp_path / "source.png")
     project = pipeline.PreviewPipeline().analyze(image, tmp_path, "project-id")
     selected = [project.layers[0].id]
     project = pipeline.confirm_layer_mask(project, selected[0])
-    monkeypatch.setattr(pipeline, "generate_background_prompt", lambda _image: ("weathered stone wall", 321))
+    monkeypatch.setattr(
+        pipeline,
+        "generate_background_prompt",
+        lambda _image: ("weathered stone wall", 321),
+    )
 
-    def fake_powerpaint(source: Path, mask: Path, output: Path, prompt: str, progress=None, cancelled=None, steps=25) -> int:
+    def fake_powerpaint(
+        source: Path,
+        mask: Path,
+        output: Path,
+        prompt: str,
+        progress=None,
+        cancelled=None,
+        steps=25,
+    ) -> int:
         assert steps == 12
         assert source == tmp_path / "inpaint-input.png"
         assert mask == tmp_path / "union-mask.png"
@@ -483,7 +609,9 @@ def test_powerpaint_mode_generates_local_prompt_and_records_provider(monkeypatch
         selected,
         refinement="powerpaint",
         steps=12,
-        progress=lambda percent, stage, _message: progress_events.append((percent, stage)),
+        progress=lambda percent, stage, _message: progress_events.append(
+            (percent, stage)
+        ),
     )
 
     assert result.inpaintProvider == "powerpaint"
@@ -495,7 +623,9 @@ def test_powerpaint_mode_generates_local_prompt_and_records_provider(monkeypatch
     assert (92, "Redrawing background") in progress_events
 
 
-def test_target_inpaint_writes_only_to_the_selected_scene_layer(monkeypatch, tmp_path: Path) -> None:
+def test_target_inpaint_writes_only_to_the_selected_scene_layer(
+    monkeypatch, tmp_path: Path
+) -> None:
     image = pipeline.create_sample_image()
     image.save(tmp_path / "source.png")
     project = pipeline.PreviewPipeline().analyze(image, tmp_path, "project-id")
@@ -506,7 +636,15 @@ def test_target_inpaint_writes_only_to_the_selected_scene_layer(monkeypatch, tmp
     mask = Image.new("L", image.size)
     mask.paste(255, (5, 5, 35, 35))
 
-    def fake_powerpaint(source: Path, received_mask: Path, output: Path, prompt: str, progress=None, cancelled=None, steps=25) -> int:
+    def fake_powerpaint(
+        source: Path,
+        received_mask: Path,
+        output: Path,
+        prompt: str,
+        progress=None,
+        cancelled=None,
+        steps=25,
+    ) -> int:
         assert steps == 25
         assert np.array_equal(np.asarray(Image.open(source)), np.asarray(composition))
         assert np.array_equal(np.asarray(Image.open(received_mask)), np.asarray(mask))
@@ -517,7 +655,9 @@ def test_target_inpaint_writes_only_to_the_selected_scene_layer(monkeypatch, tmp
         return 612
 
     monkeypatch.setattr(pipeline, "powerpaint_inpaint", fake_powerpaint)
-    background_before = np.asarray(Image.open(tmp_path / "background.png").convert("RGB")).copy()
+    background_before = np.asarray(
+        Image.open(tmp_path / "background.png").convert("RGB")
+    ).copy()
     updated_background = pipeline.ProductionPipeline().inpaint_target(
         project,
         tmp_path,
@@ -526,12 +666,17 @@ def test_target_inpaint_writes_only_to_the_selected_scene_layer(monkeypatch, tmp
         mask,
         prompt="replace selected pixels",
     )
-    background_after = np.asarray(Image.open(tmp_path / "background.png").convert("RGB"))
+    background_after = np.asarray(
+        Image.open(tmp_path / "background.png").convert("RGB")
+    )
 
     assert updated_background.inpaintProvider == "powerpaint"
     assert tuple(background_after[10, 10]) == (0, 0, 255)
     assert np.array_equal(background_after[50, 50], background_before[50, 50])
-    background_history = {state.targetId: state for state in pipeline.inpaint_history(updated_background, tmp_path)}
+    background_history = {
+        state.targetId: state
+        for state in pipeline.inpaint_history(updated_background, tmp_path)
+    }
     assert background_history["background"].canUndo is True
     assert background_history["background"].canRedo is False
 
@@ -540,11 +685,16 @@ def test_target_inpaint_writes_only_to_the_selected_scene_layer(monkeypatch, tmp
         np.asarray(Image.open(tmp_path / "background.png").convert("RGB")),
         background_before,
     )
-    background_history = {state.targetId: state for state in pipeline.inpaint_history(updated_background, tmp_path)}
+    background_history = {
+        state.targetId: state
+        for state in pipeline.inpaint_history(updated_background, tmp_path)
+    }
     assert background_history["background"].canUndo is False
     assert background_history["background"].canRedo is True
     pipeline.restore_inpaint_history(updated_background, tmp_path, "background", "redo")
-    assert tuple(Image.open(tmp_path / "background.png").convert("RGB").getpixel((10, 10))) == (0, 0, 255)
+    assert tuple(
+        Image.open(tmp_path / "background.png").convert("RGB").getpixel((10, 10))
+    ) == (0, 0, 255)
 
     target = updated_background.layers[0]
     target_path = tmp_path / Path(target.cutoutUrl).name
@@ -566,7 +716,10 @@ def test_target_inpaint_writes_only_to_the_selected_scene_layer(monkeypatch, tmp
 
     assert updated_layer.vramPeaksMb["powerpaint"] == 612
     assert cutout.getpixel((10, 10)) == (0, 0, 255, 255)
-    layer_history = {state.targetId: state for state in pipeline.inpaint_history(updated_layer, tmp_path)}
+    layer_history = {
+        state.targetId: state
+        for state in pipeline.inpaint_history(updated_layer, tmp_path)
+    }
     assert layer_history[target.id].canUndo is True
     assert layer_history[target.id].canRedo is False
     pipeline.restore_inpaint_history(updated_layer, tmp_path, target.id, "undo")
@@ -577,11 +730,14 @@ def test_target_inpaint_writes_only_to_the_selected_scene_layer(monkeypatch, tmp
         (tmp_path / Path(layer.cutoutUrl).name).read_bytes() == other_cutouts[layer.id]
         for layer in updated_layer.layers[1:]
     )
-    assert not any((tmp_path / name).exists() for name in (
-        ".layer-inpaint-composition.png",
-        ".layer-inpaint-mask.png",
-        ".layer-inpaint-result.png",
-    ))
+    assert not any(
+        (tmp_path / name).exists()
+        for name in (
+            ".layer-inpaint-composition.png",
+            ".layer-inpaint-mask.png",
+            ".layer-inpaint-result.png",
+        )
+    )
 
 
 def test_guided_refine_pulls_a_rough_brush_onto_real_edges(tmp_path: Path) -> None:
@@ -592,8 +748,12 @@ def test_guided_refine_pulls_a_rough_brush_onto_real_edges(tmp_path: Path) -> No
     image.save(tmp_path / "source.png")
     project = pipeline.PreviewPipeline().analyze(image, tmp_path, "project-id")
     # Refinement can only find edges that exist, so the target is a real object.
-    layer = next(candidate for candidate in project.layers if candidate.kind == "instance")
-    truth = np.asarray(Image.open(tmp_path / Path(layer.maskUrl).name).convert("L"), dtype=np.uint8)
+    layer = next(
+        candidate for candidate in project.layers if candidate.kind == "instance"
+    )
+    truth = np.asarray(
+        Image.open(tmp_path / Path(layer.maskUrl).name).convert("L"), dtype=np.uint8
+    )
     reference = truth > 8
 
     slop = 24
@@ -647,12 +807,16 @@ def test_download_with_resume_discards_a_partial_that_fails_its_checksum(
 ) -> None:
     target = tmp_path / "model.pt"
     monkeypatch.setattr(
-        pipeline.urllib.request, "urlopen", lambda request, timeout=0: _StubResponse(b"corrupted")
+        pipeline.urllib.request,
+        "urlopen",
+        lambda request, timeout=0: _StubResponse(b"corrupted"),
     )
 
     with pytest.raises(pipeline.PipelineError):
         pipeline._download_with_resume(
-            "https://example.invalid/model.pt", target, hashlib.md5(b"expected").hexdigest()
+            "https://example.invalid/model.pt",
+            target,
+            hashlib.md5(b"expected").hexdigest(),
         )
 
     # A surviving full-length .part would make every later attempt request a
@@ -675,7 +839,11 @@ def test_download_with_resume_restarts_when_a_stale_partial_is_rejected(
         ranges.append(requested)
         if requested:
             raise urllib.error.HTTPError(
-                "https://example.invalid/model.pt", 416, "Range Not Satisfiable", {}, None
+                "https://example.invalid/model.pt",
+                416,
+                "Range Not Satisfiable",
+                {},
+                None,
             )
         return _StubResponse(payload)
 

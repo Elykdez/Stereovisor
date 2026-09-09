@@ -14,6 +14,6 @@ $ElectronExecutable = Join-Path $ProjectRoot "node_modules\electron\dist\electro
 if (-not (Test-Path -LiteralPath $NodeModulesLock) -or -not (Test-Path -LiteralPath $ElectronExecutable)) {
     npm install --prefix $ProjectRoot
 }
-& (Join-Path $PSScriptRoot "install-electron.ps1")
+& (Join-Path $ProjectRoot "client\scripts\install-electron.ps1")
 
 Write-Host "Core environment ready. Run: npm run dev"

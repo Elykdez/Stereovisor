@@ -3,10 +3,9 @@ from pathlib import Path
 
 from PIL import Image
 
-from service.config import snapshot_ready
+from service.src.config import snapshot_ready
 
-
-RUNNER_PATH = Path(__file__).resolve().parents[2] / "scripts" / "powerpaint-runner.py"
+RUNNER_PATH = Path(__file__).resolve().parents[1] / "scripts" / "powerpaint-runner.py"
 SPEC = importlib.util.spec_from_file_location("powerpaint_runner", RUNNER_PATH)
 assert SPEC and SPEC.loader
 RUNNER = importlib.util.module_from_spec(SPEC)

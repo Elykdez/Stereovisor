@@ -5,6 +5,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
+$ServicePort = if ($env:STEREOVISOR_SERVICE_PORT) { $env:STEREOVISOR_SERVICE_PORT } else { "5772" }
 $CorePythonPath = Join-Path $ProjectRoot ".venv\Scripts\python.exe"
 $AiPythonPath = Join-Path $ProjectRoot ".venv-ai\Scripts\python.exe"
 $PythonPath = if ($Preview) { $CorePythonPath } else { $AiPythonPath }
@@ -81,7 +82,7 @@ try {
     }
     # Without this the run would connect to whatever already answers on these
     # ports and report on a service it never started.
-    $BusyPorts = @(5173, 5179) | Where-Object {
+    $BusyPorts = @(5173, [int]$ServicePort) | Where-Object {
         Get-NetTCPConnection -State Listen -LocalPort $_ -ErrorAction SilentlyContinue
     }
     if ($BusyPorts.Count -gt 0) {
@@ -97,7 +98,7 @@ try {
     $env:VITE_DEV_SERVER_URL = "http://127.0.0.1:5173"
 
     $ServiceProcess = Start-Process -FilePath $PythonPath `
-        -ArgumentList @((Join-Path $ProjectRoot "scripts\run-service.py")) `
+        -ArgumentList @((Join-Path $ProjectRoot "service\scripts\run-service.py")) `
         -WorkingDirectory $ProjectRoot `
         -WindowStyle Hidden `
         -PassThru
@@ -107,7 +108,7 @@ try {
         -WindowStyle Hidden `
         -PassThru
 
-    $health = Wait-Http -Uri "http://127.0.0.1:5179/api/health"
+    $health = Wait-Http -Uri "http://127.0.0.1:$($ServicePort)/api/health"
     $renderer = Wait-Http -Uri "http://127.0.0.1:5173/"
     $ExpectedEngine = if ($Preview) { "preview" } else { "ai" }
     if ($health.localOnly -ne $true -or $health.activeEngine -ne $ExpectedEngine) {
@@ -129,12 +130,12 @@ try {
         # endpoint reports the progress the startup gate renders.
         $env:STEREOVISOR_BOOTSTRAP_STATUS = Join-Path $ModelsRoot ".stereovisor-bootstrap-status"
         $env:STEREOVISOR_BOOTSTRAP_COMPLETED = ""
-        . (Join-Path $PSScriptRoot "bootstrap-status.ps1")
+        . (Join-Path $ProjectRoot "service\scripts\bootstrap-status.ps1")
         New-Item -ItemType File -Force -Path (Join-Path $ModelsRoot ".stereovisor-bootstrap-running") | Out-Null
         Complete-BootstrapProvider -Provider "runtime"
         Publish-BootstrapStatus -State "downloading" -Detail "Downloading depth model (42%)." -Provider "depth" -Progress 42
 
-        $preparing = Invoke-RestMethod -Uri "http://127.0.0.1:5179/api/health" -TimeoutSec 5
+        $preparing = Invoke-RestMethod -Uri "http://127.0.0.1:$($ServicePort)/api/health" -TimeoutSec 5
         $ProviderState = { param($name) $preparing.providers.PSObject.Properties[$name].Value }
         if ($preparing.startupState -ne "downloading" -or $preparing.startupProgress -ne 42) {
             throw "The first-launch health endpoint did not report the active download."
@@ -148,7 +149,7 @@ try {
 
         Remove-Item -LiteralPath (Join-Path $ModelsRoot ".stereovisor-bootstrap-running") -Force
         Remove-Item -LiteralPath $env:STEREOVISOR_BOOTSTRAP_STATUS -Force
-        $stopped = Invoke-RestMethod -Uri "http://127.0.0.1:5179/api/health" -TimeoutSec 5
+        $stopped = Invoke-RestMethod -Uri "http://127.0.0.1:$($ServicePort)/api/health" -TimeoutSec 5
         if ($stopped.startupState -ne "blocked") {
             throw "The health endpoint kept a transient startup state after preparation stopped."
         }
@@ -163,7 +164,10 @@ try {
         -ArgumentList @(".", "--user-data-dir=$UserDataRoot") `
         -WorkingDirectory $ProjectRoot `
         -PassThru
-    for ($attempt = 0; $attempt -lt 40; $attempt++) {
+    # A cold Electron start takes several seconds on an idle machine and
+    # noticeably longer on a loaded one, so this budget is generous on purpose:
+    # a slow window is not the failure this test exists to catch.
+    for ($attempt = 0; $attempt -lt 120; $attempt++) {
         $window = Get-Process -Id $ElectronProcess.Id -ErrorAction SilentlyContinue
         if ($window -and $window.MainWindowTitle -eq "Stereovisor") { break }
         if ($ElectronProcess.HasExited) { throw "Electron exited during the isolated smoke test." }
@@ -175,7 +179,20 @@ try {
     }
 
     if ($Preview) {
-        $sample = Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:5179/api/sample" -TimeoutSec 10
+        $started = Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:$($ServicePort)/api/jobs/sample" -TimeoutSec 10
+        $job = $null
+        for ($attempt = 0; $attempt -lt 120; $attempt++) {
+            $job = Invoke-RestMethod -Uri "http://127.0.0.1:$($ServicePort)/api/jobs/$($started.jobId)" -TimeoutSec 5
+            if ($job.state -eq "completed") { break }
+            if ($job.state -in @("failed", "cancelled")) {
+                throw "The isolated sample workflow ended in state '$($job.state)': $($job.message)"
+            }
+            Start-Sleep -Milliseconds 250
+        }
+        if (-not $job -or $job.state -ne "completed") {
+            throw "The isolated sample workflow did not finish within 30 seconds."
+        }
+        $sample = $job.result
         if (-not $sample.id -or @($sample.layers).Count -lt 2) {
             throw "The isolated sample workflow did not create a layered project."
         }
@@ -196,7 +213,22 @@ finally {
         }
     }
     if (-not $KeepWorkspace -and (Test-Path -LiteralPath $SmokeRoot)) {
-        Remove-Item -LiteralPath $SmokeRoot -Recurse -Force
+        # Electron keeps its cache files open for a moment after its process
+        # tree exits, so the first delete can fail with "access denied". Retry
+        # briefly, then warn: teardown must never turn a passing smoke test
+        # into a failing exit code.
+        for ($attempt = 0; $attempt -lt 12; $attempt++) {
+            try {
+                Remove-Item -LiteralPath $SmokeRoot -Recurse -Force -ErrorAction Stop
+                break
+            }
+            catch {
+                Start-Sleep -Milliseconds 500
+            }
+        }
+        if (Test-Path -LiteralPath $SmokeRoot) {
+            Write-Host "Smoke workspace could not be removed and was left at $SmokeRoot" -ForegroundColor DarkYellow
+        }
     }
     elseif (Test-Path -LiteralPath $SmokeRoot) {
         Write-Host "Smoke workspace retained at $SmokeRoot" -ForegroundColor Yellow

@@ -1,4 +1,4 @@
-from service.refinement import _parse_object_vocabulary
+from service.src.refinement import _parse_object_vocabulary
 
 
 def test_vlm_vocabulary_parser_accepts_json_and_removes_duplicates() -> None:

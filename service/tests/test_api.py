@@ -6,13 +6,12 @@ import pytest
 from fastapi.testclient import TestClient
 from PIL import Image, ImageDraw
 
-import service.app as service_module
-import service.pipeline as pipeline
-from service.app import app
-from service.config import BootstrapStatus
-from service.jobs import JobCancelled, ProcessingJobStore
-from service.storage import ProjectStore
-
+import service.src.app as service_module
+from service.src import pipeline
+from service.src.app import app
+from service.src.config import BootstrapStatus
+from service.src.jobs import JobCancelled, ProcessingJobStore
+from service.src.storage import ProjectStore
 
 client = TestClient(app)
 
@@ -23,6 +22,33 @@ def png_bytes(image: Image.Image) -> bytes:
     return output.getvalue()
 
 
+def _completed_job(response) -> dict:
+    assert response.status_code == 200
+    job_id = response.json()["jobId"]
+    assert service_module.job_queue.join(120)
+    return client.get(f"/api/jobs/{job_id}").json()
+
+
+def _completed_project(response) -> dict:
+    payload = _completed_job(response)
+    assert payload["state"] == "completed", payload["message"]
+    assert payload["result"] is not None
+    return payload["result"]
+
+
+def _sample_project() -> dict:
+    return _completed_project(client.post("/api/jobs/sample"))
+
+
+def _inpaint_project(project_id: str, layer_ids: list[str]) -> dict:
+    return _completed_project(
+        client.post(
+            f"/api/jobs/projects/{project_id}/inpaint",
+            json={"layerIds": layer_ids},
+        )
+    )
+
+
 def test_health_declares_local_engine() -> None:
     response = client.get("/api/health")
     payload = response.json()
@@ -30,18 +56,74 @@ def test_health_declares_local_engine() -> None:
     assert response.status_code == 200
     assert payload["localOnly"] is True
     assert payload["activeEngine"] in {"preview", "ai"}
-    assert payload["startupState"] in {"starting", "downloading", "initializing", "ready", "blocked"}
+    assert payload["startupState"] in {
+        "starting",
+        "downloading",
+        "initializing",
+        "ready",
+        "blocked",
+    }
     assert payload["startupProgress"] is None or 0 <= payload["startupProgress"] <= 100
     assert ": ." not in payload["message"]
 
 
+def test_remote_http_requires_the_configured_bearer_token(monkeypatch) -> None:
+    monkeypatch.setattr(service_module, "SERVICE_HOST", "0.0.0.0")
+    monkeypatch.setattr(
+        service_module, "SERVICE_AUTH_TOKEN", "correct-horse-battery-staple"
+    )
+
+    missing = client.get("/api/health")
+    wrong = client.get("/api/health", headers={"Authorization": "Bearer wrong-token"})
+    accepted = client.get(
+        "/api/health",
+        headers={"Authorization": "Bearer correct-horse-battery-staple"},
+    )
+
+    assert missing.status_code == 401
+    assert missing.json()["detail"]["code"] == "AUTH_REQUIRED"
+    assert missing.headers["www-authenticate"] == "Bearer"
+    assert wrong.status_code == 401
+    assert accepted.status_code == 200
+    assert accepted.json()["localOnly"] is False
+
+
+def test_remote_http_allows_browser_authorization_preflight(monkeypatch) -> None:
+    monkeypatch.setattr(service_module, "SERVICE_HOST", "0.0.0.0")
+    monkeypatch.setattr(
+        service_module, "SERVICE_AUTH_TOKEN", "correct-horse-battery-staple"
+    )
+
+    response = client.options(
+        "/api/health",
+        headers={
+            "Origin": "http://127.0.0.1:5173",
+            "Access-Control-Request-Method": "GET",
+            "Access-Control-Request-Headers": "authorization",
+        },
+    )
+
+    assert response.status_code == 200
+    assert "authorization" in response.headers["access-control-allow-headers"].lower()
+
+
 def _preparing_dependencies() -> dict[str, object]:
     return {
-        "runtime": service_module.ProviderStatus(available=False, detail="Missing local AI runtime packages: PyTorch"),
-        "segmentation": service_module.ProviderStatus(available=False, detail="Missing model assets"),
-        "matting": service_module.ProviderStatus(available=True, detail="InSPyReNet installed"),
-        "depth": service_module.ProviderStatus(available=False, detail="Missing model assets"),
-        "inpainting": service_module.ProviderStatus(available=False, detail="Missing model assets"),
+        "runtime": service_module.ProviderStatus(
+            available=False, detail="Missing local AI runtime packages: PyTorch"
+        ),
+        "segmentation": service_module.ProviderStatus(
+            available=False, detail="Missing model assets"
+        ),
+        "matting": service_module.ProviderStatus(
+            available=True, detail="InSPyReNet installed"
+        ),
+        "depth": service_module.ProviderStatus(
+            available=False, detail="Missing model assets"
+        ),
+        "inpainting": service_module.ProviderStatus(
+            available=False, detail="Missing model assets"
+        ),
         "prompting": service_module.ProviderStatus(available=False, detail="Optional"),
         "refinement": service_module.ProviderStatus(available=False, detail="Optional"),
     }
@@ -49,7 +131,7 @@ def _preparing_dependencies() -> dict[str, object]:
 
 def test_health_reports_active_bootstrap_provider_progress(monkeypatch) -> None:
     monkeypatch.setattr(service_module, "ai_dependencies", _preparing_dependencies)
-    monkeypatch.setattr(service_module, "active_engine", lambda: "preview")
+    monkeypatch.setattr(service_module, "active_engine", lambda _probe=None: "preview")
     monkeypatch.setattr(service_module, "runtime_device", lambda: "cuda")
     monkeypatch.setattr(
         service_module,
@@ -68,16 +150,20 @@ def test_health_reports_active_bootstrap_provider_progress(monkeypatch) -> None:
     assert payload["providers"]["matting"]["state"] == "ready"
 
 
-def test_health_reports_stages_the_running_bootstrap_already_finished(monkeypatch) -> None:
+def test_health_reports_stages_the_running_bootstrap_already_finished(
+    monkeypatch,
+) -> None:
     # The core-only service that answers during preparation cannot import the
     # AI packages, so a finished stage is only visible through the bootstrap.
     monkeypatch.setattr(service_module, "ai_dependencies", _preparing_dependencies)
-    monkeypatch.setattr(service_module, "active_engine", lambda: "preview")
+    monkeypatch.setattr(service_module, "active_engine", lambda _probe=None: "preview")
     monkeypatch.setattr(service_module, "runtime_device", lambda: "cuda")
     monkeypatch.setattr(
         service_module,
         "bootstrap_status",
-        lambda: BootstrapStatus("downloading", "Downloading DA3 (42%).", "depth", 42, ("runtime",)),
+        lambda: BootstrapStatus(
+            "downloading", "Downloading DA3 (42%).", "depth", 42, ("runtime",)
+        ),
     )
 
     payload = client.get("/api/health").json()
@@ -87,19 +173,37 @@ def test_health_reports_stages_the_running_bootstrap_already_finished(monkeypatc
     assert payload["providers"]["runtime"]["available"] is False
 
 
-def test_analyze_downsamples_oversized_source_preserving_aspect_ratio(monkeypatch) -> None:
+def test_upload_rejects_decompression_bomb_as_a_client_error(monkeypatch) -> None:
+    def raise_bomb(_stream):
+        raise Image.DecompressionBombError("image dimensions are unsafe")
+
+    monkeypatch.setattr(service_module.Image, "open", raise_bomb)
+    response = client.post(
+        "/api/jobs/analyze",
+        files={"file": ("scene.png", b"not-used", "image/png")},
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"]["code"] == "DECODE_FAILED"
+
+
+def test_analyze_downsamples_oversized_source_preserving_aspect_ratio(
+    monkeypatch,
+) -> None:
     monkeypatch.setenv("STEREOVISOR_MODE", "preview")
     # Reuse the structured preview fixture so the test reaches project storage
     # instead of being rejected for having no distinct color regions.
-    source = pipeline.create_sample_image().resize((4096, 1600), Image.Resampling.BICUBIC)
+    source = pipeline.create_sample_image().resize(
+        (4096, 1600), Image.Resampling.BICUBIC
+    )
 
     response = client.post(
-        "/api/analyze",
+        "/api/jobs/analyze",
         files={"file": ("wide.png", png_bytes(source), "image/png")},
     )
 
     assert response.status_code == 200
-    project = response.json()
+    project = _completed_project(response)
     assert (project["width"], project["height"]) == (3200, 1250)
     stored = client.get(project["sourceUrl"])
     assert stored.status_code == 200
@@ -109,23 +213,18 @@ def test_analyze_downsamples_oversized_source_preserving_aspect_ratio(monkeypatc
 
 def test_sample_to_inpaint_api_flow(monkeypatch) -> None:
     monkeypatch.setenv("STEREOVISOR_MODE", "preview")
-    response = client.post("/api/sample")
-    project = response.json()
+    project = _sample_project()
 
-    assert response.status_code == 200
     assert len(project["layers"]) >= 2
 
     layer_ids = [layer["id"] for layer in project["layers"][:2]]
     for layer_id in layer_ids:
-        confirmed = client.post(f"/api/projects/{project['id']}/layers/{layer_id}/confirm")
+        confirmed = client.post(
+            f"/api/projects/{project['id']}/layers/{layer_id}/confirm"
+        )
         assert confirmed.status_code == 200
-    inpainted = client.post(
-        f"/api/projects/{project['id']}/inpaint",
-        json={"layerIds": layer_ids},
-    )
-    result = inpainted.json()
+    result = _inpaint_project(project["id"], layer_ids)
 
-    assert inpainted.status_code == 200
     assert result["backgroundUrl"].endswith("background.png")
     asset_response = client.get(result["backgroundUrl"])
     assert asset_response.status_code == 200
@@ -133,16 +232,28 @@ def test_sample_to_inpaint_api_flow(monkeypatch) -> None:
 
 
 def test_analyze_job_waits_for_ai_readiness_before_enqueueing(monkeypatch) -> None:
-    monkeypatch.setattr(service_module, "active_engine", lambda: "ai")
-    monkeypatch.setattr(service_module, "production_available", lambda: False)
-    monkeypatch.setattr(service_module, "ai_dependencies", lambda: {
-        key: service_module.ProviderStatus(available=False, detail="starting")
-        for key in service_module.REQUIRED_PROVIDERS
-    })
+    monkeypatch.setattr(service_module, "active_engine", lambda _probe=None: "ai")
+    monkeypatch.setattr(
+        service_module, "production_available", lambda _probe=None: False
+    )
+    monkeypatch.setattr(
+        service_module,
+        "ai_dependencies",
+        lambda: {
+            key: service_module.ProviderStatus(available=False, detail="starting")
+            for key in service_module.REQUIRED_PROVIDERS
+        },
+    )
 
     response = client.post(
         "/api/jobs/analyze",
-        files={"file": ("scene.png", png_bytes(pipeline.create_sample_image()), "image/png")},
+        files={
+            "file": (
+                "scene.png",
+                png_bytes(pipeline.create_sample_image()),
+                "image/png",
+            )
+        },
     )
 
     assert response.status_code == 503
@@ -157,7 +268,7 @@ def _brushed_mask(project: dict) -> bytes:
 
 def test_brushed_area_becomes_a_named_layer(monkeypatch) -> None:
     monkeypatch.setenv("STEREOVISOR_MODE", "preview")
-    project = client.post("/api/sample").json()
+    project = _sample_project()
 
     created = client.post(
         f"/api/projects/{project['id']}/layers",
@@ -180,7 +291,7 @@ def test_brushed_area_becomes_a_named_layer(monkeypatch) -> None:
 
 def test_created_layer_without_a_name_gets_the_next_area_number(monkeypatch) -> None:
     monkeypatch.setenv("STEREOVISOR_MODE", "preview")
-    project = client.post("/api/sample").json()
+    project = _sample_project()
 
     created = client.post(
         f"/api/projects/{project['id']}/layers",
@@ -194,7 +305,7 @@ def test_created_layer_without_a_name_gets_the_next_area_number(monkeypatch) -> 
 
 def test_created_layer_rejects_an_empty_brush(monkeypatch) -> None:
     monkeypatch.setenv("STEREOVISOR_MODE", "preview")
-    project = client.post("/api/sample").json()
+    project = _sample_project()
     blank = Image.new("RGB", (project["width"], project["height"]), (0, 0, 0))
 
     response = client.post(
@@ -208,7 +319,7 @@ def test_created_layer_rejects_an_empty_brush(monkeypatch) -> None:
 
 def test_layer_rename_persists_and_rejects_blank_names(monkeypatch) -> None:
     monkeypatch.setenv("STEREOVISOR_MODE", "preview")
-    project = client.post("/api/sample").json()
+    project = _sample_project()
     layer_id = project["layers"][0]["id"]
 
     renamed = client.post(
@@ -218,17 +329,22 @@ def test_layer_rename_persists_and_rejects_blank_names(monkeypatch) -> None:
     assert renamed.status_code == 200
     assert renamed.json()["layers"][0]["name"] == "Lantern"
 
-    reloaded = client.post(f"/api/projects/{project['id']}/layers/{layer_id}/confirm").json()
+    reloaded = client.post(
+        f"/api/projects/{project['id']}/layers/{layer_id}/confirm"
+    ).json()
     assert reloaded["layers"][0]["name"] == "Lantern"
-    assert client.post(
-        f"/api/projects/{project['id']}/layers/{layer_id}/name",
-        json={"name": "   "},
-    ).status_code == 422
+    assert (
+        client.post(
+            f"/api/projects/{project['id']}/layers/{layer_id}/name",
+            json={"name": "   "},
+        ).status_code
+        == 422
+    )
 
 
 def test_layer_delete_removes_assets_and_stays_undoable(monkeypatch) -> None:
     monkeypatch.setenv("STEREOVISOR_MODE", "preview")
-    project = client.post("/api/sample").json()
+    project = _sample_project()
     doomed = project["layers"][0]
 
     deleted = client.post(f"/api/projects/{project['id']}/layers/{doomed['id']}/delete")
@@ -247,7 +363,7 @@ def test_layer_delete_removes_assets_and_stays_undoable(monkeypatch) -> None:
 
 def test_sample_layer_merge_api_supports_history(monkeypatch) -> None:
     monkeypatch.setenv("STEREOVISOR_MODE", "preview")
-    project = client.post("/api/sample").json()
+    project = _sample_project()
     layer_ids = [layer["id"] for layer in project["layers"][:2]]
 
     merged_response = client.post(
@@ -274,6 +390,9 @@ def test_processing_job_reports_completion() -> None:
     started = client.post("/api/jobs/sample")
     job_id = started.json()["jobId"]
 
+    # Jobs are handed to a worker instead of running inline, so wait for the
+    # queue to drain rather than assuming the POST already did the work.
+    assert service_module.job_queue.join(120)
     status = client.get(f"/api/jobs/{job_id}")
     payload = status.json()
 
@@ -328,21 +447,22 @@ def test_worker_honors_cancel_request_before_commit() -> None:
 def test_inpaint_requires_confirmed_masks(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("STEREOVISOR_MODE", "preview")
     monkeypatch.setattr(service_module, "store", ProjectStore(tmp_path))
-    project = client.post("/api/sample").json()
+    project = _sample_project()
 
     response = client.post(
-        f"/api/projects/{project['id']}/inpaint",
+        f"/api/jobs/projects/{project['id']}/inpaint",
         json={"layerIds": [project["layers"][0]["id"]]},
     )
+    payload = _completed_job(response)
 
-    assert response.status_code == 422
-    assert "Confirm every selected mask" in response.json()["detail"]["message"]
+    assert payload["state"] == "failed"
+    assert "Confirm every selected mask" in payload["message"]
 
 
 def test_refine_job_targets_one_layer(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("STEREOVISOR_MODE", "preview")
     monkeypatch.setattr(service_module, "store", ProjectStore(tmp_path))
-    project = client.post("/api/sample").json()
+    project = _sample_project()
     target_id = project["layers"][0]["id"]
 
     class FakeRefiner:
@@ -353,15 +473,21 @@ def test_refine_job_targets_one_layer(monkeypatch, tmp_path) -> None:
             return payload.model_copy(
                 update={
                     "layers": [
-                        layer.model_copy(update={"refinementState": "refined"})
-                        if layer.id == layer_id else layer
+                        (
+                            layer.model_copy(update={"refinementState": "refined"})
+                            if layer.id == layer_id
+                            else layer
+                        )
                         for layer in payload.layers
                     ]
                 }
             )
 
     monkeypatch.setattr(service_module, "_pipeline", lambda: FakeRefiner())
-    started = client.post(f"/api/jobs/projects/{project['id']}/layers/{target_id}/refine")
+    started = client.post(
+        f"/api/jobs/projects/{project['id']}/layers/{target_id}/refine"
+    )
+    assert service_module.job_queue.join(120)
     status = client.get(f"/api/jobs/{started.json()['jobId']}").json()
 
     assert started.status_code == 200
@@ -370,14 +496,27 @@ def test_refine_job_targets_one_layer(monkeypatch, tmp_path) -> None:
     assert status["result"]["layers"][0]["refinementState"] == "refined"
 
 
-def test_target_inpaint_job_receives_composition_mask_and_target(monkeypatch, tmp_path) -> None:
+def test_target_inpaint_job_receives_composition_mask_and_target(
+    monkeypatch, tmp_path
+) -> None:
     monkeypatch.setenv("STEREOVISOR_MODE", "preview")
     monkeypatch.setattr(service_module, "store", ProjectStore(tmp_path))
-    project = client.post("/api/sample").json()
+    project = _sample_project()
     size = (project["width"], project["height"])
 
     class FakeTargetInpainter:
-        def inpaint_target(self, _payload, _directory, target_id, composition, mask, prompt=None, progress=None, cancelled=None, steps=25):
+        def inpaint_target(
+            self,
+            _payload,
+            _directory,
+            target_id,
+            composition,
+            mask,
+            prompt=None,
+            progress=None,
+            cancelled=None,
+            steps=25,
+        ):
             assert target_id == project["layers"][0]["id"]
             assert composition.size == size
             assert mask.size == size
@@ -391,11 +530,16 @@ def test_target_inpaint_job_receives_composition_mask_and_target(monkeypatch, tm
     started = client.post(
         f"/api/jobs/projects/{project['id']}/targets/{project['layers'][0]['id']}/inpaint",
         files={
-            "composition": ("composition.png", png_bytes(Image.new("RGB", size, "white")), "image/png"),
+            "composition": (
+                "composition.png",
+                png_bytes(Image.new("RGB", size, "white")),
+                "image/png",
+            ),
             "mask": ("mask.png", png_bytes(Image.new("L", size, 255)), "image/png"),
         },
         data={"prompt": "new painted detail", "steps": "12"},
     )
+    assert service_module.job_queue.join(120)
     status = client.get(f"/api/jobs/{started.json()['jobId']}").json()
 
     assert started.status_code == 200
@@ -403,17 +547,21 @@ def test_target_inpaint_job_receives_composition_mask_and_target(monkeypatch, tm
     assert status["state"] == "completed"
 
 
-def test_target_inpaint_history_api_restores_the_focused_asset(monkeypatch, tmp_path) -> None:
+def test_target_inpaint_history_api_restores_the_focused_asset(
+    monkeypatch, tmp_path
+) -> None:
     monkeypatch.setenv("STEREOVISOR_MODE", "preview")
     project_store = ProjectStore(tmp_path)
     monkeypatch.setattr(service_module, "store", project_store)
-    project = client.post("/api/sample").json()
+    project = _sample_project()
     layer_id = project["layers"][0]["id"]
-    assert client.post(f"/api/projects/{project['id']}/layers/{layer_id}/confirm").status_code == 200
-    built = client.post(
-        f"/api/projects/{project['id']}/inpaint",
-        json={"layerIds": [layer_id]},
-    ).json()
+    assert (
+        client.post(
+            f"/api/projects/{project['id']}/layers/{layer_id}/confirm"
+        ).status_code
+        == 200
+    )
+    built = _inpaint_project(project["id"], [layer_id])
     directory = project_store.directory(project["id"])
     payload = project_store.read(project["id"])
     background_path = directory / "background.png"
@@ -423,20 +571,26 @@ def test_target_inpaint_history_api_restores_the_focused_asset(monkeypatch, tmp_
 
     history = client.get(f"/api/projects/{project['id']}/inpaint-history")
     assert history.status_code == 200
-    background = next(state for state in history.json() if state["targetId"] == "background")
+    background = next(
+        state for state in history.json() if state["targetId"] == "background"
+    )
     assert background == {"targetId": "background", "canUndo": True, "canRedo": False}
 
-    undone = client.post(f"/api/projects/{project['id']}/targets/background/undo-inpaint")
+    undone = client.post(
+        f"/api/projects/{project['id']}/targets/background/undo-inpaint"
+    )
     assert undone.status_code == 200
     assert background_path.read_bytes() == original
-    redone = client.post(f"/api/projects/{project['id']}/targets/background/redo-inpaint")
+    redone = client.post(
+        f"/api/projects/{project['id']}/targets/background/redo-inpaint"
+    )
     assert redone.status_code == 200
     assert Image.open(background_path).convert("RGB").getpixel((0, 0)) == (0, 0, 255)
 
 
 def test_rejects_unsupported_upload() -> None:
     response = client.post(
-        "/api/analyze",
+        "/api/jobs/analyze",
         files={"file": ("not-image.txt", b"not an image", "text/plain")},
     )
 
@@ -447,7 +601,7 @@ def test_rejects_unsupported_upload() -> None:
 def test_brush_masks_update_cutout_and_expand_inpainting(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("STEREOVISOR_MODE", "preview")
     monkeypatch.setattr(service_module, "store", ProjectStore(tmp_path))
-    project = client.post("/api/sample").json()
+    project = _sample_project()
     size = (project["width"], project["height"])
     layer = project["layers"][0]
 
@@ -464,7 +618,9 @@ def test_brush_masks_update_cutout_and_expand_inpainting(monkeypatch, tmp_path) 
     assert cutout.getpixel((60, 60))[3] == 255
     assert cutout.getpixel((10, 10))[3] == 0
     assert edited_layer.json()["layers"][0]["confirmed"] is False
-    confirmed = client.post(f"/api/projects/{project['id']}/layers/{layer['id']}/confirm")
+    confirmed = client.post(
+        f"/api/projects/{project['id']}/layers/{layer['id']}/confirm"
+    )
     assert confirmed.status_code == 200
 
     extra_mask = Image.new("L", size)
@@ -476,34 +632,34 @@ def test_brush_masks_update_cutout_and_expand_inpainting(monkeypatch, tmp_path) 
     assert edited_extra.status_code == 200
     assert edited_extra.json()["extraMaskUrl"].endswith("extra-inpaint-mask.png")
 
-    inpainted = client.post(
-        f"/api/projects/{project['id']}/inpaint",
-        json={"layerIds": [layer["id"]]},
-    ).json()
+    inpainted = _inpaint_project(project["id"], [layer["id"]])
     union_response = client.get(inpainted["unionMaskUrl"])
     union = Image.open(io.BytesIO(union_response.content)).convert("L")
     assert union.getpixel((60, 60)) == 255
     assert union.getpixel((size[0] - 40, 40)) == 255
 
 
-def test_post_build_retouch_mask_invalidates_and_rebuilds_background(monkeypatch, tmp_path) -> None:
+def test_post_build_retouch_mask_invalidates_and_rebuilds_background(
+    monkeypatch, tmp_path
+) -> None:
     monkeypatch.setenv("STEREOVISOR_MODE", "preview")
     monkeypatch.setattr(service_module, "store", ProjectStore(tmp_path))
-    project = client.post("/api/sample").json()
+    project = _sample_project()
     layer = project["layers"][0]
-    confirmed = client.post(f"/api/projects/{project['id']}/layers/{layer['id']}/confirm")
+    confirmed = client.post(
+        f"/api/projects/{project['id']}/layers/{layer['id']}/confirm"
+    )
     assert confirmed.status_code == 200
 
-    first_build = client.post(
-        f"/api/projects/{project['id']}/inpaint",
-        json={"layerIds": [layer["id"]]},
-    ).json()
+    first_build = _inpaint_project(project["id"], [layer["id"]])
     assert first_build["backgroundUrl"]
     assert first_build["unionMaskUrl"]
 
     retouch_mask = Image.new("L", (project["width"], project["height"]))
     retouch_point = (project["width"] - 45, 45)
-    ImageDraw.Draw(retouch_mask).ellipse((retouch_point[0] - 20, 25, retouch_point[0] + 20, 65), fill=255)
+    ImageDraw.Draw(retouch_mask).ellipse(
+        (retouch_point[0] - 20, 25, retouch_point[0] + 20, 65), fill=255
+    )
     edited = client.post(
         f"/api/projects/{project['id']}/extra-mask",
         files={"file": ("retouch.png", png_bytes(retouch_mask), "image/png")},
@@ -515,19 +671,18 @@ def test_post_build_retouch_mask_invalidates_and_rebuilds_background(monkeypatch
     assert edited_project["unionMaskUrl"] is None
     assert edited_project["layers"][0]["confirmed"] is True
 
-    rebuilt = client.post(
-        f"/api/projects/{project['id']}/inpaint",
-        json={"layerIds": [layer["id"]]},
-    ).json()
+    rebuilt = _inpaint_project(project["id"], [layer["id"]])
     union_response = client.get(rebuilt["unionMaskUrl"])
     union = Image.open(io.BytesIO(union_response.content)).convert("L")
     assert rebuilt["backgroundUrl"]
     assert union.getpixel(retouch_point) == 255
 
 
-def test_project_package_round_trip_restores_images_and_editor_state(monkeypatch, tmp_path) -> None:
+def test_project_package_round_trip_restores_images_and_editor_state(
+    monkeypatch, tmp_path
+) -> None:
     monkeypatch.setattr(service_module, "store", ProjectStore(tmp_path))
-    analyzed = client.post("/api/sample").json()
+    analyzed = _sample_project()
     extra_mask = Image.new("L", (analyzed["width"], analyzed["height"]))
     ImageDraw.Draw(extra_mask).ellipse((5, 5, 35, 35), fill=255)
     analyzed = client.post(
@@ -536,11 +691,10 @@ def test_project_package_round_trip_restores_images_and_editor_state(monkeypatch
     ).json()
     layer_ids = [layer["id"] for layer in analyzed["layers"][:2]]
     for layer_id in layer_ids:
-        analyzed = client.post(f"/api/projects/{analyzed['id']}/layers/{layer_id}/confirm").json()
-    project = client.post(
-        f"/api/projects/{analyzed['id']}/inpaint",
-        json={"layerIds": layer_ids},
-    ).json()
+        analyzed = client.post(
+            f"/api/projects/{analyzed['id']}/layers/{layer_id}/confirm"
+        ).json()
+    project = _inpaint_project(analyzed["id"], layer_ids)
     layer_states = [
         {
             "id": layer["id"],
@@ -561,7 +715,9 @@ def test_project_package_round_trip_restores_images_and_editor_state(monkeypatch
     )
 
     assert exported.status_code == 200
-    assert exported.headers["content-type"].startswith("application/vnd.stereovisor.project+zip")
+    assert exported.headers["content-type"].startswith(
+        "application/vnd.stereovisor.project+zip"
+    )
     with ZipFile(io.BytesIO(exported.content)) as archive:
         manifest = json.loads(archive.read("manifest.json"))
         assert manifest["format"] == "stereovisor-project"
@@ -571,7 +727,13 @@ def test_project_package_round_trip_restores_images_and_editor_state(monkeypatch
 
     imported_response = client.post(
         "/api/projects/import",
-        files={"file": ("scene.stereovisor", exported.content, "application/vnd.stereovisor.project+zip")},
+        files={
+            "file": (
+                "scene.stereovisor",
+                exported.content,
+                "application/vnd.stereovisor.project+zip",
+            )
+        },
     )
     imported = imported_response.json()
 
@@ -585,7 +747,10 @@ def test_project_package_round_trip_restores_images_and_editor_state(monkeypatch
     assert imported["project"]["layers"][0]["proposalMaskUrl"]
     assert imported["project"]["layers"][0]["confirmed"] is True
     assert client.get(imported["project"]["sourceUrl"]).status_code == 200
-    assert client.get(imported["project"]["layers"][0]["proposalMaskUrl"]).status_code == 200
+    assert (
+        client.get(imported["project"]["layers"][0]["proposalMaskUrl"]).status_code
+        == 200
+    )
     assert client.get(imported["project"]["backgroundUrl"]).status_code == 200
     assert client.get(imported["project"]["extraMaskUrl"]).status_code == 200
 
@@ -595,7 +760,9 @@ def test_project_import_rejects_non_archive(monkeypatch, tmp_path) -> None:
 
     response = client.post(
         "/api/projects/import",
-        files={"file": ("broken.stereovisor", b"not a zip", "application/octet-stream")},
+        files={
+            "file": ("broken.stereovisor", b"not a zip", "application/octet-stream")
+        },
     )
 
     assert response.status_code == 422

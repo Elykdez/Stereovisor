@@ -1,6 +1,6 @@
 import numpy as np
 
-from service.ai_models import (
+from service.src.ai_models import (
     _deduplicate_detections,
     normalize_segmentation_density,
     normalize_segmentation_labels,

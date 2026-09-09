@@ -6,7 +6,7 @@ if /i "%STEREOVISOR_SHOW_CONSOLE%"=="1" goto run_visible
 if /i "%STEREOVISOR_SHOW_CONSOLE%"=="true" goto run_visible
 if /i "%STEREOVISOR_SHOW_CONSOLE%"=="yes" goto run_visible
 if defined STEREOVISOR_SHOW_CONSOLE goto console_checked
-for /f "usebackq delims=" %%C in (`powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\read-console-setting.ps1"`) do set "STEREOVISOR_SHOW_CONSOLE=%%C"
+for /f "usebackq delims=" %%C in (`powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0client\scripts\read-console-setting.ps1"`) do set "STEREOVISOR_SHOW_CONSOLE=%%C"
 
 :console_checked
 if /i "%STEREOVISOR_SHOW_CONSOLE%"=="1" goto run_visible
@@ -18,6 +18,8 @@ exit /b 0
 title Stereovisor
 echo Preparing Stereovisor and starting the local AI editor...
 echo First launch may take several minutes. Keep this window open.
+echo The service console will remain open after the editor closes.
+echo Close the service console when you want to stop the local server.
 echo.
 
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\run-ai.ps1"

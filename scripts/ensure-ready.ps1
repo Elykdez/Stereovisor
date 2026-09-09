@@ -18,7 +18,7 @@ New-Item -ItemType Directory -Force -Path $ModelRoot | Out-Null
 # Every child stage publishes through the same file, so setup-ai.ps1 keeps the
 # startup gate moving while it installs the CUDA runtime.
 $env:STEREOVISOR_BOOTSTRAP_STATUS = $BootstrapStatus
-. (Join-Path $PSScriptRoot "bootstrap-status.ps1")
+. (Join-Path $ProjectRoot "service\scripts\bootstrap-status.ps1")
 
 # This launcher owns the preparation process, so it claims the marker whether
 # it is new or left behind by a force-quit. Writing over it keeps the marker
@@ -85,7 +85,7 @@ if (-not $SelectedPython -or -not (Test-PowerPaintRuntime)) {
     Write-Host "Preparing the managed CUDA AI environment. This is required only once..." -ForegroundColor Cyan
     Publish-BootstrapStatus -State "downloading" -Detail "Downloading and installing the local CUDA AI runtime." -Provider "runtime" -Progress 10
     # setup-ai.ps1 publishes its own step progress through the shared status file.
-    & (Join-Path $PSScriptRoot "setup-ai.ps1")
+    & (Join-Path $ProjectRoot "service\scripts\setup-ai.ps1")
     if ($LASTEXITCODE -ne 0) {
         throw "AI setup failed with exit code $LASTEXITCODE."
     }
@@ -103,7 +103,7 @@ $env:STEREOVISOR_MODEL_ROOT = $ModelRoot
 Write-Host "Preparing and validating local model weights..." -ForegroundColor Cyan
 Complete-BootstrapProvider -Provider "runtime"
 Publish-BootstrapStatus -State "starting" -Detail "Checking required local model weights."
-& $SelectedPython (Join-Path $PSScriptRoot "prepare-models.py")
+& $SelectedPython (Join-Path $ProjectRoot "service\scripts\prepare-models.py")
 if ($LASTEXITCODE -ne 0) {
     throw "Local model preparation failed with exit code $LASTEXITCODE."
 }
