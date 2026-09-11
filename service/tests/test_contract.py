@@ -85,6 +85,10 @@ LAYER_FIELDS = {
     "bounds",
     "kind",
     "confidence",
+    "feather",
+    "blur",
+    "centerPull",
+    "scale",
 }
 
 

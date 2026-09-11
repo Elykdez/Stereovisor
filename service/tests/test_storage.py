@@ -124,3 +124,12 @@ def test_a_staged_record_is_never_exported_as_an_asset(stored) -> None:
 
 def _camera() -> CameraPayload:
     return CameraPayload(x=0.0, y=0.0, zoom=1.0, strength=1.0)
+
+
+def test_legacy_camera_state_defaults_to_a_sharp_near_focus() -> None:
+    camera = CameraPayload.model_validate(
+        {"x": 0.0, "y": 0.0, "zoom": 1.0, "strength": 68.0}
+    )
+
+    assert camera.depthOfField == 0.0
+    assert camera.focusDepth == 1.0

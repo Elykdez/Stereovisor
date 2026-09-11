@@ -1,5 +1,7 @@
 export type Engine = "ai" | "preview";
 
+export const DEFAULT_LAYER_FEATHER = 2;
+
 export interface ProviderStatus {
   available: boolean;
   detail: string;
@@ -53,6 +55,11 @@ export interface SceneLayer {
   bounds: [number, number, number, number];
   kind: "instance" | "depth-plane" | "manual";
   confidence: number;
+  feather?: number | null;
+  // Signed correction applied after the camera derives blur from layer depth.
+  blur?: number;
+  centerPull?: number;
+  scale?: number;
 }
 
 export interface SceneProject {
@@ -76,6 +83,16 @@ export interface CameraState {
   y: number;
   zoom: number;
   strength: number;
+  // Signed centering control: 0.5 is neutral, above pulls toward center and
+  // below pushes away from center.
+  centerPull?: number;
+  // Uniform scale applied to the complete scene framing.
+  sceneScale?: number;
+  // Maximum blur, in composition pixels, for a layer one full depth unit away
+  // from the focus plane. Zero keeps the legacy sharp rendering.
+  depthOfField?: number;
+  // Normalized scene depth kept sharp by the depth-of-field pass.
+  focusDepth?: number;
 }
 
 export interface ImportedProject {

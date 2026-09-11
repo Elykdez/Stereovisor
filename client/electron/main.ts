@@ -14,6 +14,7 @@ import path from "node:path";
 import { readSettings, writeSettings } from "./settings";
 import {
   probeStereovisorService,
+  requiredModelsReady,
   serviceLaunchPolicy,
 } from "./serviceLifecycle";
 import {
@@ -27,6 +28,7 @@ let serviceProcess: ChildProcess | null = null;
 let modelPreparationProcess: ChildProcess | null = null;
 let serviceStopsWithApp = true;
 let appIsQuitting = false;
+let preparationWindowActive = false;
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
 let appLocale: AppLocale = "en";
 
@@ -114,22 +116,11 @@ function findPackagedModelRoot(): string {
   return path.join(app.getPath("userData"), "models");
 }
 
-function packagedModelsReady(modelRoot: string): boolean {
-  const required = [
-    path.join(modelRoot, "grounding-dino-base", ".stereovisor-ready"),
-    path.join(modelRoot, "sam2.1-hiera-small", ".stereovisor-ready"),
-    path.join(modelRoot, "da3-small", ".stereovisor-ready"),
-    path.join(modelRoot, "inspyrenet", "ckpt_base.pth"),
-    path.join(modelRoot, "big-lama.pt"),
-  ];
-  return required.every((file) => existsSync(file));
-}
-
 function startPackagedModelPreparation(showConsole: boolean): void {
   if (!app.isPackaged || process.env.STEREOVISOR_MODE === "preview") return;
   const root = resourceRoot();
   const modelRoot = findPackagedModelRoot();
-  if (packagedModelsReady(modelRoot)) {
+  if (requiredModelsReady(modelRoot)) {
     electronLog("models.bootstrap.skipped-ready", { modelRoot });
     return;
   }
@@ -383,17 +374,19 @@ function installApplicationMenu(): void {
 // --------------------------------
 //  Application Window
 // --------------------------------
-function createWindow(): void {
+function createWindow(preparationOnly = false): void {
+  preparationWindowActive = preparationOnly;
   // Keep nodeIntegration disabled; all renderer filesystem actions cross the
   // narrow, validated preload API below.
   mainWindow = new BrowserWindow({
-    width: 1480,
-    height: 920,
-    minWidth: 1020,
-    minHeight: 680,
+    width: preparationOnly ? 760 : 1480,
+    height: preparationOnly ? 600 : 920,
+    minWidth: preparationOnly ? 680 : 1020,
+    minHeight: preparationOnly ? 520 : 680,
     icon: path.join(appRoot(), "client", "dist", "app-icon.png"),
     backgroundColor: "#10110f",
     titleBarStyle: "hiddenInset",
+    autoHideMenuBar: preparationOnly,
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,
@@ -414,12 +407,16 @@ function createWindow(): void {
   });
 
   if (process.env.VITE_DEV_SERVER_URL) {
-    electronLog("window.load.dev", { url: process.env.VITE_DEV_SERVER_URL });
-    void mainWindow.loadURL(process.env.VITE_DEV_SERVER_URL);
+    const rendererUrl = new URL(process.env.VITE_DEV_SERVER_URL);
+    if (preparationOnly) rendererUrl.searchParams.set("startup", "preparation");
+    electronLog("window.load.dev", { url: rendererUrl.toString(), preparationOnly });
+    void mainWindow.loadURL(rendererUrl.toString());
   } else {
-    electronLog("window.load.package");
+    electronLog("window.load.package", { preparationOnly });
     // Actual ingress -> index.html
-    void mainWindow.loadFile(path.join(appRoot(), "client", "dist", "index.html"));
+    void mainWindow.loadFile(path.join(appRoot(), "client", "dist", "index.html"), {
+      query: preparationOnly ? { startup: "preparation" } : undefined,
+    });
   }
 }
 
@@ -520,6 +517,19 @@ ipcMain.on("stereovisor:set-locale", (_event, locale: string) => {
   installApplicationMenu();
 });
 
+ipcMain.on("stereovisor:preparation-complete", (event) => {
+  if (!preparationWindowActive || !mainWindow || event.sender !== mainWindow.webContents)
+    return;
+  preparationWindowActive = false;
+  mainWindow.setMinimumSize(1020, 680);
+  mainWindow.setSize(1480, 920, true);
+  mainWindow.center();
+  mainWindow.setAutoHideMenuBar(false);
+  mainWindow.setMenuBarVisibility(true);
+  installApplicationMenu();
+  electronLog("window.preparation.completed");
+});
+
 if (!hasSingleInstanceLock) {
   app.quit();
 } else {
@@ -532,16 +542,20 @@ if (!hasSingleInstanceLock) {
 
   // App Entrance
   app.whenReady().then(() => {
-    // Paint a real window before any optional settings, extension, or model
-    // work. React DevTools can touch the network and must never gate startup.
-    installApplicationMenu();
-    createWindow();
+    // A first launch gets a dedicated preparation surface. Once the required
+    // offline assets exist, later launches open the editor and start the local
+    // service in the background without re-entering model preparation.
+    const preparationOnly =
+      process.env.STEREOVISOR_PREPARATION_ONLY === "1" ||
+      (app.isPackaged && requiredModelsReady(findPackagedModelRoot()) === false);
+    if (!preparationOnly) installApplicationMenu();
+    createWindow(preparationOnly);
 
     void readSettings()
       .then((settings) => {
         appLocale = settings.locale ?? normalizeLocale(app.getLocale());
         electronLog("app.ready", { locale: appLocale });
-        installApplicationMenu();
+        if (!preparationWindowActive) installApplicationMenu();
         if (settings.service.origin) {
           electronLog("service.start.skipped-external", {
             origin: settings.service.origin,
@@ -565,7 +579,8 @@ if (!hasSingleInstanceLock) {
         void installReactDevTools();
       });
     app.on("activate", () => {
-      if (BrowserWindow.getAllWindows().length === 0) createWindow();
+      if (BrowserWindow.getAllWindows().length === 0)
+        createWindow(preparationWindowActive);
     });
   });
 

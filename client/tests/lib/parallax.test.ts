@@ -1,4 +1,4 @@
-import { backgroundTransform, clamp, demoCameraAt, fitCanvasDimensions, fitVideoDimensions, layerTransform, visibleLayers } from "@/lib/parallax";
+import { backgroundTransform, clamp, demoCameraAt, depthOfFieldBlur, fitCanvasDimensions, fitVideoDimensions, layerTransform, renderedLayerBlur, visibleLayers } from "@/lib/parallax";
 
 describe("parallax transforms", () => {
   const camera = { x: 0.5, y: -0.25, zoom: 1.1, strength: 80 };
@@ -29,6 +29,53 @@ describe("parallax transforms", () => {
     expect(transform.y).toBeCloseTo(limit.y, 6);
   });
 
+  it("pulls a layer's bounds toward the composition center", () => {
+    const left = layerTransform(
+      { ...camera, x: 0, y: 0, centerPull: 0.5 },
+      0.5,
+      1000,
+      600,
+      { offsetX: 0, offsetY: 0, bounds: [100, 100, 300, 300] },
+      [1000, 600],
+    );
+    const centered = layerTransform(
+      { ...camera, x: 0, y: 0, centerPull: 1 },
+      0.5,
+      1000,
+      600,
+      { offsetX: 0, offsetY: 0, bounds: [100, 100, 300, 300] },
+      [1000, 600],
+    );
+
+    expect(left.x).toBe(0);
+    expect(centered.x).toBeCloseTo(300 * 1.1044, 4);
+    expect(centered.y).toBeCloseTo(100 * 1.1044, 4);
+
+    const farther = layerTransform(
+      { ...camera, x: 0, y: 0, centerPull: 0 },
+      0.5,
+      1000,
+      600,
+      { offsetX: 0, offsetY: 0, bounds: [100, 100, 300, 300] },
+      [1000, 600],
+    );
+    expect(farther.x).toBeCloseTo(-300 * 1.1044, 4);
+    expect(farther.y).toBeCloseTo(-100 * 1.1044, 4);
+  });
+
+  it("scales the complete scene uniformly", () => {
+    const scaled = { ...camera, sceneScale: 1.4 };
+
+    expect(layerTransform(scaled, 0.5, 1000, 600).scale).toBeCloseTo(
+      layerTransform(camera, 0.5, 1000, 600).scale * 1.4,
+      6,
+    );
+    expect(backgroundTransform(scaled).scale).toBeCloseTo(
+      backgroundTransform(camera).scale * 1.4,
+      6,
+    );
+  });
+
   it("keeps the background overscanned", () => {
     expect(backgroundTransform(camera).scale).toBeGreaterThan(camera.zoom);
   });
@@ -40,6 +87,17 @@ describe("parallax transforms", () => {
   it("clamps direct camera input", () => {
     expect(clamp(4, -1, 1)).toBe(1);
     expect(clamp(-4, -1, 1)).toBe(-1);
+  });
+
+  it("derives blur from focus distance and keeps the layer correction additive", () => {
+    const lens = { ...camera, depthOfField: 20, focusDepth: 0.8 };
+
+    expect(depthOfFieldBlur(lens, 0.8)).toBe(0);
+    expect(depthOfFieldBlur(lens, 0.3)).toBeCloseTo(10);
+    expect(renderedLayerBlur(lens, 0.3, 3)).toBeCloseTo(13);
+    expect(renderedLayerBlur(lens, 0.3, -4)).toBeCloseTo(6);
+    expect(renderedLayerBlur(lens, 0.3, -20)).toBe(0);
+    expect(renderedLayerBlur(camera, 0.3, 4)).toBe(4);
   });
 
   it("sorts only visible layers from far to near", () => {
@@ -55,6 +113,14 @@ describe("parallax transforms", () => {
     expect(demoCameraAt(camera, 0)).toEqual({ ...camera, x: 0, y: 0 });
     expect(demoCameraAt(camera, 1).x).toBeCloseTo(0);
     expect(demoCameraAt(camera, 1).y).toBeCloseTo(0);
+  });
+
+  it("applies the configured speed and movement amounts to demo motion", () => {
+    const motion = { speed: 2, horizontalAmount: 0.4, verticalAmount: 0.1 };
+    const frame = demoCameraAt(camera, 0.0625, motion);
+
+    expect(frame.x).toBeCloseTo(Math.SQRT1_2 * 0.4);
+    expect(frame.y).toBeCloseTo(0.1);
   });
 
   it("fits even video dimensions within the export limit", () => {

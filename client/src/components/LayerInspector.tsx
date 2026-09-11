@@ -127,13 +127,6 @@ export function LayerInspector({
   return (
     <section className={`layers-panel ${disabled ? "editor-locked" : ""}`} aria-disabled={disabled}>
       {disabled && <div className="editor-lock-note" role="status">{t("startup.blockedDetail")}</div>}
-      <div className="panel-heading">
-        <div>
-          <span className="eyebrow">{selecting ? t("layers.proposals") : t("layers.sceneStack")}</span>
-          <h2>{t("layers.foregroundCount", { count: layers.length })}</h2>
-        </div>
-        <span className="count-badge">{t("layers.onCount", { count: layers.filter((layer) => selecting ? layer.selected : layer.visible).length })}</span>
-      </div>
       <p className="panel-note">
         {selecting
           ? t("layers.selectingHelp")

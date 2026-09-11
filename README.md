@@ -12,7 +12,7 @@ The product contract is in [docs/SRS.md](docs/SRS.md), and the implementation de
 
 ## Quick Start
 
-On Windows, double-click `Run Stereovisor.cmd`. The window opens immediately and shows the real editor behind a blurred startup mask while the local CUDA Python runtime and the model weights are prepared. The mask lists all five startup items - local AI runtime, segmentation, matting, depth, and inpainting - and reports `Starting`, `Downloading`, `Initializing`, or `Ready` with per-item progress, including the one-time CUDA runtime installation. Editing stays disabled until the running local service confirms every required provider; a stage the first-run preparation has finished is shown as progress but never unlocks the editor on its own. `File > Options...` and `Help > About` stay available while the mask is up. The launcher builds the project-owned `.venv-ai` environment, reuses the CUDA Torch already installed inside it when that installation is compatible, and otherwise installs the pinned CUDA wheel. Later launches reuse the prepared environment.
+On Windows, double-click `Run Stereovisor.cmd`. The first launch shows a dedicated preparation window instead of the editor while the local CUDA Python runtime and required model weights are installed. It lists all five startup items - local AI runtime, segmentation, matting, depth, and inpainting - and reports `Starting`, `Downloading`, `Initializing`, or `Ready` with per-item progress, including the one-time CUDA runtime installation. The editor appears only after the running local service confirms every required provider. Later launches distinguish a stopped service from a missing installation: they start the prepared offline service automatically, wait for its live readiness check, and then open the editor without running model preparation again. The launcher builds the project-owned `.venv-ai` environment, reuses compatible CUDA Torch assets, and otherwise installs the pinned CUDA wheel.
 
 For the lightweight sample-only preview, double-click `Run Stereovisor Preview.cmd`.
 
@@ -67,8 +67,10 @@ Development starts with the explicitly labeled preview engine. Use the bundled s
 
 - `Project file` writes a portable `.stereovisor` package containing `manifest.json` and every processed source, mask, cutout, depth, union-mask, and background PNG.
 - `Import project` loads that package into a fresh local workspace and restores camera and layer editing state.
-- `Demo MP4` renders a four-second H.264 parallax preview at up to 1280 pixels for playback in standard system video players. It uses Electron's bundled Chromium encoder, so FFmpeg is not required; WebM remains a fallback on runtimes without MP4 recording support.
+- `Demo MP4` renders a four-second H.264 parallax preview at up to 1280 pixels for playback in standard system video players. The Motion speed, Horizontal amount, and Vertical amount options control its motion as well as the live motion preview. It uses Electron's bundled Chromium encoder, so FFmpeg is not required; WebM remains a fallback on runtimes without MP4 recording support.
 - `PNG` exports the current composited frame at source resolution.
+
+The final camera rig groups view, scene-depth, and lens controls. Depth of field derives background and foreground blur from the selected focus depth; each layer retains a signed blur offset for local artistic correction.
 
 Generated samples are available as [a reloadable project](docs/media/sample-project.stereovisor) and [its parallax WebM](docs/media/sample-parallax-demo.webm).
 

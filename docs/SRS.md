@@ -93,6 +93,8 @@ The primary user is a designer or content creator who wants a parallax still wit
 - Offer an automatic motion preview.
 - Apply larger translation to layers with greater foreground depth.
 - Overscan the background so small camera moves do not reveal empty canvas.
+- Provide a global depth-of-field amount and focus plane that derive blur from scene depth.
+- Treat per-layer blur as a signed adjustment to the derived blur without overwriting the layer value.
 
 ### FR-8 Export
 
@@ -100,7 +102,7 @@ The primary user is a designer or content creator who wants a parallax still wit
 - Preserve alpha only where the composition itself has transparency.
 - Export a four-second looping parallax demonstration as H.264 MP4 at up to 1280 pixels on its longest edge, with WebM fallback when MP4 recording is unavailable.
 - Export a versioned `.stereovisor` project package containing every processed PNG and a JSON manifest.
-- Record current camera, layer depth, order, visibility, selection, bounds, engine, and inpainting metadata in the manifest.
+- Record current camera, depth-of-field, focus, layer depth, order, visibility, selection, bounds, engine, and inpainting metadata in the manifest.
 - Store each asset's byte length and SHA-256 checksum for import verification.
 - Use native save dialogs in Electron and browser downloads during development.
 

@@ -37,13 +37,16 @@ import { appLog } from "./lib/logger";
 import { useAppTranslation, type AppTranslate } from "./i18n";
 import { DEFAULT_APP_SETTINGS, loadAppSettings, persistAppSettings, sanitizeAppSettings, type AppSettings } from "./settings";
 import { SettingsDialog } from "./components/SettingsDialog";
+import { LayerAdjustments } from "./components/LayerAdjustments";
 import { AboutDialog } from "./components/AboutDialog";
 import { StartupGate, type StartupPhase } from "./components/StartupGate";
 import type { CameraState, HealthStatus, InpaintHistoryState, InpaintRefinement, ProcessingProgress, SceneLayer, SceneProject, WorkflowPhase } from "./types";
 import {
   healthPollDelayMs,
+  isPreparationWindow,
   isLocalAiReady,
   isOutageReportable,
+  shouldHideEditorDuringPreparation,
 } from "./lib/startup";
 import {
   isChannelConnected,
@@ -52,9 +55,18 @@ import {
 } from "./lib/events";
 import "./styles.css";
 
-const DEFAULT_CAMERA: CameraState = { x: 0, y: 0, zoom: 1, strength: 68 };
-// Health is polled once per second; this covers the local service restart the
-// launcher performs when the prepared AI runtime takes over from the core one.
+const DEFAULT_CAMERA: CameraState = {
+  x: 0,
+  y: 0,
+  zoom: 1,
+  strength: 68,
+  centerPull: 0.5,
+  sceneScale: 1,
+  depthOfField: 0,
+  focusDepth: 1
+};
+// Health is polled once per second; this covers the first-run service restart
+// when the prepared AI runtime takes over from the core one.
 
 /** Readiness cadence with no event channel: the original one-second poll. */
 const HEALTH_POLL_INTERVAL_MS = 1000;
@@ -157,6 +169,8 @@ export default function App() {
   const [processingJobId, setProcessingJobId] = useState<string | null>(null);
   const [cancellingJob, setCancellingJob] = useState(false);
   const [fileOperation, setFileOperation] = useState<"import" | "project" | "video" | "png" | null>(null);
+  const preparationOnly = isPreparationWindow(window.location.search);
+  const preparationCompletionSent = useRef(false);
   const canvasRef = useRef<SceneCanvasHandle>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const projectFileRef = useRef<HTMLInputElement>(null);
@@ -169,7 +183,9 @@ export default function App() {
   const cameraDefaults: CameraState = {
     ...DEFAULT_CAMERA,
     zoom: settings.camera.defaultZoom,
-    strength: settings.camera.defaultStrength
+    strength: settings.camera.defaultStrength,
+    centerPull: 0.5,
+    sceneScale: 1
   };
 
   useEffect(() => {
@@ -190,6 +206,20 @@ export default function App() {
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    document.title = preparationOnly && startupPhase !== "ready"
+      ? "Stereovisor - Preparing local AI"
+      : "Stereovisor";
+    if (
+      preparationOnly &&
+      startupPhase === "ready" &&
+      !preparationCompletionSent.current
+    ) {
+      preparationCompletionSent.current = true;
+      window.stereovisor?.completePreparation?.();
+    }
+  }, [preparationOnly, startupPhase]);
 
   useEffect(() => window.stereovisor?.onOpenOptions?.(() => setShowOptions(true)), []);
 
@@ -272,8 +302,8 @@ export default function App() {
         wasReady = false;
         setMoving(false);
         setStartupPhase("connecting");
-        // The launcher replaces the core health service with the prepared CUDA
-        // runtime, so a short outage is expected on every launch. Keep the last
+        // During installation the launcher replaces the core health service
+        // with the prepared CUDA runtime. Keep the last
         // readout and stay quiet until the gap outlasts that handover. This is
         // measured in elapsed time, not polls, because the cadence below varies
         // with the event channel.
@@ -569,6 +599,8 @@ export default function App() {
     }
     setError(null);
     setShowInpaintMask(false);
+    setMoving(false);
+    setCamera(cameraDefaults);
     setPhase("inpainting");
     setProcessingProgress({ state: "queued", progress: 0, stage: "Queued", message: "Preparing the local inpainting job.", queuePosition: null });
     setProcessingJobId(null);
@@ -1021,13 +1053,15 @@ export default function App() {
     try {
       const [mask, composition] = await Promise.all([
         canvasRef.current.exportEditedMask(),
-        canvasRef.current.exportComposition()
+        canvasRef.current.exportInpaintComposition()
       ]);
       // Hand the painted area to the stage before the editor closes on the next
       // line, so the progress mosaic marks exactly what this job redraws.
       maskPreviewUrl = URL.createObjectURL(mask);
       setPendingInpaintMaskUrl(maskPreviewUrl);
       cancelMaskEdit();
+      setMoving(false);
+      setCamera(cameraDefaults);
       setPhase("inpainting");
       setProcessingProgress({
         state: "queued",
@@ -1244,7 +1278,13 @@ export default function App() {
     setMaskBlurRadius(0);
     setMaskEditor(null);
     setProject(importedProject);
-    setCamera(importedCamera);
+    setCamera({
+      ...importedCamera,
+      centerPull: importedCamera.centerPull ?? 0.5,
+      sceneScale: importedCamera.sceneScale ?? 1,
+      depthOfField: importedCamera.depthOfField ?? 0,
+      focusDepth: importedCamera.focusDepth ?? 1
+    });
     setInpaintPrompt(importedProject.backgroundPrompt ?? "");
     setLayerInpaintPrompt("");
     setRefinement(importedProject.inpaintProvider === "powerpaint" ? "powerpaint" : "lama");
@@ -1393,10 +1433,10 @@ export default function App() {
 
   return (
     <>
-    {/* The shell renders from the first frame so the startup gate masks the
-        real editor instead of replacing it. `inert` keeps that masked UI out of
-        reach of the pointer, the keyboard, and assistive technology. */}
-    <main className="app-shell" aria-busy={!startupReady} inert={!startupReady} onDragOver={(event) => event.preventDefault()} onDrop={acceptDroppedFile}>
+    {/* Normal service restarts retain the editor behind the startup gate. A
+        first-time installation hides it completely until preparation passes.
+        `inert` keeps a masked shell out of every interaction path. */}
+    <main className="app-shell" hidden={shouldHideEditorDuringPreparation(preparationOnly, startupReady)} aria-busy={!startupReady} inert={!startupReady} onDragOver={(event) => event.preventDefault()} onDrop={acceptDroppedFile}>
       <button
         type="button"
         className={`panel-toggle panel-toggle-left ${openPanel === "left" ? "panel-open" : ""}`}
@@ -1438,6 +1478,7 @@ export default function App() {
           </div>
           <div className="rail-index">01</div>
         </div>
+        <div className="workflow-rail-scroll">
         <section className="source-section">
           <span className="eyebrow">{t("source.title")}</span>
           <h2>{t("source.headlineFirst")}<br />{t("source.headlineSecond")}</h2>
@@ -1497,6 +1538,47 @@ export default function App() {
             <strong>{t("privacy.title")} / {engine === "ai" ? t("engine.localAI") : t("engine.preview")}</strong>
             <small>{t("privacy.detail")}</small>
           </div>
+        </div>
+        </div>
+        <div className="workflow-rail-footer">
+        {project && phase === "selecting" && (
+          <section className="rail-ai-panel" aria-label={t("build.title")}>
+            <span className="eyebrow">{t("build.title")}</span>
+            <label>
+              <span>{t("build.inpainter")}</span>
+              <select value={refinement} onChange={(event) => changeRefinement(event.target.value as InpaintRefinement)}>
+                <option value="lama">{t("build.lama")}</option>
+                <option value="powerpaint" disabled={!health?.providers.refinement?.available}>{t("build.powerpaint")}</option>
+              </select>
+            </label>
+            {refinement === "powerpaint" && (
+              <label>
+                <span>{t("build.backgroundPrompt")}</span>
+                <input type="text" maxLength={500} value={inpaintPrompt} placeholder={t("build.backgroundPromptPlaceholder")} onChange={(event) => setInpaintPrompt(event.target.value)} />
+              </label>
+            )}
+            {health && !health.providers.refinement?.available && (
+              <span className="redraw-note warning">{t("build.fullRedrawUnavailable", { detail: runtimeText(health.providers.refinement?.detail ?? "") })}</span>
+            )}
+          </section>
+        )}
+        {project && phase === "editing" && (
+          <section className="rail-ai-panel" aria-label={t("build.layerInpaint")}>
+            <span className="eyebrow">{t("build.layerInpaint")}</span>
+            <span>{t("build.layerInpaintHelp")}</span>
+            <label>
+              <span>{t("build.inpaintPrompt")}</span>
+              <textarea
+                className="inpaint-prompt-textarea"
+                rows={3}
+                maxLength={500}
+                value={layerInpaintPrompt}
+                placeholder={t("build.inpaintPromptPlaceholder")}
+                onChange={(event) => setLayerInpaintPrompt(event.target.value)}
+              />
+            </label>
+          </section>
+        )}
         </div>
       </aside>
 
@@ -1619,6 +1701,7 @@ export default function App() {
               brushMode={maskBrushMode}
               brushSize={maskBrushSize}
               maskBlurRadius={maskBlurRadius}
+              motion={settings.motion}
               reduceMotion={settings.appearance.reduceMotion || Boolean(window.matchMedia?.("(prefers-reduced-motion: reduce)").matches)}
               reduceEffects={settings.appearance.reduceEffects}
               anchorLayerId={phase === "editing" && !maskEditor ? anchorLayerId : null}
@@ -1669,18 +1752,6 @@ export default function App() {
                         onChange={(event) => setMaskBrushSize(Number(event.target.value))}
                       />
                       <output>{maskBrushSize}px</output>
-                    </label>
-                    <label className="brush-size-control blur-control">
-                      <span>{t("mask.edgeBlurShort")}</span>
-                      <input
-                        type="range"
-                        min="0"
-                        max="24"
-                        step="1"
-                        value={maskBlurRadius}
-                        onChange={(event) => setMaskBlurRadius(Number(event.target.value))}
-                      />
-                      <output>{maskBlurRadius}px</output>
                     </label>
                   </div>
                 </div>
@@ -1741,6 +1812,14 @@ export default function App() {
       <aside id="inspector-panel" className={`inspector ${openPanel === "right" ? "panel-open" : ""}`}>
         {project ? (
           <>
+            <div className="panel-heading inspector-heading">
+              <div>
+                <span className="eyebrow">{phase === "selecting" ? t("layers.proposals") : t("layers.sceneStack")}</span>
+                <h2>{t("layers.foregroundCount", { count: project.layers.length })}</h2>
+              </div>
+              <span className="count-badge">{t("layers.onCount", { count: project.layers.filter((layer) => phase === "selecting" ? layer.selected : layer.visible).length })}</span>
+            </div>
+            <div className="inspector-scroll">
             <LayerInspector
               layers={project.layers}
               phase={phase}
@@ -1775,6 +1854,7 @@ export default function App() {
               onFocusTarget={setFocusedInpaintTargetId}
               onChange={updateLayers}
             />
+            </div>
             {phase === "selecting" && (
               <div className="build-panel build-scene-panel">
                 <div className="build-options">
@@ -1800,44 +1880,12 @@ export default function App() {
                     </button>
                   </div>
                   )}
-                  <label>
-                    <span>{t("build.inpainter")}</span>
-                    <select value={refinement} onChange={(event) => changeRefinement(event.target.value as InpaintRefinement)}>
-                      <option value="lama">{t("build.lama")}</option>
-                      <option value="powerpaint" disabled={!health?.providers.refinement?.available}>{t("build.powerpaint")}</option>
-                    </select>
-                  </label>
-                  {refinement === "powerpaint" && (
-                    <>
-                      <span className="redraw-note">{t("build.fullRedrawNote")}</span>
-                      <label>
-                        <span>{t("build.backgroundPrompt")}</span>
-                        <input
-                          type="text"
-                          maxLength={500}
-                          value={inpaintPrompt}
-                          placeholder={t("build.backgroundPromptPlaceholder")}
-                          onChange={(event) => setInpaintPrompt(event.target.value)}
-                        />
-                      </label>
-                    </>
-                  )}
-                  {health && !health.providers.refinement?.available && (
-                    <span className="redraw-note warning">
-                      {t("build.fullRedrawUnavailable", { detail: runtimeText(health.providers.refinement?.detail ?? "") })}
-                    </span>
-                  )}
                 </div>
                 <button
                   type="button"
                   className="primary-button"
                   onPointerEnter={() => setShowInpaintMask(true)}
-                  onPointerLeave={() => {
-                    setShowInpaintMask(false);
-                    // Leaving the button is the deliberate gesture that ends a
-                    // click burst, so the next press is unambiguously intended.
-                    setBuildCooldown(false);
-                  }}
+                  onPointerLeave={() => { setShowInpaintMask(false); setBuildCooldown(false); }}
                   onFocus={() => setShowInpaintMask(true)}
                   onBlur={() => setShowInpaintMask(false)}
                   disabled={inpaintDisabled}
@@ -1864,6 +1912,14 @@ export default function App() {
                   <strong>{t("build.layerInpaint")}</strong>
                   <span>{t("build.layerInpaintHelp")}</span>
                   <span className="redraw-note">{t("build.layerFullRedrawNote")}</span>
+                  {anchorTargetLayer && (
+                    <LayerAdjustments
+                      layer={anchorTargetLayer}
+                      camera={camera}
+                      disabled={maskEditor !== null}
+                      onChange={(change) => setProject((current) => current ? ({ ...current, layers: current.layers.map((layer) => layer.id === anchorTargetLayer.id ? { ...layer, ...change } : layer) }) : current)}
+                    />
+                  )}
                   <div className="inpaint-history-controls">
                     <span>{t("build.focusedLayer", { name: focusedInpaintTargetName ? layerName(focusedInpaintTargetName) : t("build.selectLayer") })}</span>
                     <button
@@ -1909,16 +1965,6 @@ export default function App() {
                       {t("build.resetAnchor")}
                     </button>
                   </div>
-                  <label>
-                    <span>{t("build.inpaintPrompt")}</span>
-                    <input
-                      type="text"
-                      maxLength={500}
-                      value={layerInpaintPrompt}
-                      placeholder={t("build.inpaintPromptPlaceholder")}
-                      onChange={(event) => setLayerInpaintPrompt(event.target.value)}
-                    />
-                  </label>
                   <div className="extra-mask-option">
                     <div>
                       <span>{t("build.rebuildHidden")}</span>
@@ -1949,7 +1995,7 @@ export default function App() {
       // Dropping a source image while the gate is up still queues it: the
       // overlay owns the pointer, so it carries the same drop target.
       <div
-        className="startup-overlay"
+        className={`startup-overlay ${preparationOnly ? "preparation-only" : ""}`}
         role="dialog"
         aria-modal="true"
         aria-label={t("startup.title")}

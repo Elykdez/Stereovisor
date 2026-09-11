@@ -702,12 +702,22 @@ def test_project_package_round_trip_restores_images_and_editor_state(
             "order": layer["order"],
             "offsetX": 0.18 if index == 0 else 0.0,
             "offsetY": -0.09 if index == 0 else 0.0,
+            "blur": -3.0 if index == 0 else layer["blur"],
             "selected": layer["selected"],
             "visible": index != 0,
         }
         for index, layer in enumerate(project["layers"])
     ]
-    camera = {"x": 0.31, "y": -0.17, "zoom": 1.12, "strength": 74}
+    camera = {
+        "x": 0.31,
+        "y": -0.17,
+        "zoom": 1.12,
+        "strength": 74,
+        "centerPull": 0.5,
+        "sceneScale": 1.0,
+        "depthOfField": 12.0,
+        "focusDepth": 0.94,
+    }
 
     exported = client.post(
         f"/api/projects/{project['id']}/export",
@@ -744,6 +754,7 @@ def test_project_package_round_trip_restores_images_and_editor_state(
     assert imported["project"]["layers"][0]["visible"] is False
     assert imported["project"]["layers"][0]["offsetX"] == 0.18
     assert imported["project"]["layers"][0]["offsetY"] == -0.09
+    assert imported["project"]["layers"][0]["blur"] == -3.0
     assert imported["project"]["layers"][0]["proposalMaskUrl"]
     assert imported["project"]["layers"][0]["confirmed"] is True
     assert client.get(imported["project"]["sourceUrl"]).status_code == 200

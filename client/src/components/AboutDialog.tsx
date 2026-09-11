@@ -42,9 +42,17 @@ export function AboutDialog({ version, onClose }: AboutDialogProps) {
         <div className="about-dialog-body">
           <img className="about-icon" src="./app-icon.png" alt="" />
           <span className="eyebrow">{t("brand.tagline")}</span>
-          <h2 id="about-title">{t("native.about")}</h2>
+          <h2 id="about-title">Stereovisor</h2>
           <p className="about-version">{t("native.aboutVersion")} {version}</p>
           <p id="about-description" className="about-description">{t("native.aboutDescription")}</p>
+          <a
+            className="about-repository"
+            href="https://github.com/Elykdez/Stereovisor"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            {t("about.repository")}
+          </a>
         </div>
         <footer className="about-dialog-footer">
           <button type="button" className="primary-button compact" onClick={onClose}>

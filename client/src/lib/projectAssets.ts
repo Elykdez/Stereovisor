@@ -30,6 +30,10 @@ export function mergeProjectResult(
         order: local?.order ?? layer.order,
         offsetX: local?.offsetX ?? layer.offsetX,
         offsetY: local?.offsetY ?? layer.offsetY,
+        feather: local ? local.feather : layer.feather,
+        blur: local?.blur ?? layer.blur,
+        centerPull: local?.centerPull ?? layer.centerPull,
+        scale: local?.scale ?? layer.scale,
         selected: local?.selected ?? layer.selected,
         visible: local?.visible ?? layer.visible,
         maskUrl:

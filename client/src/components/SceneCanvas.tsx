@@ -8,17 +8,18 @@ import {
   type MaskEditorTarget
 } from "./MaskEditorOverlay";
 import { loadServiceImage } from "../lib/api";
+import { featherLayerImage } from "../lib/layerFeather";
 import { appLog } from "../lib/logger";
 import { onServiceOriginChange } from "../lib/serviceOrigin";
 import { INPAINT_MOSAIC_STYLE, MaskMosaicRenderer, mosaicShapeForProgress } from "../lib/maskMosaic";
 import { useAppTranslation } from "../i18n";
-import { backgroundTransform, clamp, demoCameraAt, fitCanvasDimensions, fitVideoDimensions, layerTransform, visibleLayers, type LayerTransform } from "../lib/parallax";
-import type { CameraState, SceneLayer, SceneProject } from "../types";
+import { backgroundTransform, clamp, DEFAULT_DEMO_MOTION, demoCameraAt, fitCanvasDimensions, fitVideoDimensions, layerTransform, renderedLayerBlur, visibleLayers, type DemoMotionSettings, type LayerTransform } from "../lib/parallax";
+import { DEFAULT_LAYER_FEATHER, type CameraState, type SceneLayer, type SceneProject } from "../types";
 
 export interface SceneCanvasHandle {
   exportPng: () => Promise<void>;
   exportVideo: () => Promise<void>;
-  exportComposition: () => Promise<Blob>;
+  exportInpaintComposition: () => Promise<Blob>;
   exportEditedMask: () => Promise<Blob>;
   resetEditedMask: () => void;
   undoEditedMask: () => void;
@@ -46,6 +47,7 @@ interface Props {
   brushMode: MaskBrushMode;
   brushSize: number;
   maskBlurRadius: number;
+  motion?: DemoMotionSettings;
   reduceMotion?: boolean;
   // Swaps the progress mosaic for a plain CSS blur. That drops the WebGL pass
   // and the per-frame redraw it needs, which is the point on a slower GPU.
@@ -122,7 +124,7 @@ export function buildInpaintMaskCanvas(
 }
 
 /**
- * Progress mosaic, drawn over the finished frame while an inpainting job runs.
+ * Progress mosaic, drawn over the background beneath foreground layers.
  * The caller owns the renderer, the clock and the mask; leaving it out (exports,
  * tests, every state that is not mid-inpaint) draws the scene untouched.
  */
@@ -135,6 +137,8 @@ export interface MaskMosaicFrame {
   progress: number;
 }
 
+type SceneRenderPurpose = "final" | "inpaint-reference";
+
 export function drawScene(
   canvas: HTMLCanvasElement,
   project: SceneProject,
@@ -144,7 +148,8 @@ export function drawScene(
   maskEditing = false,
   showCompositionWhileMaskEditing = false,
   anchorLayerId: string | null = null,
-  mosaic: MaskMosaicFrame | null = null
+  mosaic: MaskMosaicFrame | null = null,
+  purpose: SceneRenderPurpose = "final"
 ): boolean {
   // Rendering is deliberately a pure projection of the current project and
   // camera state. Asset loading happens in the effect below, so a missing image
@@ -158,12 +163,30 @@ export function drawScene(
   context.clearRect(0, 0, canvas.width, canvas.height);
   context.imageSmoothingEnabled = true;
   context.imageSmoothingQuality = "high";
+  // Feather and blur are presentation-only. The model context must retain the
+  // raw plate and cutout pixels so repeated inpaints never bake post-effects
+  // back into editable assets.
+  const postEffectsEnabled = purpose === "final" && Boolean(project.backgroundUrl) && !maskEditing;
 
   const bg = backgroundTransform(camera);
+  const backgroundBlur = postEffectsEnabled
+    ? renderedLayerBlur(camera, 0)
+    : 0;
+  // Blurred pixels sample just outside the source edge. A small expansion keeps
+  // that sampling inside the image instead of fading into the checkerboard.
+  const backgroundBleed = backgroundBlur * 2;
   context.save();
   context.translate(canvas.width / 2 + bg.x * canvas.width, canvas.height / 2 + bg.y * canvas.height);
   context.scale(bg.scale, bg.scale);
-  context.drawImage(background, -canvas.width / 2, -canvas.height / 2, canvas.width, canvas.height);
+  context.filter = backgroundBlur > 0 ? `blur(${backgroundBlur.toFixed(2)}px)` : "none";
+  context.drawImage(
+    background,
+    -canvas.width / 2 - backgroundBleed,
+    -canvas.height / 2 - backgroundBleed,
+    canvas.width + backgroundBleed * 2,
+    canvas.height + backgroundBleed * 2
+  );
+  context.filter = "none";
   context.restore();
 
   if (maskEditing && !showCompositionWhileMaskEditing) return true;
@@ -183,29 +206,8 @@ export function drawScene(
     }
   }
 
-  const layers = project.backgroundUrl
-    ? visibleLayers(project.layers)
-    : project.layers
-      .filter((layer) => layer.selected)
-      .slice()
-      .sort((a, b) => a.depth - b.depth || a.order - b.order);
-  for (const layer of layers) {
-    const image = images.get(layer.cutoutUrl);
-    if (!image) continue;
-    const transform = layerTransform(camera, layer.depth, canvas.width, canvas.height, layer);
-    context.save();
-    context.translate(canvas.width / 2 + transform.x, canvas.height / 2 + transform.y);
-    context.scale(transform.scale, transform.scale);
-    context.drawImage(image, -canvas.width / 2, -canvas.height / 2, canvas.width, canvas.height);
-    context.restore();
-    if (layer.id === anchorLayerId) drawAnchorOutline(context, canvas, layer, transform);
-  }
-
   if (mosaic?.mask) {
-    // Shatters the area the model is rebuilding, which is what the Unity shader
-    // does while it waits on a generation. It rides the plate's transform so the
-    // cells stay registered with the pixels they sample, and the cells resolve
-    // from huge blocks to fine ones as the job reports progress.
+    // Keep the effect aligned to the background and beneath foreground cutouts.
     mosaic.renderer.configure(canvas.width, canvas.height, mosaicShapeForProgress(mosaic.progress));
     mosaic.renderer.setMask(mosaic.mask);
     mosaic.renderer.setPlate(background);
@@ -219,7 +221,54 @@ export function drawScene(
       context.restore();
     }
   }
+
+  const layers = project.backgroundUrl
+    ? visibleLayers(project.layers)
+    : project.layers
+      .filter((layer) => layer.selected)
+      .slice()
+      .sort((a, b) => a.depth - b.depth || a.order - b.order);
+  for (const layer of layers) {
+    const image = images.get(layer.cutoutUrl);
+    if (!image) continue;
+    const transform = layerTransform(camera, layer.depth, canvas.width, canvas.height, layer, [project.width, project.height]);
+    context.save();
+    context.translate(canvas.width / 2 + transform.x, canvas.height / 2 + transform.y);
+    context.scale(transform.scale, transform.scale);
+    const feather = postEffectsEnabled
+      ? Math.max(0, Math.min(24, layer.feather ?? DEFAULT_LAYER_FEATHER))
+      : 0;
+    const blur = postEffectsEnabled
+      ? renderedLayerBlur(camera, layer.depth, layer.blur ?? 0)
+      : 0;
+    context.filter = blur > 0 ? `blur(${blur.toFixed(2)}px)` : "none";
+    context.drawImage(featherLayerImage(image, feather), -canvas.width / 2, -canvas.height / 2, canvas.width, canvas.height);
+    context.filter = "none";
+    context.restore();
+    if (layer.id === anchorLayerId) drawAnchorOutline(context, canvas, layer, transform);
+  }
+
   return true;
+}
+
+export function drawInpaintComposition(
+  canvas: HTMLCanvasElement,
+  project: SceneProject,
+  camera: CameraState,
+  images: Map<string, HTMLImageElement>
+): boolean {
+  return drawScene(
+    canvas,
+    project,
+    { x: 0, y: 0, zoom: 1, strength: camera.strength },
+    images,
+    false,
+    false,
+    false,
+    null,
+    null,
+    "inpaint-reference"
+  );
 }
 
 function drawAnchorOutline(
@@ -256,6 +305,14 @@ const DEMO_VIDEO_TYPES = [
   "video/webm"
 ] as const;
 
+const DEMO_VIDEO_DURATION_MS = 4000;
+const DEMO_VIDEO_FRAME_RATE = 24;
+
+export function demoVideoFrameIndex(elapsedMs: number): number {
+  const frameCount = DEMO_VIDEO_DURATION_MS / 1000 * DEMO_VIDEO_FRAME_RATE;
+  return Math.min(frameCount, Math.max(0, Math.floor(elapsedMs / 1000 * DEMO_VIDEO_FRAME_RATE)));
+}
+
 export function selectDemoVideoType(isSupported: (type: string) => boolean): string | null {
   return DEMO_VIDEO_TYPES.find((type) => isSupported(type)) ?? null;
 }
@@ -267,7 +324,8 @@ export function demoVideoExtension(mimeType: string): "mp4" | "webm" {
 async function recordDemoVideo(
   project: SceneProject,
   camera: CameraState,
-  images: Map<string, HTMLImageElement>
+  images: Map<string, HTMLImageElement>,
+  motion: DemoMotionSettings,
 ): Promise<Blob> {
   if (typeof MediaRecorder === "undefined") throw new Error("This runtime cannot encode demo video.");
   const mimeType = selectDemoVideoType((type) => MediaRecorder.isTypeSupported(type));
@@ -277,7 +335,7 @@ async function recordDemoVideo(
   const canvas = document.createElement("canvas");
   canvas.width = width;
   canvas.height = height;
-  const stream = canvas.captureStream(24);
+  const stream = canvas.captureStream(DEMO_VIDEO_FRAME_RATE);
   const chunks: Blob[] = [];
   const recorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: 4_000_000 });
   const stopped = new Promise<Blob>((resolve, reject) => {
@@ -288,21 +346,30 @@ async function recordDemoVideo(
     recorder.onstop = () => resolve(new Blob(chunks, { type: mimeType }));
   });
 
-  const durationMs = 4000;
-  const started = performance.now();
-  if (!drawScene(canvas, project, demoCameraAt(camera, 0), images)) {
+  if (!drawScene(canvas, project, demoCameraAt(camera, 0, motion), images)) {
+    stream.getTracks().forEach((track) => track.stop());
     throw new Error("The scene images are not ready for video export.");
   }
-  recorder.start(250);
-  while (performance.now() - started < durationMs) {
-    const progress = (performance.now() - started) / durationMs;
-    drawScene(canvas, project, demoCameraAt(camera, progress), images);
+  recorder.start(1000);
+  const started = performance.now();
+  const frameCount = demoVideoFrameIndex(DEMO_VIDEO_DURATION_MS);
+  let renderedFrame = 0;
+  while (renderedFrame < frameCount) {
     await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+    const nextFrame = demoVideoFrameIndex(performance.now() - started);
+    // Canvas capture is capped at 24 fps. Redrawing at the display's 60+ Hz
+    // only repeats expensive filtered compositions and starves the encoder.
+    if (nextFrame <= renderedFrame) continue;
+    renderedFrame = nextFrame;
+    drawScene(canvas, project, demoCameraAt(camera, renderedFrame / frameCount, motion), images);
   }
-  drawScene(canvas, project, demoCameraAt(camera, 1), images);
   recorder.stop();
-  const result = await stopped;
-  stream.getTracks().forEach((track) => track.stop());
+  let result: Blob;
+  try {
+    result = await stopped;
+  } finally {
+    stream.getTracks().forEach((track) => track.stop());
+  }
   if (!result.size) throw new Error("The video encoder produced an empty file.");
   return result;
 }
@@ -322,6 +389,7 @@ export const SceneCanvas = forwardRef<SceneCanvasHandle, Props>(function SceneCa
     brushMode,
     brushSize,
     maskBlurRadius,
+    motion = DEFAULT_DEMO_MOTION,
     reduceMotion = false,
     reduceEffects = false,
     anchorLayerId,
@@ -562,7 +630,7 @@ export const SceneCanvas = forwardRef<SceneCanvasHandle, Props>(function SceneCa
     exportVideo: async () => {
       if (loading) throw new Error("Wait for the scene images to finish loading.");
       if (loadError) throw new Error(loadError);
-      const blob = await recordDemoVideo(project, camera, imagesRef.current);
+      const blob = await recordDemoVideo(project, camera, imagesRef.current, motion);
       const extension = demoVideoExtension(blob.type);
       const name = `stereovisor-${project.id.slice(0, 8)}-demo.${extension}`;
       if (window.stereovisor?.saveVideo) {
@@ -573,13 +641,13 @@ export const SceneCanvas = forwardRef<SceneCanvasHandle, Props>(function SceneCa
       downloadBlob(blob, name);
       appLog.info("workflow.video-export.completed", { projectId: project.id, bytes: blob.size, type: blob.type });
     },
-    exportComposition: async () => {
+    exportInpaintComposition: async () => {
       if (loading) throw new Error("Wait for the scene images to finish loading.");
       if (loadError) throw new Error(loadError);
       const output = document.createElement("canvas");
       output.width = project.width;
       output.height = project.height;
-      if (!drawScene(output, project, { x: 0, y: 0, zoom: 1, strength: camera.strength }, imagesRef.current)) {
+      if (!drawInpaintComposition(output, project, camera, imagesRef.current)) {
         throw new Error("The full scene composition is not ready.");
       }
       const blob = await new Promise<Blob>((resolve, reject) =>

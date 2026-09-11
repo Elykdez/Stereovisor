@@ -62,8 +62,9 @@ Every GPU provider is loaded for one stage and explicitly released before the ne
 3. Sort visible layers from far to near.
 4. Translate each layer by `cameraOffset * parallaxStrength * depth`.
 5. Apply zoom around the canvas center.
-6. Render continuously only while an image is loading, the pointer is moving, or motion preview is active.
-7. For demo export, render the same cached layers to a capped 1280-pixel canvas and encode four seconds of camera motion with Chromium MediaRecorder.
+6. Derive depth-of-field blur from each layer's distance to the camera focus plane, then add the layer's signed blur correction without rewriting layer state.
+7. Render continuously only while an image is loading, the pointer is moving, or motion preview is active.
+8. For demo export, render the same cached layers to a capped 1280-pixel canvas and encode four seconds of camera motion with Chromium MediaRecorder.
 
 ### Portable Project
 
@@ -221,4 +222,4 @@ The visual language is a dark graphite workspace with warm ivory text and a rest
 
 ## 8. Packaging Plan
 
-Version 0.3 runs from source. `Run Stereovisor.cmd` creates the main and PowerPaint virtual environments, pins the upstream DA3 and PowerPaint source revisions, and downloads all model weights on first launch. Later launches validate and reuse these assets. H.264 MP4 export uses Electron's bundled Chromium encoder, with WebM fallback, so FFmpeg is not installed or distributed. Packaging and signing remain separate.
+Version 0.3 runs from source. `Run Stereovisor.cmd` creates the main and PowerPaint virtual environments, pins the upstream DA3 and PowerPaint source revisions, and downloads model weights behind a dedicated preparation window on first launch. Later launches start the installed local service directly while offline and open the editor after its live provider check; they re-enter preparation only when required assets are missing or damaged. H.264 MP4 export uses Electron's bundled Chromium encoder, with WebM fallback, so FFmpeg is not installed or distributed. Packaging and signing remain separate.

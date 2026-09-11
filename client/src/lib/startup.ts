@@ -15,6 +15,17 @@ export type RequiredAiProvider = (typeof REQUIRED_AI_PROVIDERS)[number];
 
 const PREPARING_STATES = new Set(["starting", "downloading", "initializing"]);
 
+export function isPreparationWindow(search: string): boolean {
+  return new URLSearchParams(search).get("startup") === "preparation";
+}
+
+export function shouldHideEditorDuringPreparation(
+  preparationOnly: boolean,
+  startupReady: boolean,
+): boolean {
+  return preparationOnly && !startupReady;
+}
+
 export function isProviderPrepared(
   provider: ProviderStatus | undefined,
 ): boolean {
@@ -61,8 +72,8 @@ export function isLocalAiReady(health: HealthStatus | null): boolean {
  *
  * This is a duration, not a poll count: the readiness cadence varies with the
  * event channel, so a count would silently mean different things on different
- * transports. The launcher swaps the core health service for the prepared CUDA
- * runtime on every launch, and that handover must stay quiet.
+ * transports. First-run preparation swaps the core health service for the
+ * prepared CUDA runtime, and that handover must stay quiet.
  */
 export const RECONNECT_GRACE_MS = 8000;
 

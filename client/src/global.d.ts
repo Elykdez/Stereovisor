@@ -53,6 +53,7 @@ declare global {
       }) => Promise<void>;
       onOpenOptions: (listener: () => void) => () => void;
       onOpenAbout: (listener: () => void) => () => void;
+      completePreparation: () => void;
       setLocale: (locale: "en" | "ja" | "ko" | "zh-CN") => void;
     };
   }

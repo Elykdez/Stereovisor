@@ -1,9 +1,11 @@
 import {
   healthPollDelayMs,
+  isPreparationWindow,
   isLocalAiReady,
   isOutageReportable,
   readyProviderCount,
   RECONNECT_GRACE_MS,
+  shouldHideEditorDuringPreparation,
   startupProgressPercent,
 } from "@/lib/startup";
 import type { HealthStatus } from "@/types";
@@ -33,6 +35,15 @@ function health(overrides: Partial<HealthStatus> = {}): HealthStatus {
 }
 
 describe("startup readiness", () => {
+  it("uses the dedicated preparation surface only for first-run launches", () => {
+    expect(isPreparationWindow("?startup=preparation")).toBe(true);
+    expect(isPreparationWindow("")).toBe(false);
+    expect(isPreparationWindow("?startup=application")).toBe(false);
+    expect(shouldHideEditorDuringPreparation(true, false)).toBe(true);
+    expect(shouldHideEditorDuringPreparation(true, true)).toBe(false);
+    expect(shouldHideEditorDuringPreparation(false, false)).toBe(false);
+  });
+
   it("requires the AI engine and every core provider", () => {
     expect(isLocalAiReady(health())).toBe(true);
     expect(isLocalAiReady(health({ activeEngine: "preview" }))).toBe(false);

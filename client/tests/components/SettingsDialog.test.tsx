@@ -68,6 +68,13 @@ describe("SettingsDialog", () => {
 
     fireEvent.change(getByRole("spinbutton", { name: /Default strength/ }), { target: { value: "999" } });
     expect(getByRole("slider", { name: /Default strength slider/ })).toHaveValue("100");
+
+    fireEvent.click(getByRole("button", { name: "Default strength -" }));
+    expect(getByRole("spinbutton", { name: /Default strength/ })).toHaveValue(99);
+
+    fireEvent.click(getByRole("button", { name: "Default strength +" }));
+    expect(getByRole("slider", { name: /Default strength slider/ })).toHaveValue("100");
+    expect(getByRole("button", { name: "Default strength +" })).toBeDisabled();
   });
 
   it("opens on appearance, where language now lives beside the visual toggles", async () => {

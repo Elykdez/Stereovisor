@@ -1,3 +1,6 @@
+import { existsSync } from "node:fs";
+import path from "node:path";
+
 const REQUIRED_PROVIDER_KEYS = [
   "runtime",
   "segmentation",
@@ -26,6 +29,23 @@ export interface ServiceLaunchPolicy {
   windowsHide: boolean;
   stdio: "inherit" | "pipe";
   stopWithApp: boolean;
+}
+
+export function requiredModelFiles(modelRoot: string): string[] {
+  return [
+    path.join(modelRoot, "grounding-dino-base", ".stereovisor-ready"),
+    path.join(modelRoot, "sam2.1-hiera-small", ".stereovisor-ready"),
+    path.join(modelRoot, "da3-small", ".stereovisor-ready"),
+    path.join(modelRoot, "inspyrenet", "ckpt_base.pth"),
+    path.join(modelRoot, "big-lama.pt"),
+  ];
+}
+
+export function requiredModelsReady(
+  modelRoot: string,
+  fileExists: (filePath: string) => boolean = existsSync,
+): boolean {
+  return requiredModelFiles(modelRoot).every(fileExists);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

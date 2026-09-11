@@ -15,6 +15,16 @@ function numberValue(value: string, fallback: number): number {
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
+function steppedValue(value: number, direction: -1 | 1, min: number, max: number, step: number): number {
+  const decimalPlaces = Math.max(
+    (String(step).split(".")[1] ?? "").length,
+    (String(min).split(".")[1] ?? "").length
+  );
+  const precision = 10 ** decimalPlaces;
+  const next = Math.round((value + direction * step) * precision) / precision;
+  return Math.min(max, Math.max(min, next));
+}
+
 interface NumericSettingProps {
   label: string;
   settingKey: string;
@@ -50,17 +60,37 @@ function NumericSetting({ label, settingKey, value, min, max, step, help, onChan
           aria-label={`${label} slider`}
           onChange={(event) => updateValue(event.target.value)}
         />
-        <input
-          id={`${inputId}-number`}
-          className="settings-number-input"
-          type="number"
-          min={min}
-          max={max}
-          step={step}
-          value={value}
-          aria-label={label}
-          onChange={(event) => updateValue(event.target.value)}
-        />
+        <div className="settings-number-stepper">
+          <button
+            type="button"
+            className="settings-step-button"
+            aria-label={`${label} -`}
+            disabled={value <= min}
+            onClick={() => onChange(steppedValue(value, -1, min, max, step))}
+          >
+            &minus;
+          </button>
+          <input
+            id={`${inputId}-number`}
+            className="settings-number-input"
+            type="number"
+            min={min}
+            max={max}
+            step={step}
+            value={value}
+            aria-label={label}
+            onChange={(event) => updateValue(event.target.value)}
+          />
+          <button
+            type="button"
+            className="settings-step-button"
+            aria-label={`${label} +`}
+            disabled={value >= max}
+            onClick={() => onChange(steppedValue(value, 1, min, max, step))}
+          >
+            +
+          </button>
+        </div>
       </div>
       {help && <small>{help}</small>}
     </label>

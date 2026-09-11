@@ -667,7 +667,7 @@ export async function exportProjectPackage(
       body: JSON.stringify({
         camera,
         layers: project.layers.map(
-          ({ id, depth, order, offsetX, offsetY, selected, visible }) => ({
+          ({ id, depth, order, offsetX, offsetY, selected, visible, feather, blur, centerPull, scale }) => ({
             id,
             depth,
             order,
@@ -675,6 +675,10 @@ export async function exportProjectPackage(
             offsetY,
             selected,
             visible,
+            feather,
+            blur,
+            centerPull,
+            scale,
           }),
         ),
       }),

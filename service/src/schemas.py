@@ -71,6 +71,12 @@ class LayerPayload(BaseModel):
     # segmentation instead of salient-subject matting.
     kind: Literal["instance", "depth-plane", "manual"] = "instance"
     confidence: float = 1.0
+    # Final-scene alpha feather in source pixels; mask assets stay untouched.
+    feather: float = Field(default=2.0, ge=0, le=24)
+    # Signed correction layered over the camera's automatic depth blur.
+    blur: float = Field(default=0.0, ge=-24, le=24)
+    centerPull: float = Field(default=0.5, ge=0, le=1)
+    scale: float = Field(default=1.0, ge=0.5, le=2)
 
 
 class ProjectPayload(BaseModel):
@@ -127,6 +133,10 @@ class CameraPayload(BaseModel):
     y: float = Field(ge=-1, le=1)
     zoom: float = Field(ge=1, le=1.35)
     strength: float = Field(ge=0, le=100)
+    centerPull: float = Field(default=0.5, ge=0, le=1)
+    sceneScale: float = Field(default=1.0, ge=0.5, le=2)
+    depthOfField: float = Field(default=0.0, ge=0, le=24)
+    focusDepth: float = Field(default=1.0, ge=0, le=1)
 
 
 class LayerEditorPayload(BaseModel):
@@ -137,6 +147,10 @@ class LayerEditorPayload(BaseModel):
     offsetY: float = Field(default=0.0, ge=-1, le=1)
     selected: bool
     visible: bool
+    feather: float = Field(default=2.0, ge=0, le=24)
+    blur: float = Field(default=0.0, ge=-24, le=24)
+    centerPull: float = Field(default=0.5, ge=0, le=1)
+    scale: float = Field(default=1.0, ge=0.5, le=2)
 
 
 class ProjectExportRequest(BaseModel):

@@ -136,6 +136,38 @@ function Test-StereovisorService {
     }
 }
 
+function Test-StereovisorAiService {
+    try {
+        $Health = Invoke-RestMethod -Uri "http://127.0.0.1:$($ServicePort)/api/health" -TimeoutSec 2
+        $RequiredProviders = @("runtime", "segmentation", "matting", "depth", "inpainting")
+        return $Health.status -eq "ok" -and
+            $Health.version -eq $AppVersion -and
+            $Health.localOnly -eq $true -and
+            $Health.activeEngine -eq "ai" -and
+            $Health.startupState -eq "ready" -and
+            @($RequiredProviders | Where-Object {
+                -not $Health.providers.PSObject.Properties[$_].Value.available
+            }).Count -eq 0
+    }
+    catch {
+        return $false
+    }
+}
+
+function Test-StereovisorInstallation {
+    $RequiredFiles = @(
+        (Join-Path $ProjectRoot ".venv-ai\Scripts\python.exe"),
+        (Join-Path $ProjectRoot ".venv-powerpaint\Scripts\python.exe"),
+        (Join-Path $ProjectRoot "node_modules\electron\dist\electron.exe"),
+        (Join-Path $ModelRoot "grounding-dino-base\.stereovisor-ready"),
+        (Join-Path $ModelRoot "sam2.1-hiera-small\.stereovisor-ready"),
+        (Join-Path $ModelRoot "da3-small\.stereovisor-ready"),
+        (Join-Path $ModelRoot "inspyrenet\ckpt_base.pth"),
+        (Join-Path $ModelRoot "big-lama.pt")
+    )
+    return @($RequiredFiles | Where-Object { -not (Test-Path -LiteralPath $_) }).Count -eq 0
+}
+
 function Stop-OrphanedStereovisorService {
     if (Test-StereovisorRenderer) { return $false }
     $serviceScript = (Join-Path $ProjectRoot "service\scripts\run-service.py").ToLowerInvariant()
@@ -178,8 +210,8 @@ function Stop-OrphanedStereovisorService {
 
 try {
     $RendererReady = Test-StereovisorRenderer
-    $ServiceReady = Test-StereovisorService
-    if ($RendererReady -and $ServiceReady) {
+    $AiServiceReady = Test-StereovisorAiService
+    if ($RendererReady -and $AiServiceReady) {
         if (-not (Get-Command npm -ErrorAction SilentlyContinue)) {
             throw "Node.js and npm were not found in PATH. Install Node.js 22 or newer, then run Stereovisor again."
         }
@@ -192,14 +224,14 @@ try {
         exit $LASTEXITCODE
     }
 
-    if ($ShowConsole -and $ServiceReady) {
+    if ($AiServiceReady) {
         if (Test-TcpPort -Port 5173) {
             throw "Stereovisor cannot start because port 5173 is occupied by another process. Close that process and run Stereovisor again."
         }
         $env:STEREOVISOR_MODE = "ai"
         $env:STEREOVISOR_DEVICE = "cuda"
         $env:STEREOVISOR_MODEL_ROOT = Join-Path $ProjectRoot "service\.models"
-        Write-Host "Reusing the persistent Stereovisor local service..." -ForegroundColor Cyan
+        Write-Host "Reusing the running Stereovisor local service..." -ForegroundColor Cyan
         Start-StereovisorApp
         Wait-Process -Id $AppProcess.Id
         exit $AppProcess.ExitCode
@@ -217,6 +249,35 @@ try {
     $env:STEREOVISOR_DEVICE = "cuda"
     $env:STEREOVISOR_MODEL_ROOT = $ModelRoot
 
+    # A stopped service is not an uninstalled application. Once the local
+    # runtime and required weights exist, start that offline service directly
+    # and open the editor only after its live provider checks pass.
+    if (Test-StereovisorInstallation) {
+        Remove-Item Env:\STEREOVISOR_PREPARATION_ONLY -ErrorAction SilentlyContinue
+        $env:STEREOVISOR_PYTHON = Join-Path $ProjectRoot ".venv-ai\Scripts\python.exe"
+        Write-Host "Starting the installed Stereovisor local service..." -ForegroundColor Cyan
+        $ServiceProcess = Start-StereovisorService
+        for ($attempt = 0; $attempt -lt 240 -and -not (Test-StereovisorAiService); $attempt++) {
+            if ($ServiceProcess.HasExited) { break }
+            Start-Sleep -Milliseconds 500
+        }
+        if (Test-StereovisorAiService) {
+            Start-StereovisorApp
+            Wait-Process -Id $AppProcess.Id
+            exit $AppProcess.ExitCode
+        }
+
+        # An apparently complete but damaged installation returns to the
+        # preparation path, where ensure-ready.ps1 can repair it.
+        if ($ServiceProcess -and -not $ServiceProcess.HasExited) {
+            Stop-StereovisorProcessTree -ProcessId $ServiceProcess.Id
+        }
+        $ServiceProcess = $null
+        for ($attempt = 0; $attempt -lt 20 -and (Test-TcpPort -Port $ServicePort); $attempt++) {
+            Start-Sleep -Milliseconds 250
+        }
+    }
+
     # Claim the bootstrap before the health service can answer. Without this the
     # renderer's first poll would read a stale status file and briefly show a
     # "not ready" card on every launch.
@@ -225,7 +286,11 @@ try {
     $BootstrapClaimed = $true
     Publish-BootstrapStatus -State "starting" -Detail "Starting the local Stereovisor services." -Provider "runtime" -Progress 1
 
-    # A renderer can show its startup gate while the first-run Python core is
+    # First-time setup uses a dedicated progress surface. The editor is not
+    # rendered until the prepared AI service verifies every required provider.
+    $env:STEREOVISOR_PREPARATION_ONLY = "1"
+
+    # The preparation window can show its startup gate while the Python core is
     # being provisioned. Only defer the window when Electron itself is absent.
     $ElectronExecutable = Join-Path $ProjectRoot "node_modules\electron\dist\electron.exe"
     if (Test-Path -LiteralPath $ElectronExecutable) {

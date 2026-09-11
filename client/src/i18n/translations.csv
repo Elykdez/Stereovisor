@@ -46,8 +46,8 @@ settings.defaultZoom,Default zoom,既定のズーム,기본 확대/축소,默认
 settings.defaultZoomHelp,Initial camera zoom from 1.00 to 1.35.,初期カメラズームは 1.00 から 1.35 です。,초기 카메라 확대/축소 범위는 1.00에서 1.35입니다.,初始相机缩放范围为 1.00 至 1.35。
 settings.defaultStrength,Default strength,既定の強度,기본 강도,默认强度
 settings.defaultStrengthHelp,Initial parallax strength from 0 to 100.,初期パララックス強度は 0 から 100 です。,초기 패럴랙스 강도는 0에서 100입니다.,初始视差强度范围为 0 至 100。
-settings.motionSpeed,Preview speed,プレビュー速度,미리보기 속도,预览速度
-settings.motionSpeedHelp,Speed multiplier for automatic camera motion.,自動カメラモーションの速度倍率。,자동 카메라 모션의 속도 배율입니다.,自动相机运动的速度倍数。
+settings.motionSpeed,Motion speed,モーション速度,모션 속도,运动速度
+settings.motionSpeedHelp,Speed multiplier for automatic preview and demo video motion.,自動プレビューとデモ動画のカメラモーション速度倍率。,자동 미리보기 및 데모 비디오 모션의 속도 배율입니다.,自动预览和演示视频运动的速度倍数。
 settings.horizontalAmount,Horizontal amount,水平振幅,가로 범위,水平幅度
 settings.verticalAmount,Vertical amount,垂直振幅,세로 범위,垂直幅度
 settings.advanced,Advanced,詳細設定,고급,高级
@@ -98,6 +98,7 @@ startup.provider.matting,Matting model,マッティングモデル,매팅 모델
 startup.provider.depth,Depth model,深度モデル,깊이 모델,深度模型
 startup.provider.inpainting,Inpainting model,インペイントモデル,인페인팅 모델,修复模型
 about.close,Close,閉じる,닫기,关闭
+about.repository,Designed by Elykdez,デザイン: Elykdez,Elykdez 디자인,由 Elykdez 设计
 brand.tagline,Local depth studio,ローカル深度スタジオ,로컬 깊이 스튜디오,本地景深工作室
 file.importing,Importing...,読み込み中...,가져오는 중...,正在导入...
 file.importProject,Import project,プロジェクトを読み込む,프로젝트 가져오기,导入项目
@@ -188,7 +189,7 @@ build.fullRedrawUnavailable,Full redraw unavailable: {{detail}}. Relaunch the on
 build.inpaintingLocally,Inpainting locally,ローカルでインペイント中,로컬 인페인팅 중,正在本地修补
 build.localDetail,The source and masks stay on this machine.,ソースとマスクはこのマシン内に保持されます。,소스와 마스크는 이 컴퓨터에만 유지됩니다.,源图像和蒙版始终保留在此设备上。
 build.layerInpaint,Layer inpaint,レイヤーインペイント,레이어 인페인트,图层修补
-build.layerInpaintHelp,"Select Inpaint on Background or any foreground layer, then paint over the full composition.",背景または前景レイヤーで「インペイント」を選び、コンポジション全体の上を塗ります。,배경 또는 전경 레이어에서 인페인트를 선택한 다음 전체 컴포지션 위에 칠합니다.,在背景或任一前景图层上选择“修补”，然后在完整合成画面上涂抹。
+build.layerInpaintHelp,"Select Inpaint on Background or any foreground layer, then paint over the full composition.",背景または前景レイヤーで「インペイント」を選び、コンポジション全体の上を塗ります。,배경 또는 전경 레이어에서 인페인트를 선택한 다음 전체 컴포지션 위에 칠합니다.,在背景或任一前景图层上选择“修补”，然后在完整画面上涂抹。
 build.layerFullRedrawNote,PowerPaint full redraw / denoise 1.00. Every painted source pixel is discarded.,PowerPaint 全面再描画 / ノイズ除去 1.00。塗った元ピクセルはすべて破棄されます。,PowerPaint 전체 다시 그리기 / 노이즈 제거 1.00. 칠한 모든 원본 픽셀은 삭제됩니다.,PowerPaint 完整重绘 / 去噪 1.00。所有涂抹过的源像素都将被丢弃。
 build.focusedLayer,Focused layer: {{name}},対象レイヤー：{{name}},대상 레이어: {{name}},当前图层：{{name}}
 build.selectLayer,Select a scene layer,シーンレイヤーを選択,장면 레이어 선택,选择场景图层
@@ -260,6 +261,14 @@ layers.confirmed,Confirmed,確定済み,확인됨,已确认
 layers.refined,Refined,調整済み,다듬어짐,已优化
 layers.rough,Rough,ラフ,러프,粗略
 layers.depthLabel,{{name}} depth,{{name}} の深度,{{name}} 깊이,{{name}} 深度
+layers.featherLabel,{{name}} feather,{{name}} のフェザー,{{name}} 페더,{{name}} 羽化
+layers.adjustmentsLabel,Adjust {{name}},{{name}} を調整,{{name}} 조정,调整 {{name}}
+layers.scale,Scale,スケール,크기,缩放
+layers.feather,Feather,フェザー,페더,羽化
+layers.blur,Blur,ぼかし,블러,模糊
+layers.blurAdjustment,Blur offset,ぼかし補正,흐림 보정,模糊偏移
+layers.blurFormula,Auto {{base}} px + offset {{offset}} px = final {{final}} px,自動 {{base}} px + 補正 {{offset}} px = 最終 {{final}} px,자동 {{base}} px + 보정 {{offset}} px = 최종 {{final}} px,自动 {{base}} px + 偏移 {{offset}} px = 最终 {{final}} px
+layers.featherDetail,Default is 2 px for every layer.,既定値は全レイヤー 2 px,모든 레이어 기본값은 2px입니다.,每个图层默认值为 2 像素
 layers.paintLayerTitle,Paint an area to fully redraw on {{name}},{{name}} で全面再描画する領域を塗る,{{name}}에서 완전히 다시 그릴 영역 칠하기,涂抹要在 {{name}} 上完全重绘的区域
 layers.edit,Edit,編集,편집,编辑
 layers.cancelEditTitle,Close the mask editor without saving,保存せずにマスクエディターを閉じる,저장하지 않고 마스크 편집기 닫기,关闭蒙版编辑器且不保存
@@ -290,11 +299,20 @@ layers.confirm,Confirm,確定,확인,确认
 camera.controls,Camera controls,カメラコントロール,카메라 컨트롤,相机控件
 camera.title,Camera,カメラ,카메라,相机
 camera.rig,Parallax rig,パララックスリグ,패럴랙스 리그,视差相机架
+camera.exportMotionHint,Demo exports use this rig and the motion settings in Options > Camera.,デモの書き出しではこのリグと「オプション > カメラ」のモーション設定を使用します。,데모 내보내기는 이 리그와 옵션 > 카메라의 모션 설정을 사용합니다.,演示导出使用此相机架以及“选项 > 相机”中的运动设置。
 camera.reset,Reset,リセット,초기화,重置
+camera.viewGroup,View,視点,보기,视图
+camera.depthGroup,Scene depth,シーンの奥行き,장면 깊이,场景深度
+camera.lensGroup,Lens focus,レンズフォーカス,렌즈 초점,镜头焦点
 camera.horizontal,Horizontal,水平,수평,水平
 camera.vertical,Vertical,垂直,수직,垂直
 camera.zoom,Zoom,ズーム,확대/축소,缩放
 camera.strength,Strength,強度,강도,强度
+camera.centerPull,Center layers,レイヤーを中央へ,레이어 중앙 정렬,居中图层
+camera.sceneScale,Scene scale,シーンのスケール,장면 크기,场景缩放
+camera.depthOfField,Depth of field,被写界深度,피사계 심도,景深
+camera.focusDepth,Focus depth,ピントの深度,초점 깊이,对焦深度
+camera.dofHelp,Depth-derived blur. Per-layer blur adds or subtracts from this base.,深度に応じてぼかします。レイヤーごとのぼかしで基準値を加減できます。,깊이에 따라 흐림을 계산합니다. 레이어별 흐림으로 기준값을 더하거나 뺄 수 있습니다.,根据深度计算模糊；每层模糊可在此基准上加减。
 camera.stop,Stop motion,モーション停止,모션 중지,停止运动
 camera.preview,Preview motion,モーションをプレビュー,모션 미리보기,预览运动
 scene.fullComposition,Full composition,コンポジション全体,전체 컴포지션,完整合成画面

@@ -1,6 +1,8 @@
 import {
   isCompatibleServiceHealth,
   probeStereovisorService,
+  requiredModelFiles,
+  requiredModelsReady,
   serviceLaunchPolicy,
 } from "../../electron/serviceLifecycle";
 
@@ -18,6 +20,15 @@ const health = {
 };
 
 describe("local service lifecycle", () => {
+  it("distinguishes an installed offline model set from a stopped service", () => {
+    const files = requiredModelFiles("C:\\Stereovisor\\models");
+    const installed = new Set(files);
+
+    expect(requiredModelsReady("C:\\Stereovisor\\models", (file) => installed.has(file))).toBe(true);
+    installed.delete(files[3]);
+    expect(requiredModelsReady("C:\\Stereovisor\\models", (file) => installed.has(file))).toBe(false);
+  });
+
   it("keeps the hidden service owned by the app", () => {
     expect(serviceLaunchPolicy(false)).toEqual({
       detached: false,
