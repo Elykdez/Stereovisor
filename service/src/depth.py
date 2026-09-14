@@ -50,14 +50,14 @@ def normalize_depth(depth: np.ndarray, size: tuple[int, int]) -> np.ndarray:
 def estimate_near_map(image: Image.Image) -> tuple[np.ndarray, int]:
     if not snapshot_ready(DA3_PATH):
         raise RuntimeError(
-            "Depth Anything 3 weights are missing. Run scripts/ensure-ready.ps1."
+            "Depth Anything 3 weights are missing. Run the platform AI setup launcher."
         )
     try:
         import torch
         from depth_anything_3.api import DepthAnything3
     except ImportError as error:
         raise RuntimeError(
-            "Depth Anything 3 is unavailable. Run service/scripts/setup-ai.ps1."
+            "Depth Anything 3 is unavailable. Run the platform AI setup launcher."
         ) from error
 
     device = resolve_device(torch)
@@ -109,7 +109,7 @@ def _largest_components(
         import cv2
     except ImportError as error:
         raise RuntimeError(
-            "OpenCV is unavailable. Run service/scripts/setup-ai.ps1."
+            "OpenCV is unavailable. Run the platform AI setup launcher."
         ) from error
 
     count, labels, stats, _ = cv2.connectedComponentsWithStats(
@@ -152,7 +152,7 @@ def foreground_depth_plane(
         import cv2
     except ImportError as error:
         raise RuntimeError(
-            "OpenCV is unavailable. Run service/scripts/setup-ai.ps1."
+            "OpenCV is unavailable. Run the platform AI setup launcher."
         ) from error
     kernel = np.ones((7, 7), dtype=np.uint8)
     candidate = cv2.morphologyEx(candidate, cv2.MORPH_CLOSE, kernel)

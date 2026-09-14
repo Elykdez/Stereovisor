@@ -10,6 +10,7 @@ release-*/
 .venv/
 .venv-ai/
 .venv-powerpaint/
+.python-runtime/
 __pycache__/
 .pytest_cache/
 .ruff_cache/

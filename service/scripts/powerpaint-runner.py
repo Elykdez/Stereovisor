@@ -12,19 +12,25 @@ DEFAULT_INFERENCE_STEPS = 25
 
 
 def write_progress(
-    path: Path | None, phase: str, step: int, total: int, torch_module=None
+    path: Path | None,
+    phase: str,
+    step: int,
+    total: int,
+    torch_module=None,
+    *,
+    cuda_available: bool = False,
 ) -> None:
     if path is None:
         return
     compute = {
         "model": "PowerPaint",
-        "device": "hybrid" if torch_module is not None else "cpu",
+        "device": "hybrid" if cuda_available else "cpu",
         "phase": phase,
-        "reason": "offloading" if torch_module is not None else None,
+        "reason": "offloading" if cuda_available else "cuda_unavailable",
     }
     if phase == "inference":
         compute.update(completed=step, total=total, unit="steps")
-    if torch_module is not None:
+    if torch_module is not None and cuda_available:
         try:
             free, capacity = torch_module.cuda.mem_get_info()
             compute.update(
@@ -82,12 +88,19 @@ def main() -> None:
     from powerpaint.pipelines.pipeline_PowerPaint_Brushnet_CA import StableDiffusionPowerPaintBrushNetPipeline
     from powerpaint.utils.utils import TokenizerWrapper, add_tokens
 
-    if not torch.cuda.is_available():
-        raise RuntimeError("PowerPaint requires the local CUDA runtime")
-    write_progress(args.progress, "loading", 0, inference_steps, torch)
+    cuda_available = bool(torch.cuda.is_available())
+    write_progress(
+        args.progress,
+        "loading",
+        0,
+        inference_steps,
+        torch,
+        cuda_available=cuda_available,
+    )
     torch.set_grad_enabled(False)
-    torch.cuda.reset_peak_memory_stats()
-    dtype = torch.float16
+    if cuda_available:
+        torch.cuda.reset_peak_memory_stats()
+    dtype = torch.float16 if cuda_available else torch.float32
     base = args.checkpoint / "realisticVisionV60B1_v51VAE"
     brush_checkpoint = args.checkpoint / "PowerPaint_Brushnet"
 
@@ -133,11 +146,19 @@ def main() -> None:
     )
     pipe.scheduler = UniPCMultistepScheduler.from_config(pipe.scheduler.config)
     pipe.vae.enable_tiling()
-    write_progress(args.progress, "preparing", 0, inference_steps, torch)
+    write_progress(
+        args.progress,
+        "preparing",
+        0,
+        inference_steps,
+        torch,
+        cuda_available=cuda_available,
+    )
     # Include both PowerPaint additions and release the VAE after encoding;
     # the upstream sequence leaves BrushNet resident on the GPU.
-    pipe.model_cpu_offload_seq = "text_encoder_brushnet->text_encoder->image_encoder->vae->brushnet->unet"
-    pipe.enable_model_cpu_offload()
+    if cuda_available:
+        pipe.model_cpu_offload_seq = "text_encoder_brushnet->text_encoder->image_encoder->vae->brushnet->unet"
+        pipe.enable_model_cpu_offload()
 
     source = Image.open(args.image).convert("RGB")
     mask_original = Image.open(args.mask).convert("L")
@@ -150,15 +171,30 @@ def main() -> None:
     conditioned = Image.fromarray((image_array * (1.0 - mask_array)).astype(np.uint8))
     prompt = f"{args.prompt.strip()} empty scene blur".strip()
     negative = "people, person, character, object, text, logo, low quality, blurry artifacts"
-    generator = torch.Generator(device="cuda").manual_seed(42)
+    generator = torch.Generator(device="cuda" if cuda_available else "cpu").manual_seed(42)
 
     def report_progress(_pipeline, step: int, _timestep, callback_kwargs):
         # The next step starts with BrushNet, so finish the offload cycle here.
-        _pipeline.unet.to("cpu")
-        write_progress(args.progress, "inference", step + 1, inference_steps, torch)
+        if cuda_available:
+            _pipeline.unet.to("cpu")
+        write_progress(
+            args.progress,
+            "inference",
+            step + 1,
+            inference_steps,
+            torch,
+            cuda_available=cuda_available,
+        )
         return callback_kwargs
 
-    write_progress(args.progress, "inference", 0, inference_steps, torch)
+    write_progress(
+        args.progress,
+        "inference",
+        0,
+        inference_steps,
+        torch,
+        cuda_available=cuda_available,
+    )
     result = pipe(
         promptA=" P_ctxt",
         promptB=" P_ctxt",
@@ -178,12 +214,22 @@ def main() -> None:
         height=working_size[1],
         callback_on_step_end=report_progress,
     ).images[0]
-    write_progress(args.progress, "cleanup", inference_steps, inference_steps, torch)
+    write_progress(
+        args.progress,
+        "cleanup",
+        inference_steps,
+        inference_steps,
+        torch,
+        cuda_available=cuda_available,
+    )
     generated = result.resize(source.size, Image.Resampling.LANCZOS)
     final = composite_full_redraw(generated, source, mask_original)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     final.save(args.output)
-    print(json.dumps({"peak_vram_mb": round(torch.cuda.max_memory_allocated() / 1048576)}))
+    peak_vram_mb = (
+        round(torch.cuda.max_memory_allocated() / 1048576) if cuda_available else 0
+    )
+    print(json.dumps({"peak_vram_mb": peak_vram_mb}))
 
 
 if __name__ == "__main__":

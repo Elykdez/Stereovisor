@@ -155,7 +155,7 @@ def report_compute(
         # Sample only at model activity boundaries, never on an HTTP polling
         # thread. A missing memory API must not prevent inference or cancellation.
         memory = _gpu_memory(torch_module)
-    elif reason is None:
+    elif device == "cpu" and reason is None:
         reason = "cpu_requested" if DEVICE == "cpu" else "cuda_unavailable"
     publish_compute(ComputeStatus(
         model=model, device=device, phase=phase, reason=reason,

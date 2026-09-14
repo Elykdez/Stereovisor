@@ -71,7 +71,7 @@ The primary user is a designer or content creator who wants a parallax still wit
 
 - Join the selected layer alpha channels into one removal mask.
 - Dilate the joined mask to remove edge contamination before reconstruction.
-- Prefer local PowerPaint v2.1 with CPU offload when its validated checkpoint is installed.
+- Prefer local PowerPaint v2.1 with CUDA CPU offload when available, and retain CPU-only execution with a visible warning when CUDA is unavailable.
 - Expose a persisted Inference setting for PowerPaint denoising steps, defaulting to 25 and clamped to 5-100.
 - PowerPaint shall start from pure noise for a full-redraw equivalent to denoise strength 1.0.
 - Discard every original pixel inside the expanded removal mask when compositing the PowerPaint result.
@@ -111,7 +111,7 @@ The primary user is a designer or content creator who wants a parallax still wit
 - Report whether production AI dependencies are installed.
 - Identify active segmentation, matting, depth, inpainting, prompt, and refinement providers.
 - Report optional prompt/refinement providers as ready only after their validated snapshot marker and required checkpoint files exist.
-- The one-click runner shall install dependencies, pin model source revisions, download weights, and validate CUDA before opening the editor.
+- The one-click runner shall install dependencies, pin model source revisions, download weights, and validate CUDA on Windows or MPS on Apple Silicon before opening the editor.
 - Never present preview processing as AI processing.
 - If production mode is explicitly requested and unavailable, fail with installation guidance.
 - While a local job is running, expose a Cancel action. Cancellation shall stop the worker at the next safe stage boundary, terminate an active PowerPaint subprocess, and leave the last saved project state intact.
@@ -131,8 +131,8 @@ The primary user is a designer or content creator who wants a parallax still wit
 - Camera interaction target: 60 fps for up to 24 2K layers on a typical discrete GPU.
 - Production inference shall fit an 8 GB VRAM budget by loading GPU stages sequentially and releasing segmentation tensors before inpainting.
 - Grounding DINO-B, SAM 2.1, InSPyReNet, Depth Anything 3, Qwen3-VL, and the selected inpainter shall never remain GPU-resident together.
-- PowerPaint shall run in an isolated Python environment with model CPU offload.
-- Each CUDA stage shall report its measured peak allocation and fail explicitly if it exceeds 8192 MB.
+- PowerPaint shall run in an isolated Python environment, using model CPU offload with CUDA and CPU-only loading when CUDA is unavailable.
+- Each CUDA stage shall report its measured peak allocation and fail explicitly if it exceeds 8192 MB; MPS stages shall report their selected device without claiming unavailable CUDA telemetry.
 - No model inference or image decoding during an animation frame.
 - Release InSPyReNet after each refinement operation; no GPU model may remain resident across stage boundaries.
 - Analyze and inpaint off the Electron renderer thread.
@@ -165,7 +165,7 @@ The primary user is a designer or content creator who wants a parallax still wit
 
 - Detection: Grounding DINO-B.
 - Instance segmentation: SAM 2.1 Small.
-- Matting: InSPyReNet `base` with dynamic resizing and a per-job CUDA session.
+- Matting: InSPyReNet `base` with dynamic resizing and a per-job CUDA or MPS session.
 - Depth: Depth Anything 3 Small, selected for relative ordering and the 8 GB budget.
 - Default inpainting: local Big LaMa TorchScript model.
 - Optional Qwen3-VL 2B vocabulary proposal and background-prompt generation; PowerPaint v2.1 provides full-redraw refinement.

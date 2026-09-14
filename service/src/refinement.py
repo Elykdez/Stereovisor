@@ -22,6 +22,7 @@ from .ai_models import (
     verify_vram_peak,
 )
 from .config import (
+    POWERPAINT_PACKAGES,
     POWERPAINT_PYTHON,
     POWERPAINT_VENDOR,
     WORKSPACE_ROOT,
@@ -46,7 +47,7 @@ def _run_qwen(
     # model is released before any detector or inpainter is allowed to load.
     if not snapshot_ready(QWEN_PATH, ("model.safetensors",)):
         raise RuntimeError(
-            "Qwen3-VL weights are missing. Run scripts/ensure-ready.ps1."
+            "Qwen3-VL weights are missing. Run the platform AI setup launcher."
         )
     try:
         import torch
@@ -58,7 +59,7 @@ def _run_qwen(
         )
     except ImportError as error:
         raise RuntimeError(
-            "Qwen3-VL is unavailable. Run service/scripts/setup-ai.ps1."
+            "Qwen3-VL is unavailable. Run the platform AI setup launcher."
         ) from error
 
     device = resolve_device(torch)
@@ -262,7 +263,7 @@ def powerpaint_inpaint(
         or not powerpaint_snapshot_ready(POWERPAINT_PATH)
     ):
         raise RuntimeError(
-            "PowerPaint v2.1 is not installed. Run scripts/ensure-ready.ps1."
+            "PowerPaint v2.1 is not installed. Run the platform AI setup launcher."
         )
     environment = os.environ.copy()
     environment.update(
@@ -273,6 +274,13 @@ def powerpaint_inpaint(
             "PYTORCH_ALLOC_CONF": "expandable_segments:True",
         }
     )
+    if POWERPAINT_PACKAGES is not None:
+        existing_python_path = environment.get("PYTHONPATH", "")
+        environment["PYTHONPATH"] = os.pathsep.join(
+            path
+            for path in (str(POWERPAINT_PACKAGES), existing_python_path)
+            if path
+        )
     progress_path = output_path.with_name(".powerpaint-progress.json")
     log_path = output_path.with_name(".powerpaint-runner.log")
     progress_path.unlink(missing_ok=True)

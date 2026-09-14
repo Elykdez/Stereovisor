@@ -137,6 +137,31 @@ describe("App processing status", () => {
     expect(renderedCamera()).toMatchObject({ x: 0.5, y: 0.2, zoom: 1.1, sceneScale: 1, strength: 30 });
   });
 
+  it("warns that PowerPaint falls back to CPU when CUDA is unavailable", async () => {
+    const initialHealth = await probeHealth();
+    vi.mocked(probeHealth).mockResolvedValue({
+      ...initialHealth,
+      device: "mps",
+      providers: {
+        ...initialHealth.providers,
+        refinement: {
+          available: true,
+          detail: "PowerPaint v2.1 full-redraw runtime installed",
+          warning: "CUDA is unavailable. PowerPaint will load and run on CPU instead of GPU.",
+        },
+      },
+    });
+    const view = render(<App />);
+
+    await waitFor(() => expect(view.getByRole("button", { name: "Use sample scene" })).toBeEnabled());
+    fireEvent.click(view.getByRole("button", { name: "Use sample scene" }));
+
+    expect(await view.findByText(
+      "CUDA is unavailable. PowerPaint will load and run on CPU instead of GPU.",
+    )).toBeInTheDocument();
+    expect(view.getByRole("option", { name: "PowerPaint - advanced full redraw" })).toBeEnabled();
+  });
+
   it("shows inverse depth in the layer panel in steps 3 and 4 and preserves it through build and export", async () => {
     let completeBuild!: (project: SceneProject) => void;
     vi.mocked(inpaintProject).mockImplementation(() => new Promise((resolve) => { completeBuild = resolve; }));

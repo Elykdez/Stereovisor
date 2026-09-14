@@ -136,6 +136,7 @@ const RUNTIME_KEYS: Readonly<Record<string, MessageKey>> = {
   "Optional PowerPaint v2.1 weights are incomplete or not installed": "runtime.optionalPowerpaintWeights",
   "Optional PowerPaint v2.1 runtime is not installed": "runtime.optionalPowerpaintRuntime",
   "PowerPaint v2.1 full-redraw runtime installed": "runtime.powerpaintInstalled",
+  "CUDA is unavailable. PowerPaint will load and run on CPU instead of GPU.": "runtime.powerpaintCpuFallback",
   "Optional Qwen3-VL weights are incomplete or not installed": "runtime.optionalQwenWeights",
   "The local vision service is unavailable.": "error.serviceUnavailable",
   "Image analysis failed.": "error.analysisFailed",

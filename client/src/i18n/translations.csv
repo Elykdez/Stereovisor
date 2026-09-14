@@ -209,7 +209,7 @@ build.powerpaint,PowerPaint - advanced full redraw,PowerPaint - 高度な全面�
 build.fullRedrawNote,Full redraw / denoise 1.00. Original masked pixels are discarded.,全面再描画 / ノイズ除去 1.00。マスク内の元ピクセルは破棄されます。,전체 다시 그리기 / 노이즈 제거 1.00. 마스크 안의 원본 픽셀은 삭제됩니다.,完整重绘 / 去噪 1.00。原蒙版内的像素将被丢弃。
 build.backgroundPrompt,Background prompt (optional),背景プロンプト（任意）,배경 프롬프트(선택 사항),背景提示词（可选）
 build.backgroundPromptPlaceholder,Blank uses local Qwen3-VL,空欄の場合はローカル Qwen3-VL を使用,비워 두면 로컬 Qwen3-VL 사용,留空则使用本地 Qwen3-VL
-build.fullRedrawUnavailable,Full redraw unavailable: {{detail}}. Relaunch the one-click setup to resume the checkpoint download.,全面再描画を使用できません：{{detail}}。ワンクリックセットアップを再実行してチェックポイントのダウンロードを再開してください。,전체 다시 그리기를 사용할 수 없습니다: {{detail}}. 원클릭 설치를 다시 실행하여 체크포인트 다운로드를 계속하세요.,完整重绘不可用：{{detail}}。请重新运行一键安装以继续下载检查点。
+build.fullRedrawUnavailable,Full redraw unavailable: {{detail}}.,全面再描画を使用できません：{{detail}}。,전체 다시 그리기를 사용할 수 없습니다: {{detail}}.,完整重绘不可用：{{detail}}。
 build.inpaintingLocally,Inpainting locally,ローカルでインペイント中,로컬 인페인팅 중,正在本地修补
 build.localDetail,The source and masks stay on this machine.,ソースとマスクはこのマシン内に保持されます。,소스와 마스크는 이 컴퓨터에만 유지됩니다.,源图像和蒙版始终保留在此设备上。
 build.layerInpaint,Layer inpaint,レイヤーインペイント,레이어 인페인트,图层修补
@@ -412,6 +412,7 @@ runtime.preparingTarget,Preparing {{name}} for full-redraw inpainting.,{{name}} 
 runtime.optionalPowerpaintWeights,Optional PowerPaint v2.1 weights are incomplete or not installed,任意の PowerPaint v2.1 ウェイトが不完全か、インストールされていません,선택적 PowerPaint v2.1 가중치가 불완전하거나 설치되지 않았습니다,可选的 PowerPaint v2.1 权重不完整或尚未安装
 runtime.optionalPowerpaintRuntime,Optional PowerPaint v2.1 runtime is not installed,任意の PowerPaint v2.1 ランタイムがインストールされていません,선택적 PowerPaint v2.1 런타임이 설치되지 않았습니다,可选的 PowerPaint v2.1 运行时尚未安装
 runtime.powerpaintInstalled,PowerPaint v2.1 full-redraw runtime installed,PowerPaint v2.1 全面再描画ランタイムはインストール済みです,PowerPaint v2.1 전체 다시 그리기 런타임이 설치되어 있습니다,PowerPaint v2.1 完整重绘运行时已安装
+runtime.powerpaintCpuFallback,CUDA is unavailable. PowerPaint will load and run on CPU instead of GPU.,CUDA を利用できません。PowerPaint は GPU の代わりに CPU で読み込んで実行します。,CUDA를 사용할 수 없습니다. PowerPaint는 GPU 대신 CPU에서 로드되고 실행됩니다.,CUDA 不可用。PowerPaint 将使用 CPU 而非 GPU 加载并运行。
 runtime.optionalQwenWeights,Optional Qwen3-VL weights are incomplete or not installed,任意の Qwen3-VL ウェイトが不完全か、インストールされていません,선택적 Qwen3-VL 가중치가 불완전하거나 설치되지 않았습니다,可选的 Qwen3-VL 权重不完整或尚未安装
 error.serviceUnavailable,The local vision service is unavailable.,ローカルビジョンサービスを利用できません。,로컬 비전 서비스를 사용할 수 없습니다.,本地视觉服务不可用。
 error.analysisFailed,Image analysis failed.,画像の解析に失敗しました。,이미지 분석에 실패했습니다.,图像分析失败。

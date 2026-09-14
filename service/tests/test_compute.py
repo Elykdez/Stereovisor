@@ -38,6 +38,14 @@ def test_missing_memory_telemetry_does_not_change_selected_device():
     assert statuses[0].reason == "offloading"
 
 
+def test_mps_compute_status_does_not_report_cuda_as_unavailable():
+    statuses = []
+    with compute.compute_scope(statuses.append, lambda: None):
+        compute.report_compute(None, "SAM 2.1 Small", "mps", "inference")
+    assert statuses[0].device == "mps"
+    assert statuses[0].reason is None
+
+
 def test_compute_context_is_restored_after_failure_and_cleanup_can_run_after_cancel():
     statuses = []
 

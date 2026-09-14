@@ -22,11 +22,11 @@ describe("sidebar server status", () => {
   });
   afterEach(() => { act(() => setServiceConnection("", "")); });
 
-  it.each(["cpu", "cuda", "hybrid"] as const)("shows actual %s work from the server in two lines", (device) => {
+  it.each(["cpu", "cuda", "mps", "hybrid"] as const)("shows actual %s work from the server in two lines", (device) => {
     const view = render(<ServerStatus startupPhase="ready" health={{ ...health,
       activity: { state: "running", queuedJobs: 2, stage: "Describing background", compute: { ...compute, device } },
     }} />);
-    const detail = device === "cpu" ? "CPU compute" : device === "cuda" ? "GPU compute" : "GPU + CPU offload";
+    const detail = device === "cpu" ? "CPU compute" : device === "hybrid" ? "GPU + CPU offload" : "GPU compute";
     expect(view.getByText("Local server / Busy")).toBeInTheDocument();
     expect(view.getByText(detail)).toBeInTheDocument();
     expect(view.container.querySelector(".server-status-copy")?.children).toHaveLength(2);
@@ -38,6 +38,7 @@ describe("sidebar server status", () => {
   it.each([
     ["cpu", "ai", "CPU available"],
     ["cuda:0", "ai", "GPU available"],
+    ["mps", "ai", "GPU available"],
     ["cuda-unavailable", "ai", "Compute unavailable"],
     ["cpu", "preview", "Preview mode"],
   ] as const)("shows availability for an idle %s %s server", (device, activeEngine, detail) => {

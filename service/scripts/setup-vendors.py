@@ -73,7 +73,9 @@ def main() -> None:
     ensure_checkout(DA3, "https://github.com/ByteDance-Seed/Depth-Anything-3.git", DA3_COMMIT)
     ensure_checkout(POWERPAINT, "https://github.com/open-mmlab/PowerPaint.git", POWERPAINT_COMMIT)
     patch_da3_exports()
-    run(sys.executable, "-m", "pip", "install", "--no-deps", "-e", str(DA3))
+    # Install a regular wheel copy so packaged virtual environments do not keep
+    # an absolute editable-install pointer back to the build machine.
+    run(sys.executable, "-m", "pip", "install", "--no-deps", "--force-reinstall", str(DA3))
     print("Pinned local model runtimes are ready.")
 
 

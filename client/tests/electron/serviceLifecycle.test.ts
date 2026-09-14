@@ -1,5 +1,6 @@
 import {
   isCompatibleServiceHealth,
+  managedPythonPath,
   probeStereovisorService,
   requiredModelFiles,
   requiredModelsReady,
@@ -20,6 +21,15 @@ const health = {
 };
 
 describe("local service lifecycle", () => {
+  it("resolves the same environment names using native executable layouts", () => {
+    expect(managedPythonPath("/Applications/Stereovisor", ".venv-ai", "darwin")).toBe(
+      "/Applications/Stereovisor/.venv-ai/bin/python",
+    );
+    expect(managedPythonPath("C:\\Stereovisor", ".venv-ai", "win32")).toBe(
+      "C:\\Stereovisor\\.venv-ai\\Scripts\\python.exe",
+    );
+  });
+
   it("distinguishes an installed offline model set from a stopped service", () => {
     const files = requiredModelFiles("C:\\Stereovisor\\models");
     const installed = new Set(files);

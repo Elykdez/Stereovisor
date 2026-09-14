@@ -38,7 +38,7 @@ HEALTH_FIELDS = {
     "activity",
 }
 
-PROVIDER_FIELDS = {"available", "detail", "state", "progress"}
+PROVIDER_FIELDS = {"available", "detail", "warning", "state", "progress"}
 
 # queuePosition and compute are deliberate additive fields. Older clients can
 # ignore them; older job records default to no compute details.

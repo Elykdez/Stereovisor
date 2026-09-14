@@ -16,6 +16,7 @@ class ErrorPayload(BaseModel):
 class ProviderStatus(BaseModel):
     available: bool
     detail: str
+    warning: str | None = None
     state: Literal[
         "waiting", "starting", "downloading", "initializing", "ready", "blocked"
     ] = "waiting"
@@ -24,7 +25,7 @@ class ProviderStatus(BaseModel):
 
 class ComputeStatus(BaseModel):
     model: str
-    device: Literal["cpu", "cuda", "hybrid"]
+    device: Literal["cpu", "cuda", "mps", "hybrid"]
     phase: Literal["loading", "preparing", "inference", "cleanup"]
     reason: Literal["cpu_requested", "cuda_unavailable", "offloading"] | None = None
     gpuName: str | None = None

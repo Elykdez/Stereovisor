@@ -31,6 +31,22 @@ export interface ServiceLaunchPolicy {
   stopWithApp: boolean;
 }
 
+export type DesktopPlatform = "win32" | "darwin" | "linux";
+
+export function managedPythonPath(
+  root: string,
+  environmentName: string,
+  platform: DesktopPlatform = process.platform as DesktopPlatform,
+): string {
+  const platformPath = platform === "win32" ? path.win32 : path.posix;
+  return platformPath.join(
+    root,
+    environmentName,
+    platform === "win32" ? "Scripts" : "bin",
+    platform === "win32" ? "python.exe" : "python",
+  );
+}
+
 export function requiredModelFiles(modelRoot: string): string[] {
   return [
     path.join(modelRoot, "grounding-dino-base", ".stereovisor-ready"),

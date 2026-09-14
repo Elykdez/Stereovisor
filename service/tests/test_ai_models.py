@@ -1,10 +1,29 @@
 import numpy as np
+from types import SimpleNamespace
 
 from service.src.ai_models import (
     _deduplicate_detections,
     normalize_segmentation_density,
     normalize_segmentation_labels,
+    release_cuda,
+    resolve_device,
 )
+
+
+def test_auto_device_prefers_apple_silicon_mps(monkeypatch) -> None:
+    from service.src import ai_models
+
+    emptied = []
+    torch = SimpleNamespace(
+        cuda=SimpleNamespace(is_available=lambda: False),
+        backends=SimpleNamespace(mps=SimpleNamespace(is_available=lambda: True)),
+        mps=SimpleNamespace(empty_cache=lambda: emptied.append(True)),
+    )
+    monkeypatch.setattr(ai_models, "DEVICE", "auto")
+
+    assert resolve_device(torch) == "mps"
+    release_cuda(torch)
+    assert emptied == [True]
 
 
 def test_segmentation_density_falls_back_to_balanced() -> None:

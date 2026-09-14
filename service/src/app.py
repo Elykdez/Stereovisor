@@ -379,7 +379,7 @@ def _pipeline():
                 detail={
                     "code": "AI_STACK_MISSING",
                     "message": "The local AI stack is not installed.",
-                    "detail": "Run service/scripts/setup-ai.ps1, then restart Stereovisor.",
+                    "detail": "Run the platform AI setup launcher, then restart Stereovisor.",
                 },
             )
         logger.info(
@@ -1079,6 +1079,7 @@ def compute_health() -> HealthPayload:
     def provider_payload(key: str, dependency: object) -> ProviderStatus:
         available = bool(getattr(dependency, "available", False))
         detail = str(getattr(dependency, "detail", ""))
+        warning = getattr(dependency, "warning", None)
         if available:
             state = "ready"
             progress = 100
@@ -1101,7 +1102,11 @@ def compute_health() -> HealthPayload:
             state = "blocked"
             progress = None
         return ProviderStatus(
-            available=available, detail=detail, state=state, progress=progress
+            available=available,
+            detail=detail,
+            warning=warning,
+            state=state,
+            progress=progress,
         )
 
     if engine == "ai":

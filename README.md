@@ -12,6 +12,31 @@ The product contract is in [docs/SRS.md](docs/SRS.md), and the implementation de
 
 ## Quick Start
 
+### Apple Silicon macOS
+
+Install Node.js 22 and Python 3.12, then double-click `Run Stereovisor.command`.
+The launcher replaces incompatible copied Windows environments and uses the
+standard project directories `.venv`, `.venv-ai`, and `.venv-powerpaint`. It
+installs the local PyTorch runtime, verifies the model cache, and starts the app
+with Apple Metal (MPS) acceleration. PyTorch's CPU fallback is enabled for model
+operations that MPS does not implement. PowerPaint remains available, but because
+it requires CUDA for GPU acceleration it loads and runs on CPU on Apple Silicon;
+the editor shows this performance warning. Use
+`Run Stereovisor Preview.command` for the lightweight sample-only engine.
+
+The same workflows are available from Terminal:
+
+```bash
+npm run setup
+./scripts/run-ai.sh
+./scripts/run-preview.sh
+```
+
+Only Apple Silicon (`arm64`) is supported. Intel and universal macOS builds are
+intentionally excluded.
+
+### Windows
+
 On Windows, double-click `Run Stereovisor.cmd`. The first launch shows a dedicated preparation window instead of the editor while the local CUDA Python runtime and required model weights are installed. It lists all five startup items - local AI runtime, segmentation, matting, depth, and inpainting - and reports `Starting`, `Downloading`, `Initializing`, or `Ready` with per-item progress, including the one-time CUDA runtime installation. The editor appears only after the running local service confirms every required provider. Later launches distinguish a stopped service from a missing installation: they start the prepared offline service automatically, wait for its live readiness check, and then open the editor without running model preparation again. The launcher builds the project-owned `.venv-ai` environment, reuses compatible CUDA Torch assets, and otherwise installs the pinned CUDA wheel.
 
 For the lightweight sample-only preview, double-click `Run Stereovisor Preview.cmd`.
@@ -24,6 +49,28 @@ folder and the locked first-launch screen; that mode also drives a bootstrap
 status through the launcher helper and asserts the per-provider startup
 progress the mask renders. Both modes clean their temporary workspace
 automatically.
+
+## Apple Silicon Packaging
+
+Double-click `Build Stereovisor.command`, or run `npm run package`, on an Apple
+Silicon Mac. The build downloads and checksum-verifies a pinned relocatable
+Python 3.12 runtime into `.python-runtime`, installs the local service, AI, and
+isolated PowerPaint dependencies into it, and creates:
+
+- `release/Stereovisor-0.1.0-mac-arm64.dmg`
+- `release/Stereovisor-0.1.0-mac-arm64.zip`
+
+The package contains only arm64 Electron, Python, and native dependencies. Model
+weights are still downloaded to the per-user application-data folder on first
+launch. The local build uses an ad-hoc signature; notarization requires an Apple
+Developer ID and is outside this repository's local build flow.
+
+Validate the built app, archive structure, bundled service, and sample workflow
+with:
+
+```bash
+npm run smoke:package:mac
+```
 
 ## Windows Packaging
 
@@ -86,7 +133,7 @@ Name a layer from the editable heading above the canvas, both while brushing a n
 
 ## Local AI Setup
 
-The production stack is Grounding DINO-B, SAM 2.1 Small, InSPyReNet `base`, Depth Anything 3 Small, and Big LaMa. An explicit HQ option adds local Qwen3-VL 2B prompt generation and PowerPaint v2.1 refinement. GPU stages run sequentially, report peak allocation, and enforce an 8 GB VRAM budget. PowerPaint uses a separate dependency environment and CPU offload.
+The production stack is Grounding DINO-B, SAM 2.1 Small, InSPyReNet `base`, Depth Anything 3 Small, and Big LaMa. An explicit HQ option adds local Qwen3-VL 2B prompt generation and PowerPaint v2.1 refinement. GPU stages run sequentially, report peak allocation, and enforce an 8 GB VRAM budget. PowerPaint uses a separate dependency environment and CUDA CPU offload when CUDA is available; without CUDA it remains usable in CPU-only mode and the editor warns about the slower fallback.
 
 Inference options include segmentation density: `Sparse` keeps broad subject layers, `Balanced` proposes common scene props, and `Dense` lowers the proposal floor for smaller objects. The Options dialog also accepts a custom comma-separated vocabulary; leaving it blank uses the selected density's built-in labels. An opt-in VLM vocabulary proposer can run Qwen3-VL before detection when the manual vocabulary is blank. It is disabled by default, and `STEREOVISOR_OBJECT_LABELS` remains available for headless runs.
 
@@ -104,7 +151,7 @@ The setup fails instead of silently installing CPU-only Torch when the CUDA whee
 
 The CUDA Torch and Torchvision wheels are downloaded into `.cache/wheels` before pip installs them, and an interrupted transfer resumes from the bytes already on disk on the next run. Set `STEREOVISOR_TORCH_WHEEL_BASE` to a mirror of the PyTorch `cu128` wheel directory when `download.pytorch.org` is slow; the pinned SHA-256 checksums still have to match.
 
-Optional controls:
+Optional controls. Use `mps` on Apple Silicon and `cuda` on Windows:
 
 ```powershell
 $env:STEREOVISOR_DEVICE = "cuda" # or cpu / auto

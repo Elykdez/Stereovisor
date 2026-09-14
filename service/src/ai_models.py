@@ -94,9 +94,11 @@ class InstanceMask:
 
 
 def resolve_device(torch_module: Any) -> str:
-    # DEVICE=auto prefers CUDA when available, while DEVICE=cpu is explicit.
-    # A forced CUDA request must fail loudly if the runtime cannot access it.
+    # DEVICE=auto prefers the native accelerator on both NVIDIA and Apple
+    # Silicon. Explicit accelerator requests fail loudly when unavailable.
     cuda = torch_module.cuda
+    mps = getattr(getattr(torch_module, "backends", None), "mps", None)
+    mps_available = bool(mps and mps.is_available())
     if DEVICE == "cpu":
         return "cpu"
     if DEVICE == "cuda" and not cuda.is_available():
@@ -104,7 +106,14 @@ def resolve_device(torch_module: Any) -> str:
         raise RuntimeError(
             "CUDA was requested but the managed Torch runtime cannot access the GPU"
         )
-    return "cuda" if cuda.is_available() else "cpu"
+    if DEVICE == "mps" and not mps_available:
+        logger.warning("MPS requested but unavailable")
+        raise RuntimeError(
+            "MPS was requested but the managed Torch runtime cannot access Apple Silicon GPU acceleration"
+        )
+    if cuda.is_available():
+        return "cuda"
+    return "mps" if mps_available else "cpu"
 
 
 def release_cuda(torch_module: Any) -> None:
@@ -115,6 +124,9 @@ def release_cuda(torch_module: Any) -> None:
         if callable(synchronize):
             synchronize()
         cuda.empty_cache()
+    mps = getattr(torch_module, "mps", None)
+    if mps is not None and callable(getattr(mps, "empty_cache", None)):
+        mps.empty_cache()
 
 
 def begin_vram_stage(torch_module: Any) -> None:
@@ -167,7 +179,7 @@ def _require_model(path: Path, label: str) -> None:
     if not snapshot_ready(path):
         logger.warning("model unavailable: label=%s path=%s", label, path)
         raise RuntimeError(
-            f"{label} weights are missing. Run scripts/ensure-ready.ps1."
+            f"{label} weights are missing. Run the platform AI setup launcher."
         )
 
 
@@ -253,7 +265,7 @@ def grounded_sam_instances(
         )
     except ImportError as error:
         raise RuntimeError(
-            "Grounding DINO and SAM 2.1 are unavailable. Run service/scripts/setup-ai.ps1."
+            "Grounding DINO and SAM 2.1 are unavailable. Run the platform AI setup launcher."
         ) from error
 
     _require_model(GROUNDING_DINO_PATH, "Grounding DINO-B")

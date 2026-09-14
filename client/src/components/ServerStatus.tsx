@@ -17,7 +17,7 @@ export function ServerStatus({ health, startupPhase }: {
   const activity = health?.activity;
   const available = !health ? t("server.checkingCompute")
     : health.activeEngine === "preview" ? t("server.preview")
-    : /^cuda(?::\d+)?$/i.test(health.device) ? t("server.gpuAvailable")
+    : /^(?:cuda(?::\d+)?|mps)$/i.test(health.device) ? t("server.gpuAvailable")
     : health.device.toLowerCase() === "cpu" ? t("server.cpuAvailable") : t("server.computeUnavailable");
   let status: string;
   let detail = available;
@@ -38,7 +38,7 @@ export function ServerStatus({ health, startupPhase }: {
     state = "running";
     status = t("server.working");
     detail = activity.compute ? t(activity.compute.device === "hybrid" ? "compute.hybrid"
-      : activity.compute.device === "cuda" ? "compute.gpu" : "compute.cpu") : t("server.checkingCompute");
+      : activity.compute.device === "cuda" || activity.compute.device === "mps" ? "compute.gpu" : "compute.cpu") : t("server.checkingCompute");
   } else if (health.startupState === "ready") {
     state = "ready";
     status = t(activity ? "server.ready" : "server.connected");

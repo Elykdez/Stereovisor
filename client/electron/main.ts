@@ -13,6 +13,7 @@ import { readFile, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { readSettings, writeSettings } from "./settings";
 import {
+  managedPythonPath,
   probeStereovisorService,
   requiredModelsReady,
   serviceLaunchPolicy,
@@ -105,7 +106,7 @@ function findPackagedModelRoot(): string {
   const searchRoots = [path.resolve(resourceRoot()), path.dirname(process.execPath)];
   for (const root of searchRoots) {
     let cursor = root;
-    for (let attempt = 0; attempt < 5; attempt += 1) {
+    for (let attempt = 0; attempt < 8; attempt += 1) {
       const candidate = path.join(cursor, "service", ".models");
       if (existsSync(candidate)) return candidate;
       const parent = path.dirname(cursor);
@@ -124,9 +125,24 @@ function startPackagedModelPreparation(showConsole: boolean): void {
     electronLog("models.bootstrap.skipped-ready", { modelRoot });
     return;
   }
-  const script = path.join(root, "service", "scripts", "prepare-packaged-ai.ps1");
+  const script = path.join(
+    root,
+    "service",
+    "scripts",
+    process.platform === "darwin"
+      ? "prepare-packaged-ai.py"
+      : "prepare-packaged-ai.ps1",
+  );
   if (!existsSync(script)) {
     console.error("[Stereovisor][electron] Packaged model preparation script is missing", script);
+    return;
+  }
+  const python =
+    process.platform === "darwin"
+      ? path.join(root, ".python-runtime", "bin", "python3")
+      : managedPythonPath(root, ".venv-ai");
+  if (process.platform === "darwin" && !existsSync(python)) {
+    console.error("[Stereovisor][electron] Packaged AI runtime is missing", python);
     return;
   }
   const marker = path.join(modelRoot, ".stereovisor-bootstrap-running");
@@ -146,22 +162,31 @@ function startPackagedModelPreparation(showConsole: boolean): void {
     STEREOVISOR_APP_ROOT: root,
     STEREOVISOR_MODEL_ROOT: modelRoot,
   };
+  if (process.platform === "darwin") {
+    // Python bytecode written inside Contents/Resources invalidates the sealed app.
+    environment.PYTHONDONTWRITEBYTECODE = "1";
+  }
+  const command = process.platform === "darwin" ? python : "powershell.exe";
+  const spawnArguments =
+    process.platform === "darwin"
+      ? [script, "--resource-root", root, "--model-root", modelRoot]
+      : [
+          "-NoProfile",
+          "-ExecutionPolicy",
+          "Bypass",
+          "-File",
+          script,
+          "-ResourceRoot",
+          root,
+          "-ModelRoot",
+          modelRoot,
+        ];
   modelPreparationProcess = spawn(
-    process.platform === "win32" ? "powershell.exe" : "powershell",
-    [
-      "-NoProfile",
-      "-ExecutionPolicy",
-      "Bypass",
-      "-File",
-      script,
-      "-ResourceRoot",
-      root,
-      "-ModelRoot",
-      modelRoot,
-    ],
+    command,
+    spawnArguments,
     {
       cwd: root,
-      windowsHide: !showConsole,
+      windowsHide: process.platform === "win32" && !showConsole,
       // Same reasoning as the service above: the bootstrap shares this setting,
       // and its first-run progress is the output most worth seeing in a console.
       stdio: showConsole ? "inherit" : "pipe",
@@ -231,12 +256,10 @@ async function startService(
   }
   if (appIsQuitting) return;
   const root = resourceRoot();
-  const managedPython = path.join(
-    root,
-    app.isPackaged ? ".venv-ai" : ".venv",
-    "Scripts",
-    "python.exe",
-  );
+  const managedPython =
+    app.isPackaged && process.platform === "darwin"
+      ? path.join(root, ".python-runtime", "bin", "python3")
+      : managedPythonPath(root, app.isPackaged ? ".venv-ai" : ".venv");
   const python =
     process.env.STEREOVISOR_PYTHON ??
     (existsSync(managedPython)
@@ -251,18 +274,32 @@ async function startService(
     STEREOVISOR_MODE: process.env.STEREOVISOR_MODE ?? "auto",
     STEREOVISOR_APP_ROOT: serviceRoot,
   };
+  if (process.platform === "darwin") {
+    environment.PYTORCH_ENABLE_MPS_FALLBACK =
+      process.env.PYTORCH_ENABLE_MPS_FALLBACK ?? "1";
+    if (app.isPackaged) environment.PYTHONDONTWRITEBYTECODE = "1";
+  }
   if (app.isPackaged) {
     environment.STEREOVISOR_PROJECT_ROOT = path.join(packagedDataRoot, "projects");
     environment.STEREOVISOR_MODEL_ROOT = findPackagedModelRoot();
-    environment.STEREOVISOR_POWERPAINT_PYTHON = path.join(
-      root,
-      ".venv-powerpaint",
-      "Scripts",
-      "python.exe",
-    );
+    environment.STEREOVISOR_POWERPAINT_PYTHON =
+      process.platform === "darwin"
+        ? managedPython
+        : managedPythonPath(root, ".venv-powerpaint");
+    if (process.platform === "darwin") {
+      environment.STEREOVISOR_POWERPAINT_PACKAGES = path.join(
+        root,
+        ".python-runtime",
+        "powerpaint-site-packages",
+      );
+    }
     environment.STEREOVISOR_POWERPAINT_VENDOR = path.join(root, ".cache", "vendor", "PowerPaint");
   }
-  const launchPolicy = serviceLaunchPolicy(showConsole);
+  // macOS GUI applications do not own a console window to inherit. Keep the
+  // bundled service attached so closing the app cannot leave an orphan behind.
+  const launchPolicy = serviceLaunchPolicy(
+    process.platform === "win32" && showConsole,
+  );
   const launchedService = spawn(
     python,
     [path.join(serviceRoot, "service", "scripts", "run-service.py")],
@@ -319,7 +356,10 @@ function installApplicationMenu(): void {
       label: nativeText("fileMenu"),
       submenu: [
         {
-          label: `${nativeText("options")}  Ctrl+,`,
+          label: `${nativeText("options")}  ${
+            process.platform === "darwin" ? "Cmd+," : "Ctrl+,"
+          }`,
+          accelerator: "CommandOrControl+,",
           click: () => mainWindow?.webContents.send("stereovisor:open-options"),
         },
         { type: "separator" },

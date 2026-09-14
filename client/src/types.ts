@@ -5,6 +5,7 @@ export const DEFAULT_LAYER_FEATHER = 4;
 export interface ProviderStatus {
   available: boolean;
   detail: string;
+  warning?: string | null;
   state?:
     | "waiting"
     | "starting"
@@ -123,7 +124,7 @@ export type ProcessingJobKind =
 
 export interface ComputeStatus {
   model: string;
-  device: "cpu" | "cuda" | "hybrid";
+  device: "cpu" | "cuda" | "mps" | "hybrid";
   phase: "loading" | "preparing" | "inference" | "cleanup";
   reason?: "cpu_requested" | "cuda_unavailable" | "offloading" | null;
   gpuName?: string | null;

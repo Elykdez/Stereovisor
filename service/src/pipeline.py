@@ -1077,13 +1077,21 @@ class PreviewPipeline:
 
 def _resolve_device(torch_module: object) -> str:
     cuda = getattr(torch_module, "cuda")
+    mps = getattr(getattr(torch_module, "backends", None), "mps", None)
+    mps_available = bool(mps and mps.is_available())
     if DEVICE == "cpu":
         return "cpu"
     if DEVICE == "cuda" and not cuda.is_available():
         raise PipelineError(
             "CUDA was requested but the managed Torch runtime cannot access the GPU"
         )
-    return "cuda" if cuda.is_available() else "cpu"
+    if DEVICE == "mps" and not mps_available:
+        raise PipelineError(
+            "MPS was requested but the managed Torch runtime cannot access Apple Silicon GPU acceleration"
+        )
+    if cuda.is_available():
+        return "cuda"
+    return "mps" if mps_available else "cpu"
 
 
 def _release_cuda(torch_module: object) -> None:
@@ -1094,6 +1102,9 @@ def _release_cuda(torch_module: object) -> None:
         if callable(synchronize):
             synchronize()
         cuda.empty_cache()
+    mps = getattr(torch_module, "mps", None)
+    if mps is not None and callable(getattr(mps, "empty_cache", None)):
+        mps.empty_cache()
 
 
 _inspyrenet_remover: object | None = None
@@ -1227,7 +1238,7 @@ def _matte_mask(image: Image.Image, mask: np.ndarray) -> np.ndarray:
                 from transparent_background import Remover
         except ImportError as error:
             raise PipelineError(
-                "InSPyReNet is unavailable. Run service/scripts/setup-ai.ps1."
+                "InSPyReNet is unavailable. Run the platform AI setup launcher."
             ) from error
         model_path = _ensure_inspyrenet_model()
         device = _resolve_device(torch)
@@ -1278,7 +1289,7 @@ def _guided_mask_refine(
         import cv2
     except ImportError as error:
         raise PipelineError(
-            "OpenCV is unavailable. Run service/scripts/setup-ai.ps1."
+            "OpenCV is unavailable. Run the platform AI setup launcher."
         ) from error
 
     binary = (mask > 8).astype(np.uint8)
@@ -1371,7 +1382,7 @@ def _lama_inpaint(image: Image.Image, mask: Image.Image) -> tuple[Image.Image, i
         import torch
     except ImportError as error:
         raise PipelineError(
-            "Torch is unavailable. Run service/scripts/setup-ai.ps1."
+            "Torch is unavailable. Run the platform AI setup launcher."
         ) from error
 
     model_path = MODEL_ROOT / "big-lama.pt"

@@ -5,6 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
 
+import pytest
 import torch
 from PIL import Image
 
@@ -21,7 +22,10 @@ def test_default_inference_steps_are_25() -> None:
     assert RUNNER.DEFAULT_INFERENCE_STEPS == 25
 
 
-def test_runner_reuses_unet_and_offloads_between_steps(monkeypatch, tmp_path: Path) -> None:
+@pytest.mark.parametrize("cuda_available", [True, False])
+def test_runner_reuses_unet_and_falls_back_to_cpu(
+    monkeypatch, tmp_path: Path, cuda_available: bool
+) -> None:
     def model(bias: float):
         result = torch.nn.Linear(1, 1)
         result.bias.data.fill_(bias)
@@ -80,7 +84,7 @@ def test_runner_reuses_unet_and_offloads_between_steps(monkeypatch, tmp_path: Pa
         "--vendor", str(tmp_path),
         "--progress", str(tmp_path / "progress.json"),
     ])
-    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: cuda_available)
     monkeypatch.setattr(torch.cuda, "reset_peak_memory_stats", lambda: None)
     monkeypatch.setattr(torch.cuda, "max_memory_allocated", lambda: 0)
     monkeypatch.setattr(torch.cuda, "mem_get_info", lambda: (6692 * 1048576, 8192 * 1048576))
@@ -92,8 +96,8 @@ def test_runner_reuses_unet_and_offloads_between_steps(monkeypatch, tmp_path: Pa
     reports = []
     write_progress = RUNNER.write_progress
 
-    def record_progress(*args):
-        write_progress(*args)
+    def record_progress(*args, **kwargs):
+        write_progress(*args, **kwargs)
         reports.append(json.loads((tmp_path / "progress.json").read_text()))
         if len(reports) == 1:
             unet_loader.assert_not_called()
@@ -106,7 +110,7 @@ def test_runner_reuses_unet_and_offloads_between_steps(monkeypatch, tmp_path: Pa
     unet_loader.assert_called_once()
     assert pipe.unet.bias.item() == 1.0
     assert pipe.brushnet.bias.item() == 2.0
-    assert pipe.unet.to.call_count == 5
+    assert pipe.unet.to.call_count == (5 if cuda_available else 0)
     assert all(call.args == ("cpu",) for call in pipe.unet.to.call_args_list)
     assert reports[0]["compute"]["device"] == "cpu"
     assert [report["compute"]["phase"] for report in reports] == [
@@ -115,8 +119,21 @@ def test_runner_reuses_unet_and_offloads_between_steps(monkeypatch, tmp_path: Pa
     ]
     inference = [report["compute"] for report in reports if report["compute"]["phase"] == "inference"]
     assert [report["completed"] for report in inference] == [0, 1, 2, 3, 4, 5]
-    assert all(report["device"] == "hybrid" and report["reason"] == "offloading" for report in inference)
-    assert all(report["vramUsedMb"] == 1500 and report["vramTotalMb"] == 8192 for report in inference)
+    expected_device = "hybrid" if cuda_available else "cpu"
+    expected_reason = "offloading" if cuda_available else "cuda_unavailable"
+    assert all(
+        report["device"] == expected_device and report["reason"] == expected_reason
+        for report in inference
+    )
+    if cuda_available:
+        assert all(
+            report["vramUsedMb"] == 1500 and report["vramTotalMb"] == 8192
+            for report in inference
+        )
+        pipe.enable_model_cpu_offload.assert_called_once()
+    else:
+        assert all("vramUsedMb" not in report for report in inference)
+        pipe.enable_model_cpu_offload.assert_not_called()
     assert reports[-1]["step"] == reports[-1]["total"] == 5
     assert Image.open(tmp_path / "output.png").getpixel((4, 4)) == (0, 0, 255)
 

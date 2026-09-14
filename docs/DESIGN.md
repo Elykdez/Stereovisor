@@ -40,7 +40,7 @@ The service has no cloud-provider adapter. Network access is used only to acquir
 
 Refinement snapshots are stored per layer under `.mask-history/<layer-key>`. A refine pushes the current alpha and state to undo history, clears redo history, and leaves the proposal asset unchanged. Undo/redo swaps snapshots, regenerates the cutout, and increments `maskRevision` so the renderer reloads the correct pixels.
 
-Every GPU provider is loaded for one stage and explicitly released before the next. The service lock prevents simultaneous jobs, and every stage records peak CUDA allocation against the 8192 MB limit. The sequence is Qwen3-VL vocabulary proposal (optional) -> Grounding DINO-B -> SAM 2.1 -> DA3 -> InSPyReNet (per refinement) -> Qwen3-VL background prompt (optional) -> PowerPaint or Big LaMa.
+Every GPU provider is loaded for one stage and explicitly released before the next. The service lock prevents simultaneous jobs. CUDA stages record peak allocation against the 8192 MB limit; Apple Silicon stages use MPS with PyTorch CPU fallback for unsupported operations. PowerPaint itself uses CUDA CPU offload when CUDA exists and otherwise loads in CPU-only mode with an explicit UI warning. The sequence is Qwen3-VL vocabulary proposal (optional) -> Grounding DINO-B -> SAM 2.1 -> DA3 -> InSPyReNet (per refinement) -> Qwen3-VL background prompt (optional) -> PowerPaint or Big LaMa.
 
 Jobs also carry the current model, compute device, loading/inference/cleanup phase,
 and the latest available GPU-memory snapshot. This comes from model activity,
@@ -77,7 +77,7 @@ logging. No images, prompts, or model tensors are included in these records.
 2. Compute a per-pixel maximum union.
 3. Dilate the union by a user-independent safety radius proportional to image size.
 4. Feather only the inspection/export mask; keep a binary mask for LaMa.
-5. In full-redraw mode, run Qwen3-VL only when a manual prompt is absent, release it, then invoke PowerPaint in its isolated CPU-offload environment.
+5. In full-redraw mode, run Qwen3-VL only when a manual prompt is absent, release it, then invoke PowerPaint in its isolated environment. Use CUDA CPU offload where available or CPU-only execution when CUDA is unavailable.
 6. Start PowerPaint from random latents for the persisted Inference step count (25 by default), equivalent to denoise strength 1.0.
 7. Composite generated pixels with a binary mask so no source pixel is blended back inside the removal region.
 8. In fast structural-fill mode, run Big LaMa against the original RGB image and binary removal mask.
@@ -275,4 +275,4 @@ The visual language is a dark graphite workspace with warm ivory text and a rest
 
 ## 8. Packaging Plan
 
-Version 0.3 runs from source. `Run Stereovisor.cmd` creates the main and PowerPaint virtual environments, pins the upstream DA3 and PowerPaint source revisions, and downloads model weights behind a dedicated preparation window on first launch. Later launches start the installed local service directly while offline and open the editor after its live provider check; they re-enter preparation only when required assets are missing or damaged. H.264 MP4 export uses Electron's bundled Chromium encoder, with WebM fallback, so FFmpeg is not installed or distributed. Packaging and signing remain separate.
+Source launchers use the same `.venv`, `.venv-ai`, and `.venv-powerpaint` directory names on Windows and macOS while selecting the platform-native executable layout. The Apple Silicon package embeds an arm64 standalone Python runtime and isolated PowerPaint dependency tree; model weights remain in writable per-user storage. H.264 MP4 export uses Electron's bundled Chromium encoder, with WebM fallback, so FFmpeg is not installed or distributed.

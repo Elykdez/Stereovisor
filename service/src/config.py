@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -72,12 +73,22 @@ def ensure_bind_allowed(host: str | None = None, token: str | None = None) -> No
     )
 
 
+def managed_python_path(
+    root: Path, environment_name: str, platform: str = sys.platform
+) -> Path:
+    scripts = "Scripts" if platform == "win32" else "bin"
+    executable = "python.exe" if platform == "win32" else "python"
+    return root / environment_name / scripts / executable
+
+
 POWERPAINT_PYTHON = Path(
     os.environ.get(
         "STEREOVISOR_POWERPAINT_PYTHON",
-        WORKSPACE_ROOT / ".venv-powerpaint" / "Scripts" / "python.exe",
+        managed_python_path(WORKSPACE_ROOT, ".venv-powerpaint"),
     )
 )
+_powerpaint_packages = os.environ.get("STEREOVISOR_POWERPAINT_PACKAGES", "").strip()
+POWERPAINT_PACKAGES = Path(_powerpaint_packages) if _powerpaint_packages else None
 POWERPAINT_VENDOR = Path(
     os.environ.get(
         "STEREOVISOR_POWERPAINT_VENDOR",
@@ -96,6 +107,7 @@ os.environ.setdefault("HF_HUB_ETAG_TIMEOUT", "30")
 class DependencyStatus:
     available: bool
     detail: str
+    warning: str | None = None
 
 
 # Startup items reported by /api/health and rendered by the startup gate. The
@@ -258,7 +270,11 @@ def ai_dependencies() -> dict[str, DependencyStatus]:
     # not instantiate models, keeping startup checks fast and side-effect free.
     powerpaint_model = MODEL_ROOT / "powerpaint-v2-1"
     qwen_model = MODEL_ROOT / "qwen3-vl-2b-instruct"
-    powerpaint_runtime = POWERPAINT_PYTHON.is_file() and POWERPAINT_VENDOR.is_dir()
+    powerpaint_runtime = (
+        POWERPAINT_PYTHON.is_file()
+        and POWERPAINT_VENDOR.is_dir()
+        and (POWERPAINT_PACKAGES is None or POWERPAINT_PACKAGES.is_dir())
+    )
     qwen_ready = snapshot_ready(qwen_model, ("model.safetensors",))
     powerpaint_ready = powerpaint_snapshot_ready(powerpaint_model)
     return {
@@ -302,6 +318,11 @@ def ai_dependencies() -> dict[str, DependencyStatus]:
                     else "Optional PowerPaint v2.1 runtime is not installed"
                 )
             ),
+            warning=(
+                None
+                if cuda_available()
+                else "CUDA is unavailable. PowerPaint will load and run on CPU instead of GPU."
+            ),
         ),
     }
 
@@ -329,6 +350,14 @@ def active_engine(dependencies: dict[str, DependencyStatus] | None = None) -> st
     return "ai" if production_available(dependencies) else "preview"
 
 
+def cuda_available() -> bool:
+    try:
+        import torch
+    except ImportError:
+        return False
+    return bool(torch.cuda.is_available())
+
+
 def runtime_device() -> str:
     if DEVICE == "cpu":
         return "cpu"
@@ -338,4 +367,10 @@ def runtime_device() -> str:
         return "unavailable"
     if DEVICE == "cuda" and not torch.cuda.is_available():
         return "cuda-unavailable"
-    return "cuda" if torch.cuda.is_available() else "cpu"
+    mps = getattr(getattr(torch, "backends", None), "mps", None)
+    mps_available = bool(mps and mps.is_available())
+    if DEVICE == "mps" and not mps_available:
+        return "mps-unavailable"
+    if torch.cuda.is_available():
+        return "cuda"
+    return "mps" if mps_available else "cpu"

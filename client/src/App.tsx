@@ -1629,6 +1629,9 @@ export default function App() {
             {health && !health.providers.refinement?.available && (
               <span className="redraw-note warning">{t("build.fullRedrawUnavailable", { detail: runtimeText(health.providers.refinement?.detail ?? "") })}</span>
             )}
+            {health?.providers.refinement?.warning && (
+              <span className="redraw-note warning">{runtimeText(health.providers.refinement.warning)}</span>
+            )}
           </section>
         )}
         {project && phase === "editing" && (
@@ -2038,6 +2041,9 @@ export default function App() {
                   </div>
                   {health && !health.providers.refinement?.available && (
                     <span className="redraw-note warning">{t("build.layerUnavailable", { detail: runtimeText(health.providers.refinement?.detail ?? "") })}</span>
+                  )}
+                  {health?.providers.refinement?.warning && (
+                    <span className="redraw-note warning">{runtimeText(health.providers.refinement.warning)}</span>
                   )}
                 </div>
               </div>

@@ -3,9 +3,19 @@ from pathlib import Path
 import service.src.config as config
 from service.src.config import (
     bootstrap_status,
+    managed_python_path,
     model_dependency_status,
     powerpaint_snapshot_ready,
 )
+
+
+def test_managed_python_path_is_native_to_each_platform(tmp_path: Path) -> None:
+    assert managed_python_path(tmp_path, ".venv-ai", "darwin") == (
+        tmp_path / ".venv-ai" / "bin" / "python"
+    )
+    assert managed_python_path(tmp_path, ".venv-ai", "win32") == (
+        tmp_path / ".venv-ai" / "Scripts" / "python.exe"
+    )
 
 
 def _touch(root: Path, relative: str) -> None:
@@ -29,6 +39,33 @@ def test_powerpaint_still_requires_ready_marker(tmp_path: Path) -> None:
     _touch(tmp_path, "realisticVisionV60B1_v51VAE/unet/diffusion_pytorch_model.bin")
 
     assert not powerpaint_snapshot_ready(tmp_path)
+
+
+def test_powerpaint_remains_available_with_a_cpu_fallback_warning(
+    monkeypatch, tmp_path: Path
+) -> None:
+    python = tmp_path / ".venv-powerpaint" / "bin" / "python"
+    python.parent.mkdir(parents=True)
+    python.touch()
+    vendor = tmp_path / ".cache" / "vendor" / "PowerPaint"
+    vendor.mkdir(parents=True)
+    model = tmp_path / "powerpaint-v2-1"
+    _touch(model, ".stereovisor-ready")
+    _touch(model, "PowerPaint_Brushnet/diffusion_pytorch_model.safetensors")
+    _touch(model, "PowerPaint_Brushnet/pytorch_model.bin")
+    _touch(model, "realisticVisionV60B1_v51VAE/unet/diffusion_pytorch_model.bin")
+    monkeypatch.setattr(config, "MODEL_ROOT", tmp_path)
+    monkeypatch.setattr(config, "POWERPAINT_PYTHON", python)
+    monkeypatch.setattr(config, "POWERPAINT_VENDOR", vendor)
+    monkeypatch.setattr(config, "POWERPAINT_PACKAGES", None)
+    monkeypatch.setattr(config, "cuda_available", lambda: False)
+
+    status = config.ai_dependencies()["refinement"]
+
+    assert status.available is True
+    assert status.warning == (
+        "CUDA is unavailable. PowerPaint will load and run on CPU instead of GPU."
+    )
 
 
 def test_model_dependency_status_requires_snapshot_marker_when_requested(

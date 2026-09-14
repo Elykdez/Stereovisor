@@ -4,7 +4,7 @@ transformers>=4.57,<5
 accelerate>=1.10,<2
 huggingface-hub>=0.34,<2
 safetensors>=0.5,<1
-opencv-python>=4.10,<5
+opencv-python-headless==4.11.0.86
 einops>=0.8,<1
 omegaconf>=2.3,<3
 evo>=1.31,<2
