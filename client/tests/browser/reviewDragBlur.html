@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>Review drag blur check</title>
+<style>
+  body { margin: 24px; background: #16191b; color: #e5e9e4; font: 14px system-ui; }
+  button { margin-right: 12px; padding: 8px; background: #303638; color: #e5e9e4; border: 1px solid #52605c; }
+  #preview { height: 640px; display: flex; margin-top: 16px; }
+  .stage-frame { margin: 0; }
+</style>
+<h1>Refine + confirm: background drag blur</h1>
+<p>Drag the canvas, or hold a test drag to inspect the background. The foreground must stay sharp.</p>
+<button id="hold">Hold test drag</button>
+<button id="release">Release</button>
+<button id="cancel">Cancel pointer</button>
+<span id="status">Ready</span>
+<div id="preview"></div>
+<script type="module">
+  import React, { useState } from "react";
+  import { createRoot } from "react-dom/client";
+  import { SceneCanvas } from "/src/components/SceneCanvas.tsx";
+  import "/src/styles.css";
+
+  const source = document.createElement("canvas");
+  source.width = 1728; source.height = 1080;
+  const context = source.getContext("2d");
+  for (let y = 0; y < source.height; y += 16) {
+    for (let x = 0; x < source.width; x += 16) {
+      context.fillStyle = (x + y) % 32 ? "#58747a" : "#253b45";
+      context.fillRect(x, y, 16, 16);
+    }
+  }
+  const cutout = document.createElement("canvas");
+  cutout.width = source.width; cutout.height = source.height;
+  const foreground = cutout.getContext("2d");
+  foreground.fillStyle = "#c7f36b";
+  foreground.fillRect(664, 270, 400, 540);
+  foreground.fillStyle = "#152518";
+  for (let x = 680; x < 1048; x += 16) foreground.fillRect(x, 300, 5, 480);
+  context.drawImage(cutout, 0, 0);
+  const cutoutUrl = cutout.toDataURL();
+  const project = {
+    id: "review-browser-check", width: source.width, height: source.height,
+    sourceUrl: source.toDataURL(), backgroundUrl: null, layers: [{
+      id: "foreground", name: "Foreground", cutoutUrl, maskUrl: cutoutUrl,
+      selected: true, visible: true, depth: 0.8, order: 0, offsetX: 0, offsetY: 0,
+      // Inline fixture images have no revision query.
+      bounds: [664, 270, 1064, 810], feather: 0, maskRevision: null,
+    }],
+  };
+  // Add ?processing to inspect the same scene during an active inpaint job.
+  const processing = new URLSearchParams(location.search).has("processing");
+  function Preview() {
+    const [camera, setCamera] = useState({ x: 0.5, y: 0.2, zoom: 1.1, strength: 30 });
+    return React.createElement(SceneCanvas, {
+      project, camera, interactive: !processing, reviewingSource: !processing, processing,
+      inpaintProgress: 24,
+      showInpaintMask: false, maskEditor: null, showCompositionWhileMaskEditing: false,
+      brushMode: "add", brushSize: 48, maskBlurRadius: 0, anchorLayerId: null,
+      onCameraChange: setCamera,
+    });
+  }
+  createRoot(document.getElementById("preview")).render(React.createElement(Preview));
+  function pointer(type, x = 864) {
+    const canvas = document.querySelector("#preview canvas");
+    canvas.dispatchEvent(new PointerEvent(type, { bubbles: true, pointerId: 77, clientX: x, clientY: 400 }));
+  }
+  document.getElementById("hold").onclick = () => {
+    const canvas = document.querySelector("#preview canvas");
+    const capture = canvas.setPointerCapture;
+    // Synthetic events cannot capture a hardware pointer; real drags still can.
+    canvas.setPointerCapture = () => {};
+    pointer("pointerdown");
+    canvas.setPointerCapture = capture;
+    pointer("pointermove", 960);
+    document.getElementById("status").textContent = "Dragging: blurred background, sharp foreground";
+  };
+  for (const [id, event] of [["release", "pointerup"], ["cancel", "pointercancel"]]) {
+    document.getElementById(id).onclick = () => {
+      pointer(event);
+      document.getElementById("status").textContent = "Released: sharp background and foreground";
+    };
+  }
+</script>
+</html>

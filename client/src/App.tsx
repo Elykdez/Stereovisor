@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type DragEvent } from "react";
 import { CameraControls } from "./components/CameraControls";
+import { ServerStatus } from "./components/ServerStatus";
 import { LayerInspector } from "./components/LayerInspector";
 import type { MaskBrushMode, MaskEditorTarget } from "./components/MaskEditorOverlay";
 import { SceneCanvas, type SceneCanvasHandle } from "./components/SceneCanvas";
@@ -30,8 +31,10 @@ import {
   updateProjectMask,
   ProcessingCancelledError,
   setJobPollIntervalMs,
-  setServiceConnection
+  setServiceConnection,
+  waitForJob
 } from "./lib/api";
+import { clearProcessingSession, readProcessingSession, saveProcessingSession, type ProcessingSession } from "./lib/processingSession";
 import { mergeProjectResult, refreshedAssetUrl } from "./lib/projectAssets";
 import { appLog } from "./lib/logger";
 import { useAppTranslation, type AppTranslate } from "./i18n";
@@ -56,10 +59,11 @@ import {
 import "./styles.css";
 
 const DEFAULT_CAMERA: CameraState = {
-  x: 0,
-  y: 0,
-  zoom: 1,
-  strength: 68,
+  x: 0.5,
+  y: 0.2,
+  zoom: DEFAULT_APP_SETTINGS.camera.defaultZoom,
+  strength: DEFAULT_APP_SETTINGS.camera.defaultStrength,
+  inverseDepth: false,
   centerPull: 0.5,
   sceneScale: 1,
   depthOfField: 0,
@@ -166,7 +170,9 @@ export default function App() {
   const [mergeHistoryBusy, setMergeHistoryBusy] = useState<"undo" | "redo" | null>(null);
   const [mergingLayers, setMergingLayers] = useState(false);
   const [processingProgress, setProcessingProgress] = useState<ProcessingProgress | null>(null);
-  const [processingJobId, setProcessingJobId] = useState<string | null>(null);
+  const [processingJobId, setProcessingJobIdState] = useState<string | null>(null);
+  const [settingsReady, setSettingsReady] = useState(false);
+  const [processingSessionReady, setProcessingSessionReady] = useState(false);
   const [cancellingJob, setCancellingJob] = useState(false);
   const [fileOperation, setFileOperation] = useState<"import" | "project" | "video" | "png" | null>(null);
   const preparationOnly = isPreparationWindow(window.location.search);
@@ -175,6 +181,9 @@ export default function App() {
   const fileRef = useRef<HTMLInputElement>(null);
   const projectFileRef = useRef<HTMLInputElement>(null);
   const pendingFileRef = useRef<File | null>(null);
+  const activeProcessingSession = useRef<ProcessingSession | null>(null);
+  const processingRecoveryChecked = useRef(false);
+  const mounted = useRef(true);
   const processingMessage = processingProgress
     ? processingProgress.queuePosition === null
       ? runtimeText(processingProgress.message)
@@ -187,6 +196,12 @@ export default function App() {
     centerPull: 0.5,
     sceneScale: 1
   };
+  const editingCameraDefaults = { ...cameraDefaults, inverseDepth: camera.inverseDepth ?? false };
+
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
 
   useEffect(() => {
     // Settings are loaded before controls become interactive.
@@ -200,12 +215,55 @@ export default function App() {
       setRefinement(loaded.processing.defaultRefinement);
       setCamera((current) => ({ ...current, zoom: loaded.camera.defaultZoom, strength: loaded.camera.defaultStrength }));
       if (locale !== loaded.locale) setLocale(loaded.locale);
+      setSettingsReady(true);
       appLog.info("settings.loaded", { locale: loaded.locale, pollIntervalMs: loaded.processing.pollIntervalMs });
     });
     return () => {
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    if (!settingsReady || startupPhase !== "ready" || processingRecoveryChecked.current) return;
+    processingRecoveryChecked.current = true;
+    const session = preparationOnly ? null : readProcessingSession();
+    if (session) {
+      activeProcessingSession.current = session;
+      setProcessingJobIdState(session.jobId);
+      setProject(session.project);
+      setPhase(session.kind === "analyze" ? "analyzing" : session.kind === "refine" ? session.phase : "inpainting");
+      setProcessingProgress({ state: "queued", progress: 0, stage: "Queued", message: "Waiting for the local AI worker.", queuePosition: null });
+      appLog.info("processing.session.resuming", { jobId: session.jobId });
+      void waitForJob(session.jobId, (progress) => {
+        if (mounted.current) setProcessingProgress(progress);
+      }).then((result) => {
+        if (!mounted.current) return;
+        const restored = mergeProjectResult(session.kind === "analyze" ? null : session.project, result);
+        setProject({
+          ...restored,
+          backgroundUrl: restored.backgroundUrl ? refreshedAssetUrl(restored.backgroundUrl) : null,
+          layers: restored.layers.map((layer) => ({
+            ...layer,
+            visible: session.kind === "inpaint" ? layer.selected : layer.visible,
+            maskUrl: refreshedAssetUrl(layer.maskUrl),
+            cutoutUrl: refreshedAssetUrl(layer.cutoutUrl)
+          }))
+        });
+        setPhase(session.kind === "analyze" ? "selecting" : session.kind === "refine" ? session.phase : "editing");
+      }).catch((operationError) => {
+        if (!mounted.current) return;
+        setPhase(session.project ? session.phase : "idle");
+        setError(operationError instanceof ProcessingCancelledError ? null : operationError instanceof Error ? operationError.message :
+          t(session.kind === "analyze" ? "error.analysisFailed" : session.kind === "refine" ? "error.refineFailed" : "error.backgroundInpaintFailed"));
+      }).finally(() => {
+        if (!mounted.current) return;
+        setProcessingProgress(null);
+        setProcessingJobId(null);
+        setCancellingJob(false);
+      });
+    }
+    setProcessingSessionReady(true);
+  }, [settingsReady, startupPhase, preparationOnly]);
 
   useEffect(() => {
     document.title = preparationOnly && startupPhase !== "ready"
@@ -346,16 +404,16 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (startupPhase !== "ready") return;
+    if (startupPhase !== "ready" || !processingSessionReady || processingJobId !== null) return;
     const pendingFile = pendingFileRef.current;
     if (!pendingFile) return;
     pendingFileRef.current = null;
     appLog.info("workflow.analysis.startup-queue-drained", { name: pendingFile.name, bytes: pendingFile.size });
     void onFile(pendingFile);
-    // The queue drains once, on the readiness transition; onFile remains the
-    // single entry point for file validation and processing.
+    // Defer an opening file until startup and any recovered job have finished;
+    // onFile remains the single entry point for validation and processing.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [startupPhase]);
+  }, [startupPhase, processingSessionReady, processingJobId]);
 
   useEffect(() => {
     // Options and About render outside the shell, so the flag lives on the
@@ -481,13 +539,30 @@ export default function App() {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [startupPhase, project, phase, maskEditor, refiningLayerId, confirmingLayerId, mergingLayers, mergeHistoryBusy, mergeHistory, focusedMaskLayerId, maskHistory]);
 
+  function rememberProcessingJob(jobId: string, kind: ProcessingSession["kind"]): void {
+    if (!mounted.current) return;
+    const session = { jobId, kind, project, phase };
+    activeProcessingSession.current = session;
+    saveProcessingSession(session);
+    setProcessingJobIdState(jobId);
+  }
+
+  function setProcessingJobId(jobId: string | null): void {
+    if (!mounted.current) return;
+    if (jobId === null && activeProcessingSession.current) {
+      clearProcessingSession(activeProcessingSession.current.jobId);
+      activeProcessingSession.current = null;
+    }
+    setProcessingJobIdState(jobId);
+  }
+
   async function process(
     operation: (
       onProgress: (progress: ProcessingProgress) => void,
       onJobStarted: (jobId: string) => void
     ) => Promise<SceneProject>
   ): Promise<void> {
-    if (startupPhase !== "ready") return;
+    if (startupPhase !== "ready" || !processingSessionReady || activeProcessingSession.current || phase === "analyzing" || phase === "inpainting") return;
     // A new analysis invalidates all transient editor/history state. Reset it
     // before changing phase so stale controls cannot target the next project.
     appLog.info("workflow.analysis.started");
@@ -513,7 +588,7 @@ export default function App() {
     setPhase("analyzing");
     setProcessingProgress({ state: "queued", progress: 0, stage: "Queued", message: "Preparing the local AI job.", queuePosition: null });
     try {
-      const result = await operation(setProcessingProgress, setProcessingJobId);
+      const result = await operation(setProcessingProgress, (jobId) => rememberProcessingJob(jobId, "analyze"));
       setProject(result);
       setCamera(cameraDefaults);
       setPhase("selecting");
@@ -535,7 +610,7 @@ export default function App() {
 
   async function onFile(file: File | undefined): Promise<void> {
     if (!file) return;
-    if (startupPhase !== "ready") {
+    if (startupPhase !== "ready" || !processingSessionReady) {
       pendingFileRef.current = file;
       appLog.info("workflow.analysis.queued-until-startup", { name: file.name, bytes: file.size });
       return;
@@ -600,7 +675,7 @@ export default function App() {
     setError(null);
     setShowInpaintMask(false);
     setMoving(false);
-    setCamera(cameraDefaults);
+    setCamera(editingCameraDefaults);
     setPhase("inpainting");
     setProcessingProgress({ state: "queued", progress: 0, stage: "Queued", message: "Preparing the local inpainting job.", queuePosition: null });
     setProcessingJobId(null);
@@ -613,7 +688,7 @@ export default function App() {
         refinement,
         inpaintPrompt,
         setProcessingProgress,
-        setProcessingJobId,
+        (jobId) => rememberProcessingJob(jobId, "inpaint"),
         settings.processing.inpaintingSteps
       );
       const selectedIds = new Set(selected);
@@ -748,7 +823,7 @@ export default function App() {
     if (startupPhase !== "ready") return;
     setError(null);
     setMoving(false);
-    setCamera(cameraDefaults);
+    setCamera(editingCameraDefaults);
     setShowInpaintMask(false);
     setMaskBrushMode("add");
     setMaskBlurRadius(0);
@@ -765,7 +840,7 @@ export default function App() {
     if (startupPhase !== "ready" || !project) return;
     setError(null);
     setMoving(false);
-    setCamera(cameraDefaults);
+    setCamera(editingCameraDefaults);
     setShowInpaintMask(false);
     setMaskBrushMode("add");
     setMaskBlurRadius(0);
@@ -789,7 +864,7 @@ export default function App() {
     if (startupPhase !== "ready" || !project) return;
     setError(null);
     setMoving(false);
-    setCamera(cameraDefaults);
+    setCamera(editingCameraDefaults);
     setShowInpaintMask(false);
     setMaskBrushMode("add");
     setMaskBlurRadius(0);
@@ -821,7 +896,7 @@ export default function App() {
     setFocusedInpaintTargetId(layerId ?? "background");
     setError(null);
     setMoving(false);
-    setCamera(cameraDefaults);
+    setCamera(editingCameraDefaults);
     setShowInpaintMask(false);
     setMaskBrushMode("add");
     setMaskBlurRadius(0);
@@ -863,7 +938,7 @@ export default function App() {
     setCancellingJob(false);
     appLog.info("workflow.mask-refine.started", { projectId: project.id, layerId: layer.id });
     try {
-      const result = await refineProjectLayer(project.id, layer.id, setProcessingProgress, setProcessingJobId);
+      const result = await refineProjectLayer(project.id, layer.id, setProcessingProgress, (jobId) => rememberProcessingJob(jobId, "refine"));
       setProject(mergeProjectResult(project, result, { refreshLayerId: layer.id }));
       await refreshMaskHistory(project.id);
       appLog.info("workflow.mask-refine.completed", { projectId: project.id, layerId: layer.id });
@@ -1061,7 +1136,7 @@ export default function App() {
       setPendingInpaintMaskUrl(maskPreviewUrl);
       cancelMaskEdit();
       setMoving(false);
-      setCamera(cameraDefaults);
+      setCamera(editingCameraDefaults);
       setPhase("inpainting");
       setProcessingProgress({
         state: "queued",
@@ -1079,7 +1154,7 @@ export default function App() {
         mask,
         layerInpaintPrompt,
         setProcessingProgress,
-        setProcessingJobId,
+        (jobId) => rememberProcessingJob(jobId, "target-inpaint"),
         settings.processing.inpaintingSteps
       );
       let merged = mergeProjectResult(project, result, { refreshLayerId: targetLayerId });
@@ -1280,6 +1355,7 @@ export default function App() {
     setProject(importedProject);
     setCamera({
       ...importedCamera,
+      inverseDepth: importedCamera.inverseDepth ?? false,
       centerPull: importedCamera.centerPull ?? 0.5,
       sceneScale: importedCamera.sceneScale ?? 1,
       depthOfField: importedCamera.depthOfField ?? 0,
@@ -1423,8 +1499,7 @@ export default function App() {
         : t("build.inpaintHoles");
   const startupReady = startupPhase === "ready";
   const startupGatePhase = startupPhase === "ready" ? "checking" : startupPhase;
-  const busy = !startupReady || phase === "analyzing" || phase === "inpainting" || processingJobId !== null || fileOperation !== null || maskSaving || refiningLayerId !== null || confirmingLayerId !== null || inpaintHistoryBusy !== null || maskHistoryBusy !== null;
-  const engine = project?.engine ?? health?.activeEngine;
+  const busy = !startupReady || !processingSessionReady || phase === "analyzing" || phase === "inpainting" || processingJobId !== null || fileOperation !== null || maskSaving || refiningLayerId !== null || confirmingLayerId !== null || inpaintHistoryBusy !== null || maskHistoryBusy !== null;
 
   const acceptDroppedFile = (event: DragEvent<HTMLElement>) => {
     event.preventDefault();
@@ -1532,13 +1607,7 @@ export default function App() {
             <li className={["inpainting", "editing"].includes(phase) ? "active" : ""}><span>4</span> {t("pipeline.build")}</li>
           </ol>
         </section>
-        <div className="local-note">
-          <span className="local-pulse" />
-          <div>
-            <strong>{t("privacy.title")} / {engine === "ai" ? t("engine.localAI") : t("engine.preview")}</strong>
-            <small>{t("privacy.detail")}</small>
-          </div>
-        </div>
+        <ServerStatus health={health} startupPhase={startupPhase} />
         </div>
         <div className="workflow-rail-footer">
         {project && phase === "selecting" && (
@@ -1586,6 +1655,7 @@ export default function App() {
         <div className="workspace-content">
             {processingProgress && (
               <div className="processing-status" aria-live="polite">
+            <span className="spinner" aria-hidden="true" />
             <div className="processing-copy">
               <span className="eyebrow">{t("processing.local")}</span>
               <strong>{runtimeText(processingProgress.stage)}</strong>
@@ -1823,6 +1893,8 @@ export default function App() {
             <LayerInspector
               layers={project.layers}
               phase={phase}
+              inverseDepth={camera.inverseDepth}
+              onInverseDepthChange={(inverseDepth) => { setMoving(false); setCamera((current) => ({ ...current, inverseDepth })); }}
               editingLayerId={maskEditor?.kind === "layer" ? maskEditor.layerId : null}
               refiningLayerId={refiningLayerId}
               confirmingLayerId={confirmingLayerId}
@@ -1894,16 +1966,6 @@ export default function App() {
                 >
                   {inpaintLabel}
                 </button>
-              </div>
-            )}
-            {phase === "inpainting" && (
-              <div className="build-panel processing">
-                <span className="spinner" />
-                <div>
-                  <strong>{processingProgress ? runtimeText(processingProgress.stage) : t("build.inpaintingLocally")}</strong>
-                  <span>{processingMessage ?? t("build.localDetail")}</span>
-                </div>
-                <output>{processingProgress?.progress ?? 0}%</output>
               </div>
             )}
             {phase === "editing" && (

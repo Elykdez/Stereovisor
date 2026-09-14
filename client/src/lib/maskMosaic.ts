@@ -96,8 +96,7 @@ export const DEFAULT_MOSAIC_SHAPE: MosaicShape = {
 export const INPAINT_MOSAIC_STYLE: MosaicStyle = {
   alpha: 0.95,
   tint: [199, 241, 90],
-  // Tuned for a region rather than a whole frame: the tint and the sweep are
-  // heavy enough to read as "this area is being worked on".
+  // Tint and local flicker identify the pending region without a travelling band.
   tintAmount: 0.34,
   brightness: 0.92,
   dropout: 0.06,
@@ -108,7 +107,7 @@ export const INPAINT_MOSAIC_STYLE: MosaicStyle = {
   twinkleJitter: 0.45,
   chromatic: 0.4,
   glitch: 0.02,
-  sweepStrength: 0.45,
+  sweepStrength: 0,
   sweepSpeed: 0.26,
   sweepWidth: 0.06,
 };
@@ -167,6 +166,16 @@ function smoothstep(edge0: number, edge1: number, value: number): number {
 export function rand(x: number, y: number): number {
   const noise = Math.sin(x * 12.9898 + y * 78.233) * 43758.5453;
   return noise - Math.floor(noise);
+}
+
+/** Hash cell, tick and stream independently so animation cannot translate the noise field. */
+export function mosaicAnimationNoise(x: number, y: number, tick: number, stream: number): number {
+  let value = Math.imul(x, 1973) ^ Math.imul(y, 9277) ^ Math.imul(tick, 26699) ^ Math.imul(stream, 31847);
+  value = Math.imul(value ^ (value >>> 16), 0x7feb352d);
+  value = Math.imul(value ^ (value >>> 15), 0x846ca68b);
+  value ^= value >>> 16;
+  // Match the 24 bits that the WebGL float can represent exactly.
+  return (value >>> 8) / 16777216;
 }
 
 /** Port of HSVtoRGB() in FragmentUtils.cginc, returning 0-255 channels. */
@@ -506,32 +515,31 @@ class CpuMaskMosaicRenderer {
       let offsetV = 0;
       let twinkle = 0;
       if (style.twinkleStrength > 0 && style.twinkleDensity > 0) {
-        const seed = rand(idX + 19.19, idY + 19.19);
+        const seed = mosaicAnimationNoise(idX, idY, 0, 0);
         const clock = time * style.twinkleSpeed + seed * 37;
         const step = Math.floor(clock);
         const phase = clock - step;
         const gate =
-          rand(idX * 2.17 + step * 11.31, idY * 2.17 + step * 11.31) >=
-          1 - style.twinkleDensity
+          mosaicAnimationNoise(idX, idY, step, 1) >= 1 - style.twinkleDensity
             ? 1
             : 0;
         twinkle =
           gate * smoothstep(0, 0.18, phase) * (1 - smoothstep(0.45, 1, phase));
         if (twinkle > 0) {
           offsetU +=
-            (rand(idX + 13.17, idY + step * 1.37) - 0.5) *
+            (mosaicAnimationNoise(idX, idY, step, 2) - 0.5) *
             twinkle *
             jitterScale;
           offsetV +=
-            (rand(idX + step * 2.11, idY + 31.41) - 0.5) *
+            (mosaicAnimationNoise(idX, idY, step, 3) - 0.5) *
             twinkle *
             jitterScale;
         }
       }
 
       // Scanline tearing: a few cell rows slide sideways for one time step.
-      if (style.glitch > 0 && rand(idY * 1.7 + glitchStep, 91.3) > 0.94) {
-        offsetU += (rand(idY * 3.1, glitchStep) - 0.5) * style.glitch;
+      if (style.glitch > 0 && mosaicAnimationNoise(0, idY, glitchStep, 4) > 0.94) {
+        offsetU += (mosaicAnimationNoise(0, idY, glitchStep, 5) - 0.5) * style.glitch;
       }
 
       const u = field.sampleU[slot] + offsetU;
@@ -554,7 +562,7 @@ class CpuMaskMosaicRenderer {
 
       if (style.grain > 0) {
         const grain =
-          (rand(idX * 7.13 + grainStep, idY * 7.13) - 0.5) *
+          (mosaicAnimationNoise(idX, idY, grainStep, 6) - 0.5) *
           2 *
           style.grain *
           255;
@@ -564,7 +572,7 @@ class CpuMaskMosaicRenderer {
       }
       if (twinkle > 0) {
         const pulse =
-          (rand(idX * 2.37 + grainStep, idY * 2.37) - 0.5) *
+          (mosaicAnimationNoise(idX, idY, grainStep, 7) - 0.5) *
           2 *
           style.twinkleStrength *
           twinkle *

@@ -11,6 +11,7 @@ import numpy as np
 from PIL import Image
 
 from .config import DEVICE, MODEL_ROOT, snapshot_ready
+from .compute import clear_compute, report_compute
 
 logger = logging.getLogger(__name__)
 
@@ -281,6 +282,7 @@ def grounded_sam_instances(
     outputs = None
     try:
         begin_vram_stage(torch)
+        report_compute(torch, "Grounding DINO-B", device, "loading")
         detector_processor = AutoProcessor.from_pretrained(
             GROUNDING_DINO_PATH, local_files_only=True
         )
@@ -301,6 +303,7 @@ def grounded_sam_instances(
                 text=[list(labels_to_detect)],
                 return_tensors="pt",
             ).to(device)
+            report_compute(torch, "Grounding DINO-B", device, "inference")
             with torch.inference_mode(), torch.autocast(
                 device_type=device,
                 dtype=torch.float16,
@@ -341,8 +344,10 @@ def grounded_sam_instances(
             "Grounding DINO-B", peak_vram_mb(torch)
         )
     finally:
+        report_compute(torch, "Grounding DINO-B", device, "cleanup")
         del outputs, inputs, detector, detector_processor
         release_cuda(torch)
+        clear_compute(torch)
 
     if not boxes:
         logger.warning("Grounding/SAM produced no candidate boxes")
@@ -354,6 +359,7 @@ def grounded_sam_instances(
     sam_outputs = None
     try:
         begin_vram_stage(torch)
+        report_compute(torch, "SAM 2.1 Small", device, "loading")
         segmenter_processor = Sam2Processor.from_pretrained(
             SAM2_PATH, local_files_only=True
         )
@@ -372,6 +378,7 @@ def grounded_sam_instances(
             if device == "cuda" and torch.cuda.is_bf16_supported()
             else torch.float16
         )
+        report_compute(torch, "SAM 2.1 Small", device, "inference")
         with torch.inference_mode(), torch.autocast(
             device_type=device,
             dtype=autocast_dtype,
@@ -403,5 +410,7 @@ def grounded_sam_instances(
         )
         return instances, metrics
     finally:
+        report_compute(torch, "SAM 2.1 Small", device, "cleanup")
         del sam_outputs, sam_inputs, segmenter, segmenter_processor
         release_cuda(torch)
+        clear_compute(torch)

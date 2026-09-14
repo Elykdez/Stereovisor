@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>Inpaint foreground shader preview</title>
+<style>
+  body { margin: 24px; background: #14181e; color: #d9e9ee; font: 14px system-ui; }
+  h1 { font-size: 20px; }
+  nav { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin: 18px 0; }
+  button, select { padding: 8px; background: #28333e; color: inherit; border: 1px solid #53657a; }
+  canvas { display: block; max-width: 100%; }
+  output { display: block; margin-top: 16px; white-space: pre-wrap; }
+</style>
+<h1>Inpaint foreground shader preview</h1>
+<nav>
+  <button id="pause">Pause</button>
+  <button id="burst">Show RGB burst</button>
+  <label><input id="enabled" type="checkbox" checked> Inpaint effects</label>
+  <label>Size <select id="size"><option value="960,600">Landscape</option><option value="600,900">Portrait</option><option value="1920,1200">2x resolution</option></select></label>
+  <button id="lost">Lose GPU context</button>
+</nav>
+<canvas aria-label="Foreground shader preview" width="960" height="600"></canvas>
+<output id="checks">Checking GLSL...</output>
+<output id="status"></output>
+<script type="module">
+  import { GlInpaintForegroundRenderer } from "/src/lib/inpaintForegroundGl.ts";
+  import { MaskMosaicRenderer } from "/src/lib/maskMosaic.ts";
+  import { drawScene } from "/src/components/SceneCanvas.tsx";
+
+  const canvas = document.querySelector("canvas");
+  const status = document.querySelector("#status");
+  const gpu = GlInpaintForegroundRenderer.create();
+  const mosaic = new MaskMosaicRenderer();
+  const checks = [];
+  let burstTime = 0;
+  function check(condition, name) {
+    if (!condition) throw new Error(name);
+    checks.push(`PASS: ${name}`);
+  }
+  function scratch(width, height) {
+    const output = document.createElement("canvas");
+    output.width = width; output.height = height;
+    return output;
+  }
+  function verify() {
+    check(gpu, "WebGL2 shader compiles and links");
+    const source = scratch(256, 160);
+    const context = source.getContext("2d");
+    context.fillStyle = "white"; context.fillRect(90, 24, 60, 70);
+    const readback = scratch(256, 160).getContext("2d", { willReadFrequently: true });
+    let burstFrames = 0, quietFrames = 0, splitPixels = 0, strongest = 0;
+    for (let time = 0; time < 12.4; time += 0.025) {
+      const output = gpu.paint(source, 256, 160, time, "foreground");
+      if (!output) throw new Error(`Frame ${time.toFixed(2)} did not render`);
+      readback.clearRect(0, 0, 256, 160); readback.drawImage(output, 0, 0);
+      const pixels = readback.getImageData(0, 0, 256, 160).data;
+      let ghosts = 0, intensity = 0;
+      for (let y = 0; y < 160; y++) for (let x = 0; x < 256; x++) {
+        const index = (y * 256 + x) * 4;
+        if (x >= 90 && x < 150 && y >= 24 && y < 94) continue;
+        if (pixels[index + 3] > 3) {
+          ghosts++;
+          intensity += pixels[index + 3];
+          if (Math.max(...pixels.slice(index, index + 3)) - Math.min(...pixels.slice(index, index + 3)) > 80) splitPixels++;
+        }
+      }
+      if (ghosts) burstFrames++;
+      else if (pixels.every(value => value === 0)) quietFrames++;
+      if (intensity > strongest) { strongest = intensity; burstTime = time; }
+      if (pixels[3] !== 0) throw new Error("Distant background is not transparent");
+    }
+    check(burstFrames > 0 && quietFrames > burstFrames * 5, "Entire effect switches off between occasional flickers");
+    check(splitPixels > 0, "Echo edges contain separated RGB channels");
+    checks.push("PASS: Distant background remains transparent throughout the cycle");
+    const empty = scratch(256, 160);
+    readback.clearRect(0, 0, 256, 160);
+    readback.drawImage(gpu.paint(empty, 256, 160, burstTime, "foreground"), 0, 0);
+    check(readback.getImageData(0, 0, 256, 160).data.every(value => value === 0), "Transparent layers produce no overlay or stale pixels");
+    readback.clearRect(0, 0, 256, 160);
+    readback.drawImage(gpu.paint(source, 256, 160, burstTime, "foreground"), 0, 0);
+    check(readback.getImageData(110, 35, 1, 1).data[3] > 0 && readback.getImageData(110, 130, 1, 1).data[3] === 0,
+      "Texture coordinates preserve vertical orientation");
+
+    // Probe actual GPU output for directional grain patterns on a flat cutout.
+    const flat = scratch(256, 256);
+    const flatContext = flat.getContext("2d");
+    flatContext.fillStyle = "white"; flatContext.fillRect(0, 0, 256, 256);
+    const probe = scratch(256, 256).getContext("2d", { willReadFrequently: true });
+    probe.drawImage(gpu.paint(flat, 256, 256, burstTime, "foreground"), 0, 0);
+    const area = 224;
+    const pixels = probe.getImageData(16, 16, area, area).data;
+    const grain = new Uint8Array(area * area);
+    const validRows = new Uint8Array(area);
+    for (let y = 0; y < area; y++) {
+      const histogram = new Uint16Array(256);
+      for (let x = 0; x < area; x++) histogram[pixels[(y * area + x) * 4 + 3]]++;
+      const baseline = histogram.indexOf(Math.max(...histogram));
+      // Exclude intentional corruption bands; remove the scanline's base alpha.
+      if (histogram[baseline] < area * 0.84) continue;
+      validRows[y] = 1;
+      for (let x = 0; x < area; x++) grain[y * area + x] = Number(pixels[(y * area + x) * 4 + 3] > baseline + 8);
+    }
+    check(validRows.reduce((sum, value) => sum + value, 0) > area * 0.7, "Enough clean rows to inspect grain");
+    let strongestCorrelation = 0;
+    for (let dy = -4; dy <= 4; dy++) for (let dx = -4; dx <= 4; dx++) {
+      if (!dx && !dy) continue;
+      let count = 0, first = 0, second = 0, both = 0;
+      for (let y = 4; y < area - 4; y++) {
+        if (!validRows[y] || !validRows[y + dy]) continue;
+        for (let x = 4; x < area - 4; x++) {
+          const a = grain[y * area + x], b = grain[(y + dy) * area + x + dx];
+          first += a; second += b; both += a * b; count++;
+        }
+      }
+      const p = first / count, q = second / count;
+      if (!(p > 0.04 && p < 0.11)) throw new Error("Grain is not sparse and evenly distributed");
+      const correlation = Math.abs((both / count - p * q) / Math.sqrt(p * (1 - p) * q * (1 - q)));
+      strongestCorrelation = Math.max(strongestCorrelation, correlation);
+    }
+    check(strongestCorrelation < 0.08, `No horizontal, vertical or diagonal grain pattern (correlation ${strongestCorrelation.toFixed(3)})`);
+    check(gpu.gl.getError() === gpu.gl.NO_ERROR, "No WebGL errors");
+  }
+  try { verify(); document.querySelector("#checks").textContent = checks.join("\n"); }
+  catch (error) { document.querySelector("#checks").textContent = `FAIL: ${error.message}`; throw error; }
+
+  let time = 0;
+  let playing = true;
+  let project, images;
+  function reset() {
+    const [width, height] = document.querySelector("#size").value.split(",").map(Number);
+    canvas.width = width; canvas.height = height;
+    canvas.style.width = `${Math.min(width, 960)}px`;
+    const plate = scratch(width, height);
+    const context = plate.getContext("2d");
+    const gradient = context.createLinearGradient(0, 0, width, height);
+    gradient.addColorStop(0, "#243f57"); gradient.addColorStop(1, "#121420");
+    context.fillStyle = gradient; context.fillRect(0, 0, width, height);
+    for (let i = 0; i < 16; i++) {
+      const h = height * (0.18 + ((i * 17) % 11) * 0.035);
+      context.fillStyle = i % 2 ? "#34445a" : "#29364c";
+      context.fillRect(i * width / 16, height * 0.76 - h, width / 19, h);
+    }
+    context.fillStyle = "#171d2b"; context.fillRect(0, height * 0.76, width, height * 0.24);
+    context.fillStyle = "#879bae"; context.font = `${height * 0.026}px system-ui`;
+    context.fillText("BACKGROUND / UNCHANGED", width * 0.04, height * 0.08);
+    images = new Map([["plate", plate]]);
+    const layers = [];
+    for (const [index, x, y, color] of [[0, 0.28, 0.42, "#aaa8bd"], [1, 0.64, 0.6, "#9eaea2"]]) {
+      const cutout = scratch(width, height);
+      const paint = cutout.getContext("2d");
+      paint.fillStyle = color;
+      paint.beginPath(); paint.ellipse(width * x, height * y, width * 0.06, height * 0.095, 0, 0, Math.PI * 2); paint.fill();
+      paint.beginPath(); paint.roundRect(width * (x - 0.09), height * (y + 0.09), width * 0.18, height * 0.25, width * 0.04); paint.fill();
+      paint.fillStyle = "#404659";
+      paint.fillRect(width * (x - 0.045), height * (y - 0.03), width * 0.09, height * 0.033);
+      for (let j = 0; j < 4; j++) paint.fillRect(width * (x - 0.065), height * (y + 0.14 + j * 0.04), width * 0.13, height * 0.012);
+      const id = index ? "near" : "foreground";
+      images.set(id, cutout);
+      layers.push({ id, name: id, cutoutUrl: id, depth: index ? 0.8 : 0.4, order: index, selected: true, visible: true, feather: 0, blur: 0, offsetX: 0, offsetY: 0 });
+    }
+    project = { id: "foreground-preview", width, height, sourceUrl: "plate", backgroundUrl: "plate", layers };
+    render();
+  }
+  function render() {
+    const enabled = document.querySelector("#enabled").checked;
+    const started = performance.now();
+    drawScene(canvas, project, { x: 0, y: 0, zoom: 1, strength: 0 }, images, false, false, false, null,
+      enabled ? { renderer: mosaic, foreground: gpu, time, mask: null, progress: 40 } : null);
+    status.textContent = `Time: ${time.toFixed(2)}s | Effects: ${enabled ? "on" : "off"} | Backend: ${gpu.gl.isContextLost() ? "Original cutouts (GPU unavailable)" : "WebGL2"} | Submission: ${(performance.now() - started).toFixed(1)}ms`;
+  }
+  document.querySelector("#pause").onclick = () => { playing = !playing; document.querySelector("#pause").textContent = playing ? "Pause" : "Play"; };
+  document.querySelector("#burst").onclick = () => { playing = false; time = burstTime; document.querySelector("#pause").textContent = "Play"; render(); };
+  document.querySelector("#enabled").onchange = render;
+  document.querySelector("#size").onchange = reset;
+  document.querySelector("#lost").onclick = () => {
+    gpu.gl.getExtension("WEBGL_lose_context")?.loseContext();
+    requestAnimationFrame(() => {
+      check(gpu.paint(images.get("foreground"), canvas.width, canvas.height, time, "foreground") === null, "Context loss falls back to original cutouts");
+      document.querySelector("#checks").textContent = checks.join("\n");
+      render();
+    });
+  };
+  reset();
+  let previous = performance.now();
+  function tick(now) {
+    if (playing) { time += Math.max(0, Math.min((now - previous) / 1000, 0.1)); render(); }
+    previous = now;
+    requestAnimationFrame(tick);
+  }
+  requestAnimationFrame(tick);
+  window.addEventListener("pagehide", () => { gpu.dispose(); mosaic.dispose(); });
+</script>

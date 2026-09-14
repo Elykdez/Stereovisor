@@ -178,7 +178,7 @@ def test_health_watch_eases_off_once_readiness_settles() -> None:
         HEALTH_WATCH_INTERVAL_SECONDS,
         health_watch_interval,
     )
-    from service.src.schemas import HealthPayload
+    from service.src.schemas import HealthPayload, ServerActivity
 
     def payload(state: str) -> HealthPayload:
         return HealthPayload(
@@ -199,4 +199,7 @@ def test_health_watch_eases_off_once_readiness_settles() -> None:
     )
     assert health_watch_interval(payload("blocked")) == HEALTH_WATCH_INTERVAL_SECONDS
     assert health_watch_interval(payload("ready")) == HEALTH_WATCH_IDLE_SECONDS
+    for state in ("running", "queued", "stopping"):
+        active = payload("ready").model_copy(update={"activity": ServerActivity(state=state)})
+        assert health_watch_interval(active) == HEALTH_WATCH_INTERVAL_SECONDS
     assert HEALTH_WATCH_IDLE_SECONDS > HEALTH_WATCH_INTERVAL_SECONDS

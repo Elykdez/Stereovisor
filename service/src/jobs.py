@@ -10,7 +10,7 @@ from uuid import uuid4
 
 from pydantic import TypeAdapter
 
-from .schemas import JobKind, JobResult, ProcessingJobPayload
+from .schemas import ComputeStatus, JobKind, JobResult, ProcessingJobPayload, ServerActivity
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +33,10 @@ CREATE TABLE IF NOT EXISTS jobs (
     queue_position   INTEGER,
     cancel_requested INTEGER NOT NULL DEFAULT 0,
     created_at       REAL NOT NULL,
-    updated_at       REAL NOT NULL
+    updated_at       REAL NOT NULL,
+    compute_json     TEXT,
+    compute_started_at REAL,
+    compute_updated_at REAL
 );
 -- Results are a separate row so status polling never reads the payload blob.
 CREATE TABLE IF NOT EXISTS job_results (
@@ -88,6 +91,10 @@ class ProcessingJobStore:
                 # anyway, and fail_interrupted already terminates it on startup.
                 self._connection.execute("PRAGMA synchronous=NORMAL")
             self._connection.executescript(SCHEMA)
+            columns = {row["name"] for row in self._connection.execute("PRAGMA table_info(jobs)")}
+            for name, kind in (("compute_json", "TEXT"), ("compute_started_at", "REAL"), ("compute_updated_at", "REAL")):
+                if name not in columns:
+                    self._connection.execute(f"ALTER TABLE jobs ADD COLUMN {name} {kind}")
             self._connection.commit()
 
     # ------------------------------------------------------------------ util
@@ -113,6 +120,13 @@ class ProcessingJobStore:
     def _payload(
         self, row: sqlite3.Row, *, with_result: bool = True
     ) -> ProcessingJobPayload:
+        compute = None
+        if row["state"] == "running" and row["compute_json"]:
+            now = time.time()
+            compute = ComputeStatus.model_validate_json(row["compute_json"]).model_copy(update={
+                "elapsedSeconds": max(0, int(now - row["compute_started_at"])),
+                "idleSeconds": max(0, int(now - row["compute_updated_at"])),
+            })
         return ProcessingJobPayload(
             jobId=row["job_id"],
             kind=row["kind"],
@@ -121,6 +135,7 @@ class ProcessingJobStore:
             stage=row["stage"],
             message=row["message"],
             queuePosition=row["queue_position"],
+            compute=compute,
             result=self._result(row["job_id"]) if with_result else None,
         )
 
@@ -161,6 +176,9 @@ class ProcessingJobStore:
                 else cancel_requested
             ),
         }
+        keep_compute = updated["state"] == "running" and updated["stage"] == row["stage"]
+        for key in ("compute_json", "compute_started_at", "compute_updated_at"):
+            updated[key] = row[key] if keep_compute else None
         observable = ("state", "progress", "stage", "message", "queue_position")
         if (
             all(updated[key] == row[key] for key in observable)
@@ -171,7 +189,8 @@ class ProcessingJobStore:
             """
             UPDATE jobs
                SET state = ?, progress = ?, stage = ?, message = ?,
-                   queue_position = ?, cancel_requested = ?, updated_at = ?
+                   queue_position = ?, cancel_requested = ?, updated_at = ?,
+                   compute_json = ?, compute_started_at = ?, compute_updated_at = ?
              WHERE job_id = ?
             """,
             (
@@ -182,6 +201,9 @@ class ProcessingJobStore:
                 updated["queue_position"],
                 updated["cancel_requested"],
                 time.time(),
+                updated["compute_json"],
+                updated["compute_started_at"],
+                updated["compute_updated_at"],
                 job_id,
             ),
         )
@@ -237,6 +259,30 @@ class ProcessingJobStore:
             logger.info(
                 "job stage: id=%s progress=%s stage=%s", job_id, payload.progress, stage
             )
+        self._notify(payload)
+
+    def set_compute(self, job_id: str, status: ComputeStatus | None) -> None:
+        with self._lock:
+            row = self._row(job_id)
+            # A model releasing memory after cancellation cannot revive its job.
+            if row["state"] != "running":
+                return
+            previous = ComputeStatus.model_validate_json(row["compute_json"]) if row["compute_json"] else None
+            now = time.time()
+            same_phase = previous is not None and status is not None and (
+                previous.model, previous.device, previous.phase
+            ) == (status.model, status.device, status.phase)
+            self._connection.execute(
+                "UPDATE jobs SET compute_json = ?, compute_started_at = ?, compute_updated_at = ?, updated_at = ? WHERE job_id = ?",
+                (
+                    status.model_dump_json() if status is not None else None,
+                    row["compute_started_at"] if same_phase else now,
+                    now, now, job_id,
+                ),
+            )
+            self._connection.commit()
+            payload = self._payload(self._row(job_id), with_result=False)
+            self._changed.notify_all()
         self._notify(payload)
 
     def complete(self, job_id: str, result: JobResult) -> None:
@@ -385,6 +431,20 @@ class ProcessingJobStore:
     def read(self, job_id: str) -> ProcessingJobPayload:
         with self._lock:
             return self._payload(self._row(job_id))
+
+    def activity(self, *, worker_busy: bool = False) -> ServerActivity:
+        with self._lock:
+            queued = self._connection.execute("SELECT count(*) FROM jobs WHERE state = 'queued'").fetchone()[0]
+            row = self._connection.execute(
+                "SELECT * FROM jobs WHERE state = 'running' ORDER BY created_at LIMIT 1"
+            ).fetchone()
+            if row is not None:
+                job = self._payload(row, with_result=False)
+                return ServerActivity(state="running", queuedJobs=queued, stage=job.stage, compute=job.compute)
+            # Cancellation is terminal for the client before a model finishes
+            # its cooperative stop. Keep that interval distinct from idle.
+            state = "queued" if queued else "stopping" if worker_busy else "idle"
+            return ServerActivity(state=state, queuedJobs=queued)
 
     def wait_for_terminal(
         self, job_id: str, timeout: float = 30.0

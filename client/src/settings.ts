@@ -6,7 +6,7 @@ export const SETTINGS_STORAGE_KEY = "stereovisor.settings";
 export const LEGACY_LOCALE_STORAGE_KEY = "stereovisor.locale";
 
 export interface AppSettings {
-  version: 1;
+  version: 3;
   locale: AppLocale;
   appearance: {
     reduceMotion: boolean;
@@ -41,11 +41,11 @@ export interface AppSettings {
 }
 
 export const DEFAULT_APP_SETTINGS: AppSettings = {
-  version: 1,
+  version: 3,
   locale: "en",
   appearance: { reduceMotion: false, reduceEffects: false },
   service: { showConsole: false, origin: "", accessToken: "" },
-  camera: { defaultZoom: 1, defaultStrength: 68 },
+  camera: { defaultZoom: 1.1, defaultStrength: 30 },
   motion: { speed: 1, horizontalAmount: 0.74, verticalAmount: 0.28 },
   processing: {
     pollIntervalMs: 1000,
@@ -93,7 +93,7 @@ export const SETTINGS_REGISTRY = [
     key: "camera.defaultZoom",
     category: "camera",
     type: "number",
-    defaultValue: 1,
+    defaultValue: DEFAULT_APP_SETTINGS.camera.defaultZoom,
     min: 1,
     max: 1.35,
     step: 0.01,
@@ -102,7 +102,7 @@ export const SETTINGS_REGISTRY = [
     key: "camera.defaultStrength",
     category: "camera",
     type: "number",
-    defaultValue: 68,
+    defaultValue: DEFAULT_APP_SETTINGS.camera.defaultStrength,
     min: 0,
     max: 100,
     step: 1,
@@ -258,6 +258,9 @@ export function sanitizeAppSettings(value: unknown): AppSettings {
   const appearance = record(source.appearance);
   const service = record(source.service);
   const camera = record(source.camera);
+  // Match the desktop migration without changing saved project camera values.
+  const legacyDefaultZoom = (source.version === undefined || source.version === 1) && camera.defaultZoom === 1;
+  const legacyDefaultStrength = (source.version === undefined || source.version === 1 || source.version === 2) && camera.defaultStrength === 68;
   const motion = record(source.motion);
   const processing = record(source.processing);
   const defaultRefinement =
@@ -277,7 +280,7 @@ export function sanitizeAppSettings(value: unknown): AppSettings {
       ? processing.useVlmVocabularyProposer
       : DEFAULT_APP_SETTINGS.processing.useVlmVocabularyProposer;
   return {
-    version: 1,
+    version: 3,
     locale: normalizeAppLocale(source.locale) ?? DEFAULT_APP_SETTINGS.locale,
     appearance: {
       reduceMotion:
@@ -299,14 +302,14 @@ export function sanitizeAppSettings(value: unknown): AppSettings {
     },
     camera: {
       defaultZoom: numberSetting(
-        camera.defaultZoom,
+        legacyDefaultZoom ? undefined : camera.defaultZoom,
         DEFAULT_APP_SETTINGS.camera.defaultZoom,
         1,
         1.35,
         0.01,
       ),
       defaultStrength: numberSetting(
-        camera.defaultStrength,
+        legacyDefaultStrength ? undefined : camera.defaultStrength,
         DEFAULT_APP_SETTINGS.camera.defaultStrength,
         0,
         100,

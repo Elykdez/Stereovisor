@@ -33,6 +33,7 @@ from .ai_models import (
     verify_vram_peak,
 )
 from .config import DEVICE, MODEL_ROOT
+from .compute import clear_compute, report_compute
 from .depth import (
     depth_for_mask,
     depth_preview,
@@ -1205,7 +1206,9 @@ def _release_inspyrenet() -> None:
         import torch
     except ImportError:
         return
+    report_compute(torch, "InSPyReNet", _resolve_device(torch), "cleanup")
     _release_cuda(torch)
+    clear_compute(torch)
 
 
 def _matte_mask(image: Image.Image, mask: np.ndarray) -> np.ndarray:
@@ -1228,6 +1231,7 @@ def _matte_mask(image: Image.Image, mask: np.ndarray) -> np.ndarray:
             ) from error
         model_path = _ensure_inspyrenet_model()
         device = _resolve_device(torch)
+        report_compute(torch, "InSPyReNet", device, "loading")
         _inspyrenet_remover = Remover(
             mode="base",
             jit=False,
@@ -1235,6 +1239,7 @@ def _matte_mask(image: Image.Image, mask: np.ndarray) -> np.ndarray:
             ckpt=str(model_path),
             resize="dynamic",
         )
+        report_compute(torch, "InSPyReNet", device, "inference")
     output = _inspyrenet_remover.process(crop, type="map")
     matte = np.asarray(output.convert("L"), dtype=np.uint8)
     proposal = np.asarray(Image.fromarray(mask).crop(crop_box), dtype=np.uint8) > 8
@@ -1378,6 +1383,7 @@ def _lama_inpaint(image: Image.Image, mask: Image.Image) -> tuple[Image.Image, i
     mask_tensor = None
     try:
         begin_vram_stage(torch)
+        report_compute(torch, "Big LaMa", device, "loading")
         model = torch.jit.load(str(model_path), map_location=device).eval()
         rgb, original_size = _pad_to_modulo(
             np.asarray(image.convert("RGB"), dtype=np.float32), 8
@@ -1392,6 +1398,7 @@ def _lama_inpaint(image: Image.Image, mask: Image.Image) -> tuple[Image.Image, i
             .unsqueeze(0)
             .to(device)
         )
+        report_compute(torch, "Big LaMa", device, "inference")
         with torch.inference_mode():
             output = model(image_tensor, mask_tensor)
         if isinstance(output, dict):
@@ -1403,8 +1410,10 @@ def _lama_inpaint(image: Image.Image, mask: Image.Image) -> tuple[Image.Image, i
             "Big LaMa", peak_vram_mb(torch)
         )
     finally:
+        report_compute(torch, "Big LaMa", device, "cleanup")
         del model, image_tensor, mask_tensor
         _release_cuda(torch)
+        clear_compute(torch)
 
 
 class ProductionPipeline:

@@ -42,6 +42,35 @@ Refinement snapshots are stored per layer under `.mask-history/<layer-key>`. A r
 
 Every GPU provider is loaded for one stage and explicitly released before the next. The service lock prevents simultaneous jobs, and every stage records peak CUDA allocation against the 8192 MB limit. The sequence is Qwen3-VL vocabulary proposal (optional) -> Grounding DINO-B -> SAM 2.1 -> DA3 -> InSPyReNet (per refinement) -> Qwen3-VL background prompt (optional) -> PowerPaint or Big LaMa.
 
+Jobs also carry the current model, compute device, loading/inference/cleanup phase,
+and the latest available GPU-memory snapshot. This comes from model activity,
+including PowerPaint's CPU/GPU offload runner, rather than the health endpoint's
+preferred device. The durable job store supplies phase elapsed time and time
+since the last model report; polling never invokes CUDA or claims new activity.
+Qwen reports generated tokens and checks cancellation between tokens. Its text
+description input is limited to 1024 pixels on the longest edge; scene assets
+and masks retain their original resolution. The UI shows measured activity and
+memory pressure without inventing a completion estimate or CPU fallback.
+The health response also exposes server-wide activity for the compact sidebar,
+including work submitted by other clients and a worker finishing cancellation.
+Health events update more frequently during work and return to their idle cadence
+when the queue is empty. The sidebar keeps its two-line status and distinguishes
+local/remote connection, server readiness/activity, and CPU/GPU availability or
+compute mode. The latest reported GPU name, memory use, and memory warning appear
+below that status during work. The job banner keeps its stage description and
+progress bar without a second model-detail readout.
+
+The service console emits timestamped `gpu.compute` JSON records at model/device
+and phase changes, on memory-pressure changes, and at most every ten seconds
+during repeated activity. Records include the job ID, process ID, model, device,
+GPU name, device-wide used/free/total memory in MiB, and reported token/step counts.
+Cleanup samples again after releasing in-process models; subprocess completion
+and failure records explicitly identify memory retained from the last report.
+These are GPU-memory snapshots, not GPU utilization percentages or per-model
+allocations. Missing telemetry stays null. Cancellation and failure preserve
+the last work phase, and service INFO logs are enabled without verbose dependency
+logging. No images, prompts, or model tensors are included in these records.
+
 ### Build Scene
 
 1. Load alpha masks for user-selected layers.
@@ -56,6 +85,24 @@ Every GPU provider is loaded for one stage and explicitly released before the ne
 10. Release the inpainter and clear unused CUDA cache after the stage completes.
 
 ### Render
+
+While an inpaint job runs, the background progress mosaic stays beneath the
+foreground cutouts. A separate WebGL2 shader briefly flickers on each rendered
+foreground layer, combining RGB-separated echoes, cyan/magenta rims, torn scan
+bands, pixelated fragments, and short dark dropouts. Between these staggered
+bursts the foreground is untouched. It uses the same layer transforms and clock.
+Reduced effects, reduced motion (including the OS preference), and unavailable
+WebGL disable the foreground overlay. Its textures are cached for the active
+job and released when the effect stops. Exported frames and model input use
+the compositor without the job effects.
+
+The layer-panel explanation in both Steps 3 and 4 includes an opt-in Inverse
+depth toggle, saved with the project camera and preserved through the build.
+It applies during review dragging while keeping the source aligned at rest.
+It uses `1 - depth` for parallax travel and depth-driven zoom,
+including the background plate, with additional overscan for its larger travel.
+Layer stacking, depth-of-field focus, and stored layer depths keep their original
+meaning. Mask editing, source review at rest, and inpainting stay camera-neutral.
 
 1. Preload source/background and cutout images once.
 2. Render the background with overscan.
@@ -149,6 +196,12 @@ Jobs are durable. `service/src/jobs.py` keeps state in SQLite beside the project
 produces, with results in a separate table so status polling never reads the
 payload blob. A job therefore survives a service restart: a renderer that
 reconnects reads a real terminal state instead of a 404.
+
+The editor persists its active job ID, workflow kind, and project snapshot per
+service origin. After reload or reopen it restores the existing job's progress
+and Cancel control before allowing new submissions, and collects work that
+finished while the window was closed. Completion and cancellation clear this
+recovery record; reloading does not cancel server-owned work.
 
 `service/src/jobqueue.py` puts one FIFO worker in front of the local GPU, which is
 all the hardware allows anyway. Making that explicit means a waiting job reports

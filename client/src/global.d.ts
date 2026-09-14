@@ -11,7 +11,7 @@ declare global {
       saveVideo: (data: ArrayBuffer, suggestedName: string) => Promise<boolean>;
       openProject: () => Promise<ArrayBuffer | null>;
       getSettings: () => Promise<{
-        version: 1;
+        version: 3;
         locale: "en" | "ja" | "ko" | "zh-CN";
         appearance: { reduceMotion: boolean; reduceEffects: boolean };
         service: { showConsole: boolean; origin: string; accessToken: string };
@@ -32,7 +32,7 @@ declare global {
       }>;
       getAppVersion: () => Promise<string>;
       saveSettings: (settings: {
-        version: 1;
+        version: 3;
         locale: "en" | "ja" | "ko" | "zh-CN";
         appearance: { reduceMotion: boolean; reduceEffects: boolean };
         service: { showConsole: boolean; origin: string; accessToken: string };

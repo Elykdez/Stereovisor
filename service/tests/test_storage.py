@@ -133,3 +133,4 @@ def test_legacy_camera_state_defaults_to_a_sharp_near_focus() -> None:
 
     assert camera.depthOfField == 0.0
     assert camera.focusDepth == 1.0
+    assert camera.inverseDepth is False

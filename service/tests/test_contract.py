@@ -5,12 +5,14 @@ fields. Introducing the client/server boundary must not reshape them, so any
 drift fails here rather than surfacing as a blank gate or a missing layer.
 """
 
+import pytest
 from fastapi.testclient import TestClient
 
 import service.src.app as app_module
 from service.src.app import app
 from service.src.schemas import (
     HealthPayload,
+    LayerEditorPayload,
     LayerPayload,
     ProcessingJobPayload,
     ProjectPayload,
@@ -33,13 +35,13 @@ HEALTH_FIELDS = {
     "startupDetail",
     "startupProvider",
     "startupProgress",
+    "activity",
 }
 
 PROVIDER_FIELDS = {"available", "detail", "state", "progress"}
 
-# queuePosition was added deliberately with the durable job queue. It is
-# additive and optional, so existing clients that ignore it are unaffected;
-# this list is updated by review, never to silence a surprise.
+# queuePosition and compute are deliberate additive fields. Older clients can
+# ignore them; older job records default to no compute details.
 JOB_FIELDS = {
     "jobId",
     "kind",
@@ -48,6 +50,7 @@ JOB_FIELDS = {
     "stage",
     "message",
     "queuePosition",
+    "compute",
     "result",
 }
 
@@ -113,6 +116,29 @@ def test_job_and_project_schemas_are_frozen() -> None:
     assert set(ProcessingJobPayload.model_fields) == JOB_FIELDS
     assert set(ProjectPayload.model_fields) == PROJECT_FIELDS
     assert set(LayerPayload.model_fields) == LAYER_FIELDS
+    assert ProcessingJobPayload(
+        jobId="legacy", kind="inpaint", state="running", progress=24,
+        stage="Describing background", message="Working",
+    ).compute is None
+
+
+@pytest.mark.parametrize("schema", [LayerPayload, LayerEditorPayload])
+def test_layer_feather_defaults_to_four_and_preserves_explicit_values(schema) -> None:
+    payload = {
+        "id": "person",
+        "name": "Person",
+        "cutoutUrl": "/person-cutout.png",
+        "maskUrl": "/person-mask.png",
+        "depth": 0.6,
+        "order": 0,
+        "selected": True,
+        "visible": True,
+        "bounds": [20, 20, 80, 90],
+    }
+
+    assert schema.model_validate(payload).feather == 4.0
+    for feather in (0.0, 2.0, 8.0):
+        assert schema.model_validate({**payload, "feather": feather}).feather == feather
 
 
 def test_job_states_and_startup_states_are_frozen() -> None:
@@ -168,3 +194,4 @@ def test_job_lifecycle_reports_a_completed_project() -> None:
     assert set(payload["result"]) == PROJECT_FIELDS
     for layer in payload["result"]["layers"]:
         assert set(layer) == LAYER_FIELDS
+        assert layer["feather"] == 4.0

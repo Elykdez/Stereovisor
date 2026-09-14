@@ -67,6 +67,43 @@ def test_health_declares_local_engine() -> None:
     assert ": ." not in payload["message"]
 
 
+def test_job_status_exposes_scoped_compute_activity_then_clears_it(monkeypatch, caplog):
+    import logging
+    from service.src.compute import publish_compute
+    from service.src.schemas import CaptionResult
+
+    caplog.set_level(logging.INFO, logger="service.src.compute")
+    store = ProcessingJobStore()
+    monkeypatch.setattr(service_module, "jobs", store)
+    job_id = store.create("vlm:caption")
+    observed = []
+
+    def operation(progress, cancelled):
+        progress(24, "Describing background", "Generating a prompt")
+        publish_compute({"model": "Qwen3-VL", "device": "cuda", "phase": "inference", "completed": 7, "total": 96, "unit": "tokens"})
+        observed.append(client.get(f"/api/jobs/{job_id}").json())
+        activity = client.get("/api/health").json()["activity"]
+        assert activity["state"] == "running"
+        assert activity["compute"]["model"] == "Qwen3-VL"
+        assert activity["compute"]["completed"] == 7
+        return CaptionResult(prompt="A quiet garden")
+
+    service_module._run_job(job_id, operation)
+    assert any(f'"jobId":"{job_id}"' in record.getMessage()
+               for record in caplog.records if record.name == "service.src.compute")
+    assert observed[0]["compute"]["device"] == "cuda"
+    assert observed[0]["compute"]["completed"] == 7
+    assert observed[0]["compute"]["elapsedSeconds"] >= 0
+    assert observed[0]["progress"] == 24
+    complete = client.get(f"/api/jobs/{job_id}").json()
+    assert complete["state"] == "completed"
+    assert complete["compute"] is None
+    assert client.get("/api/health").json()["activity"]["state"] == "idle"
+    # A helper called outside this job cannot update its completed record.
+    publish_compute({"model": "PowerPaint", "device": "hybrid", "phase": "loading"})
+    assert store.read(job_id).compute is None
+
+
 def test_remote_http_requires_the_configured_bearer_token(monkeypatch) -> None:
     monkeypatch.setattr(service_module, "SERVICE_HOST", "0.0.0.0")
     monkeypatch.setattr(
@@ -717,6 +754,7 @@ def test_project_package_round_trip_restores_images_and_editor_state(
         "sceneScale": 1.0,
         "depthOfField": 12.0,
         "focusDepth": 0.94,
+        "inverseDepth": True,
     }
 
     exported = client.post(

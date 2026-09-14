@@ -5,7 +5,7 @@ import pytest
 
 from service.src.jobqueue import JobQueue
 from service.src.jobs import JobCancelled, ProcessingJobStore
-from service.src.schemas import DepthResult, ProjectPayload
+from service.src.schemas import ComputeStatus, DepthResult, ProjectPayload
 
 
 def project(project_id: str = "p1") -> ProjectPayload:
@@ -20,6 +20,91 @@ def project(project_id: str = "p1") -> ProjectPayload:
 
 
 # --------------------------------------------------------------- durability
+
+
+def test_compute_activity_tracks_real_updates_and_clears_between_stages(monkeypatch):
+    clock = [100.0]
+    monkeypatch.setattr("service.src.jobs.time.time", lambda: clock[0])
+    notifications = []
+    store = ProcessingJobStore(listener=notifications.append)
+    job_id = store.create("inpaint")
+    store.update(job_id, 24, "Describing background", "Generating a prompt")
+    loading = ComputeStatus(model="Qwen3-VL", device="cuda", phase="loading")
+    store.set_compute(job_id, loading)
+    clock[0] = 165.0
+    stale = store.read(job_id)
+    assert stale.progress == 24
+    assert stale.compute.elapsedSeconds == stale.compute.idleSeconds == 65
+    assert notifications[-1].compute.elapsedSeconds == 0
+    inference = loading.model_copy(update={"phase": "inference", "completed": 1, "total": 96, "unit": "tokens"})
+    store.set_compute(job_id, inference)
+    clock[0] = 175.0
+    store.set_compute(job_id, inference.model_copy(update={"completed": 9}))
+    clock[0] = 177.0
+    current = store.read(job_id).compute
+    assert current.elapsedSeconds == 12
+    assert current.idleSeconds == 2
+    assert current.completed == 9
+    store.update(job_id, 42, "Loading PowerPaint", "Preparing offload")
+    assert store.read(job_id).compute is None
+    store.set_compute(job_id, ComputeStatus(model="PowerPaint", device="hybrid", phase="loading"))
+    store.cancel(job_id)
+    store.set_compute(job_id, loading)
+    assert store.read(job_id).compute is None
+    assert store.read(job_id).state == "cancelled"
+
+
+def test_legacy_job_database_gains_compute_fields_without_losing_jobs(tmp_path):
+    import sqlite3
+
+    path = tmp_path / "legacy.db"
+    with sqlite3.connect(path) as connection:
+        connection.execute("""CREATE TABLE jobs (
+            job_id TEXT PRIMARY KEY, kind TEXT NOT NULL, state TEXT NOT NULL,
+            progress INTEGER NOT NULL, stage TEXT NOT NULL, message TEXT NOT NULL,
+            queue_position INTEGER, cancel_requested INTEGER NOT NULL DEFAULT 0,
+            created_at REAL NOT NULL, updated_at REAL NOT NULL
+        )""")
+        connection.execute("INSERT INTO jobs VALUES ('old', 'inpaint', 'running', 24, 'Describing background', 'Working', NULL, 0, 1, 1)")
+    store = ProcessingJobStore(path=path)
+    assert store.read("old").compute is None
+    status = ComputeStatus(model="Qwen3-VL", device="cpu", phase="inference")
+    store.set_compute("old", status)
+    store.close()
+    reopened = ProcessingJobStore(path=path)
+    try:
+        assert reopened.read("old").compute.device == "cpu"
+        assert reopened.fail_interrupted() == 1
+        assert reopened.read("old").compute is None
+    finally:
+        reopened.close()
+
+
+def test_server_activity_reports_other_clients_and_a_worker_finishing_cancellation():
+    store = ProcessingJobStore()
+    assert store.activity().state == "idle"
+    first = store.create("vlm:caption")
+    store.create("inpaint")
+    assert store.activity().state == "queued"
+    assert store.activity().queuedJobs == 2
+    store.update(first, 24, "Describing background", "Working")
+    store.set_compute(first, ComputeStatus(model="Qwen3-VL", device="cuda", phase="inference"))
+    active = store.activity(worker_busy=True)
+    assert active.state == "running"
+    assert active.queuedJobs == 1
+    assert active.compute.model == "Qwen3-VL"
+    assert active.stage == "Describing background"
+    store.cancel(first)
+    assert store.activity(worker_busy=True).compute is None
+    assert store.activity(worker_busy=True).state == "queued"
+
+    # With no queued work, a cancelled worker still occupying the GPU is stopping.
+    store = ProcessingJobStore()
+    first = store.create("vlm:caption")
+    store.update(first, 24, "Describing background", "Working")
+    store.cancel(first)
+    assert store.activity(worker_busy=True).state == "stopping"
+    assert store.activity(worker_busy=False).state == "idle"
 
 
 def test_jobs_survive_a_service_restart(tmp_path) -> None:

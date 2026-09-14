@@ -11,7 +11,7 @@ import {
   updateProjectMask,
   waitForJob
 } from "@/lib/api";
-import type { ProcessingProgress, SceneProject } from "@/types";
+import type { ComputeStatus, ProcessingProgress, SceneProject } from "@/types";
 
 const project: SceneProject = {
   id: "finished-project",
@@ -32,6 +32,7 @@ function jobResponse(
   state: "queued" | "running" | "completed" | "cancelled",
   result: SceneProject | null = null,
   queuePosition: number | null = null,
+  compute?: ComputeStatus | null,
 ): Response {
   return new Response(JSON.stringify({
     jobId: "job-id",
@@ -41,6 +42,7 @@ function jobResponse(
     stage: state === "completed" ? "Complete" : state === "cancelled" ? "Cancelled" : state === "queued" ? "Queued" : "Redrawing background",
     message: state === "completed" ? "Local processing finished." : state === "cancelled" ? "Processing cancelled by the user." : "PowerPaint is working.",
     queuePosition,
+    compute,
     result
   }), { status: 200, headers: { "Content-Type": "application/json" } });
 }
@@ -82,6 +84,36 @@ describe("job polling", () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jobResponse("cancelled")));
 
     await expect(waitForJob("job-id", vi.fn())).rejects.toBeInstanceOf(ProcessingCancelledError);
+  });
+
+  it("delivers compute activity changes at the same overall percentage and clears terminal details", async () => {
+    vi.useFakeTimers();
+    const initial: ComputeStatus = {
+      model: "Qwen3-VL", device: "cpu", phase: "loading",
+      elapsedSeconds: 1, idleSeconds: 1,
+    };
+    const waiting = { ...initial, elapsedSeconds: 41, idleSeconds: 41 };
+    const generating: ComputeStatus = { ...initial, device: "cuda", phase: "inference",
+      completed: 2, total: 160, unit: "tokens", vramUsedMb: 6144, vramTotalMb: 8192,
+      elapsedSeconds: 2, idleSeconds: 0 };
+    vi.stubGlobal("fetch", vi.fn()
+      .mockResolvedValueOnce(jobResponse("queued", null, 1, initial))
+      .mockResolvedValueOnce(jobResponse("running", null, null, initial))
+      .mockResolvedValueOnce(jobResponse("running", null, null, waiting))
+      .mockResolvedValueOnce(jobResponse("running", null, null, generating))
+      .mockResolvedValueOnce(jobResponse("completed", project, null, generating)));
+    const onProgress = vi.fn<(progress: ProcessingProgress) => void>();
+    const resultPromise = waitForJob("job-id", onProgress);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(onProgress).toHaveBeenLastCalledWith(expect.objectContaining({ state: "queued", compute: null }));
+    for (const compute of [initial, waiting, generating]) {
+      await vi.advanceTimersByTimeAsync(JOB_POLL_INTERVAL_MS);
+      expect(onProgress).toHaveBeenLastCalledWith(expect.objectContaining({ progress: 42, compute }));
+    }
+    await vi.advanceTimersByTimeAsync(JOB_POLL_INTERVAL_MS);
+    await expect(resultPromise).resolves.toEqual(project);
+    expect(onProgress).toHaveBeenCalledTimes(5);
+    expect(onProgress).toHaveBeenLastCalledWith(expect.objectContaining({ state: "completed", compute: null }));
   });
 
   it("reports queue position changes even when progress is unchanged", async () => {

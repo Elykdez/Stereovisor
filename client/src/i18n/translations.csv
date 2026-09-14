@@ -128,6 +128,8 @@ pipeline.import,Import image,画像を読み込む,이미지 가져오기,导入
 pipeline.segment,Segment objects,オブジェクトを分割,오브젝트 분할,分割对象
 pipeline.refine,Refine + confirm,調整して確定,다듬기 및 확인,优化并确认
 pipeline.build,Build scene,シーンを構築,장면 구성,构建场景
+performance.fps,FPS,FPS,FPS,FPS
+performance.fpsDetail,UI animation frames per second averaged over one second,UI のアニメーションフレームレート（1 秒間の平均）,1초 평균 UI 애니메이션 프레임 속도,界面动画帧率（1 秒平均值）
 privacy.title,Local only,ローカル処理のみ,로컬 전용,仅本地处理
 privacy.detail,No image upload or cloud inference,画像のアップロードやクラウド推論は行いません,이미지 업로드 및 클라우드 추론 없음,不会上传图像，也不使用云端推理
 processing.local,Local processing,ローカル処理中,로컬 처리 중,本地处理中
@@ -135,6 +137,28 @@ processing.cancel,Cancel processing,処理をキャンセル,처리 취소,取�
 processing.cancelling,Cancelling...,キャンセル中...,취소 중...,正在取消...
 processing.cancelled,Processing cancelled,処理をキャンセルしました,처리가 취소되었습니다,处理已取消
 processing.queueAhead,{{count}} ahead in queue,待ち行列の前に {{count}} 件,대기열 앞에 {{count}}개,队列前方还有 {{count}} 个任务
+server.local,Local server,ローカルサーバー,로컬 서버,本地服务器
+server.remote,Remote server,リモートサーバー,원격 서버,远程服务器
+server.headline,{{location}} / {{status}},{{location}} / {{status}},{{location}} / {{status}},{{location}} / {{status}}
+server.connecting,Connecting,接続中,연결 중,连接中
+server.reconnecting,Reconnecting,再接続中,재연결 중,重新连接中
+server.connected,Connected,接続済み,연결됨,已连接
+server.stopping,Stopping,停止中,중지 중,停止中
+server.queued,Queued,待機中,대기 중,排队中
+server.working,Busy,処理中,처리 중,忙碌
+server.preview,Preview mode,プレビューモード,미리보기 모드,预览模式
+server.ready,Ready,準備完了,준비 완료,就绪
+server.notReady,Not ready,準備未完了,준비되지 않음,尚未就绪
+server.cpuAvailable,CPU available,CPU 利用可能,CPU 사용 가능,CPU 可用
+server.gpuAvailable,GPU available,GPU 利用可能,GPU 사용 가능,GPU 可用
+server.computeUnavailable,Compute unavailable,演算リソース利用不可,연산 리소스 사용 불가,计算资源不可用
+server.checkingCompute,Checking compute status,演算状態を確認中,연산 상태 확인 중,正在检查计算状态
+server.waitingConnection,Waiting for connection,接続待機中,연결 대기 중,正在等待连接
+compute.cpu,CPU compute,CPU 処理,CPU 연산,CPU 计算
+compute.gpu,GPU compute,GPU 処理,GPU 연산,GPU 计算
+compute.hybrid,GPU + CPU offload,GPU + CPU オフロード,GPU + CPU 오프로딩,GPU + CPU 卸载
+compute.vram,VRAM (last reported): {{used}} / {{total}} GiB,VRAM（最終報告）: {{used}} / {{total}} GiB,VRAM (마지막 보고): {{used}} / {{total}} GiB,显存（最近报告）：{{used}} / {{total}} GiB
+compute.limitedMemory,Limited VRAM headroom,VRAM の空き容量が少ない,남은 VRAM 부족,剩余显存较少
 composition.title,Composition,コンポジション,컴포지션,合成画面
 phase.waiting,Waiting for image,画像を待機中,이미지 대기 중,等待图像
 phase.segmenting,Segmenting rough object masks,オブジェクトのラフマスクを分割中,오브젝트 러프 마스크 분할 중,正在分割粗略对象蒙版
@@ -268,7 +292,7 @@ layers.feather,Feather,フェザー,페더,羽化
 layers.blur,Blur,ぼかし,블러,模糊
 layers.blurAdjustment,Blur offset,ぼかし補正,흐림 보정,模糊偏移
 layers.blurFormula,Auto {{base}} px + offset {{offset}} px = final {{final}} px,自動 {{base}} px + 補正 {{offset}} px = 最終 {{final}} px,자동 {{base}} px + 보정 {{offset}} px = 최종 {{final}} px,自动 {{base}} px + 偏移 {{offset}} px = 最终 {{final}} px
-layers.featherDetail,Default is 2 px for every layer.,既定値は全レイヤー 2 px,모든 레이어 기본값은 2px입니다.,每个图层默认值为 2 像素
+layers.featherDetail,Default is 4 px for every layer.,既定値は全レイヤー 4 px,모든 레이어 기본값은 4px입니다.,每个图层默认值为 4 像素
 layers.paintLayerTitle,Paint an area to fully redraw on {{name}},{{name}} で全面再描画する領域を塗る,{{name}}에서 완전히 다시 그릴 영역 칠하기,涂抹要在 {{name}} 上完全重绘的区域
 layers.edit,Edit,編集,편집,编辑
 layers.cancelEditTitle,Close the mask editor without saving,保存せずにマスクエディターを閉じる,저장하지 않고 마스크 편집기 닫기,关闭蒙版编辑器且不保存
@@ -308,6 +332,8 @@ camera.horizontal,Horizontal,水平,수평,水平
 camera.vertical,Vertical,垂直,수직,垂直
 camera.zoom,Zoom,ズーム,확대/축소,缩放
 camera.strength,Strength,強度,강도,强度
+camera.inverseDepth,Inverse depth,深度を反転,깊이 반전,反转深度
+camera.inverseDepthHelp,Near layers move less. Distant layers and the background move more.,近いレイヤーの動きを抑え、遠いレイヤーと背景を大きく動かします。,가까운 레이어는 덜 움직이고 먼 레이어와 배경은 더 크게 움직입니다.,较近的图层移动更少，较远的图层和背景移动更多。
 camera.centerPull,Center layers,レイヤーを中央へ,레이어 중앙 정렬,居中图层
 camera.sceneScale,Scene scale,シーンのスケール,장면 크기,场景缩放
 camera.depthOfField,Depth of field,被写界深度,피사계 심도,景深

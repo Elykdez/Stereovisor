@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>Inverse depth preview</title>
+<style>
+  body { margin: 20px; background: #141510; color: #e5e9e4; font: 14px system-ui; }
+  #root { width: min(100%, 1050px); margin: auto; }
+  .fixture-layout { display: grid; grid-template-columns: minmax(0, 1fr) 282px; gap: 16px; }
+  .fixture-sidebar { border: 1px solid var(--line); }
+  .fixture-options { margin: 12px 0; }
+  .fixture-stage { height: 340px; display: flex; }
+  .fixture-stage .stage-frame { margin: 0; }
+</style>
+<div id="root"></div>
+<script type="module">
+  import React, { useEffect, useState } from "react";
+  import { createRoot } from "react-dom/client";
+  import { SceneCanvas } from "/src/components/SceneCanvas.tsx";
+  import { CameraControls } from "/src/components/CameraControls.tsx";
+  import { LayerInspector } from "/src/components/LayerInspector.tsx";
+  import { demoCameraAt } from "/src/lib/parallax.ts";
+  import { i18n } from "/src/i18n/index.ts";
+  import "/src/styles.css";
+  await i18n.changeLanguage("en");
+  const h = React.createElement;
+  const plate = document.createElement("canvas");
+  plate.width = 960; plate.height = 600;
+  const context = plate.getContext("2d");
+  for (let y = 0; y < 600; y += 24) for (let x = 0; x < 960; x += 24) {
+    context.fillStyle = (x + y) % 48 ? "#405452" : "#273b38";
+    context.fillRect(x, y, 24, 24);
+  }
+  const backgroundUrl = plate.toDataURL();
+  const layers = [["Distant: 25", 0.25, 190, "#6cc8df"], ["Near: 95", 0.95, 650, "#c7f36b"]].map(([name, depth, x, color], order) => {
+    const cutout = document.createElement("canvas");
+    cutout.width = 960; cutout.height = 600;
+    const paint = cutout.getContext("2d");
+    paint.fillStyle = color;
+    paint.fillRect(x - 90, 200, 180, 240);
+    paint.fillStyle = "#14221b"; paint.font = "bold 23px sans-serif";
+    paint.fillText(name, x - 74, 326);
+    const cutoutUrl = cutout.toDataURL();
+    context.drawImage(cutout, 0, 0);
+    return { id: name, name, depth, order, cutoutUrl, maskUrl: cutoutUrl, maskRevision: null,
+      kind: "instance", confidence: 1, confirmed: true, refinementState: "refined",
+      selected: true, visible: true, offsetX: 0, offsetY: 0, feather: 0, bounds: [x - 90, 200, x + 90, 440] };
+  });
+  const project = { id: "inverse-depth-preview", width: 960, height: 600,
+    sourceUrl: plate.toDataURL(), backgroundUrl, layers };
+  const defaults = { x: 0, y: 0, zoom: 1.1, strength: 30, inverseDepth: false };
+  function Preview() {
+    const [camera, setCamera] = useState(defaults);
+    const [moving, setMoving] = useState(false);
+    const [phase, setPhase] = useState("selecting");
+    const noop = () => {};
+    const currentProject = { ...project, backgroundUrl: phase === "selecting" ? null : backgroundUrl };
+    useEffect(() => {
+      if (!moving) return;
+      const started = performance.now();
+      let frame;
+      const tick = now => {
+        setCamera(current => demoCameraAt(current, ((now - started) / 4000) % 1));
+        frame = requestAnimationFrame(tick);
+      };
+      frame = requestAnimationFrame(tick);
+      return () => cancelAnimationFrame(frame);
+    }, [moving]);
+    return h(React.Fragment, null,
+      h("p", null, "Compare motion: cyan has depth 25; green has depth 95. In inverse mode green should stay steadier."),
+      h("label", { className: "fixture-options" }, "Workflow step ", h("select", { value: phase,
+        onChange: event => { setMoving(false); setPhase(event.target.value); } },
+        h("option", { value: "selecting" }, "Step 3: Refine + confirm"),
+        h("option", { value: "editing" }, "Step 4: Scene"))),
+      h("div", { className: "fixture-layout" }, h("div", null,
+      h("div", { className: "fixture-stage" }, h(SceneCanvas, { project: currentProject, camera, interactive: true,
+        reviewingSource: phase === "selecting", processing: false, showInpaintMask: false, maskEditor: null,
+        showCompositionWhileMaskEditing: false, brushMode: "add", brushSize: 48, maskBlurRadius: 0,
+        anchorLayerId: null, onCameraChange: setCamera })),
+      phase === "editing" && h(CameraControls, { camera, moving, onChange: value => { setMoving(false); setCamera(value); },
+        onToggleMotion: () => setMoving(value => !value), onReset: () => { setMoving(false); setCamera(defaults); } })),
+      h("aside", { className: "fixture-sidebar" },
+        h("div", { className: "panel-heading inspector-heading" }, h("div", null,
+          h("span", { className: "eyebrow" }, phase === "selecting" ? "Layer proposals" : "Scene stack"),
+          h("h2", null, "2 foreground layers"))),
+        h(LayerInspector, { layers, phase, inverseDepth: camera.inverseDepth,
+          onInverseDepthChange: inverseDepth => { setMoving(false); setCamera(current => ({ ...current, inverseDepth })); },
+          editingLayerId: null, refiningLayerId: null, confirmingLayerId: null, backgroundUrl: currentProject.backgroundUrl,
+          inpaintingTargetId: null, focusedTargetId: null, layerInpaintAvailable: false,
+          maskHistory: {}, maskHistoryBusy: null, selectedLayerIds: [], mergeHistory: null, mergeHistoryBusy: null,
+          merging: false, deletingLayerId: null, onEditMask: noop, onCancelEdit: noop, onDeleteLayer: noop,
+          onUndoRefine: noop, onRedoRefine: noop, onConfirmMask: noop, onSelectLayer: noop, onClearSelection: noop,
+          onToggleSelected: noop, onMergeSelected: noop, onUndoMerge: noop, onRedoMerge: noop,
+          onInpaintTarget: noop, onFocusTarget: noop, onChange: noop }))));
+  }
+  createRoot(document.getElementById("root")).render(h(Preview));
+</script>
+</html>

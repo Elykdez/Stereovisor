@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Server compute status preview</title>
+<style>
+  body { margin: 24px; height: auto; min-height: 0; overflow: auto; }
+  #root { max-width: 1040px; margin: auto; }
+  .fixture-options { display: flex; align-items: center; gap: 12px; margin-bottom: 18px; }
+  .fixture-options select { width: auto; }
+  .fixture-sidebar { width: 282px; margin-top: 22px; border: 1px solid var(--line-soft); }
+</style>
+<div id="root"></div>
+<script type="module">
+  import React, { useState } from "react";
+  import { createRoot } from "react-dom/client";
+  import { ServerStatus } from "/src/components/ServerStatus.tsx";
+  import { setServiceConnection } from "/src/lib/serviceOrigin.ts";
+  import { i18n, useAppTranslation } from "/src/i18n/index.ts";
+  import "/src/styles.css";
+  await i18n.changeLanguage("en");
+  const previewWidth = Number(new URLSearchParams(location.search).get("width"));
+  if (previewWidth > 0) document.getElementById("root").style.maxWidth = `${previewWidth}px`;
+  const h = React.createElement;
+  const variants = {
+    "CPU loading": { model: "Qwen3-VL", device: "cpu", phase: "loading", reason: "cuda_unavailable", elapsedSeconds: 122, idleSeconds: 122 },
+    "GPU tokens": { model: "Qwen3-VL", device: "cuda", phase: "inference", elapsedSeconds: 42, idleSeconds: 2,
+      completed: 36, total: 160, unit: "tokens", gpuName: "NVIDIA GeForce RTX 4070", vramUsedMb: 6144, vramTotalMb: 12288 },
+    "GPU + CPU offload": { model: "PowerPaint", device: "hybrid", phase: "inference", reason: "offloading", elapsedSeconds: 195, idleSeconds: 48,
+      completed: 5, total: 25, unit: "steps", gpuName: "NVIDIA GeForce RTX 3070", vramUsedMb: 7680, vramTotalMb: 8192 },
+    "Waiting for details": null,
+    "Queued": null,
+    "Stopping": null,
+    "Idle": null,
+    "Offline": null,
+    "Preparing": null,
+  };
+  function Preview() {
+    const [variant, setVariant] = useState("CPU loading");
+    const [serverLocation, setServerLocation] = useState("Local");
+    const { t, setLocale, locale } = useAppTranslation();
+    const compute = variants[variant];
+    const progress = { state: variant === "Queued" ? "queued" : "running", progress: 24,
+      stage: variant === "Queued" ? "Queued" : "Describing background",
+      message: "Qwen3-VL is creating a local background prompt.", queuePosition: null, compute };
+    const health = {
+      status: "ok", version: "0.1.0", configuredMode: "ai", activeEngine: "ai", device: "cuda",
+      localOnly: true, providers: {}, message: "Local AI ready.",
+      startupState: variant === "Preparing" ? "initializing" : "ready",
+      startupDetail: variant === "Preparing" ? "Initializing models" : null,
+      startupProvider: null, startupProgress: null,
+      activity: { state: variant === "Queued" ? "queued" : variant === "Stopping" ? "stopping"
+        : ["Idle", "Preparing"].includes(variant) ? "idle" : "running",
+        queuedJobs: variant === "Queued" ? 2 : 0, stage: "Describing background",
+        compute: variant === "Offline" ? variants["GPU tokens"] : compute },
+    };
+    return h(React.Fragment, null,
+      h("div", { className: "fixture-options" },
+        h("label", null, "Compute scenario ", h("select", { value: variant, onChange: e => setVariant(e.target.value) },
+          Object.keys(variants).map(name => h("option", { key: name }, name)))),
+        h("label", null, "Language ", h("select", { value: locale, onChange: e => setLocale(e.target.value) },
+          ["en", "ja", "ko", "zh-CN"].map(name => h("option", { key: name }, name)))),
+        h("label", null, "Server location ", h("select", { value: serverLocation, onChange: e => {
+          setServerLocation(e.target.value);
+          setServiceConnection(e.target.value === "Local" ? "http://127.0.0.1:5772" : "https://vision.example", "");
+        } }, ["Local", "Remote"].map(name => h("option", { key: name }, name))))),
+      !["Idle", "Offline", "Stopping", "Preparing"].includes(variant) && h("div", { className: "processing-status", "aria-live": "polite" },
+        h("span", { className: "spinner", "aria-hidden": true }),
+        h("div", { className: "processing-copy" },
+          h("span", { className: "eyebrow" }, t("processing.local")),
+          h("strong", null, progress.stage), h("span", null, progress.message)),
+        h("div", { className: "processing-actions" }, h("output", null, "24%"),
+          h("button", { className: "processing-cancel" }, t("processing.cancel"))),
+        h("div", { className: "progress-track", role: "progressbar", "aria-label": progress.stage,
+          "aria-valuemin": 0, "aria-valuemax": 100, "aria-valuenow": 24 }, h("i", { style: { width: "24%" } }))),
+      h("div", { className: "fixture-sidebar" }, h(ServerStatus, { health,
+        startupPhase: variant === "Offline" ? "connecting" : variant === "Preparing" ? "checking" : "ready" })));
+  }
+  createRoot(document.getElementById("root")).render(h(Preview));
+</script>
+</html>

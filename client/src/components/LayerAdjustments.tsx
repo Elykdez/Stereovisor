@@ -1,6 +1,6 @@
 import { useAppTranslation } from "../i18n";
 import { depthOfFieldBlur, renderedLayerBlur } from "../lib/parallax";
-import type { CameraState, SceneLayer } from "../types";
+import { DEFAULT_LAYER_FEATHER, type CameraState, type SceneLayer } from "../types";
 
 interface Props {
   layer: SceneLayer;
@@ -16,14 +16,14 @@ export function LayerAdjustments({ layer, camera, disabled, onChange }: Props) {
   const controls = [
     { key: "centerPull", label: t("camera.centerPull"), value: layer.centerPull ?? 0.5, min: 0, max: 1, step: 0.01, display: `${Math.round((layer.centerPull ?? 0.5) * 100)}%` },
     { key: "scale", label: t("layers.scale"), value: layer.scale ?? 1, min: 0.5, max: 2, step: 0.01, display: `${(layer.scale ?? 1).toFixed(2)}x` },
-    { key: "feather", label: t("layers.feather"), value: layer.feather ?? 2, min: 0, max: 24, step: 1, display: `${layer.feather ?? 2}px` },
+    { key: "feather", label: t("layers.feather"), value: layer.feather ?? DEFAULT_LAYER_FEATHER, min: 0, max: 24, step: 1, display: `${layer.feather ?? DEFAULT_LAYER_FEATHER}px` },
     { key: "blur", label: t("layers.blurAdjustment"), value: layer.blur ?? 0, min: -24, max: 24, step: 1, display: `${(layer.blur ?? 0) > 0 ? "+" : ""}${layer.blur ?? 0}px` },
   ] as const;
   return (
     <section className="layer-adjustments" aria-label={t("layers.adjustmentsLabel", { name: layerName(layer.name) })}>
       <div className="layer-adjustments-header">
         <strong>{layerName(layer.name)}</strong>
-        <button type="button" className="text-button" disabled={disabled} onClick={() => onChange({ centerPull: 0.5, scale: 1, feather: 2, blur: 0 })}>{t("camera.reset")}</button>
+        <button type="button" className="text-button" disabled={disabled} onClick={() => onChange({ centerPull: 0.5, scale: 1, feather: DEFAULT_LAYER_FEATHER, blur: 0 })}>{t("camera.reset")}</button>
       </div>
       {controls.map((control) => (
         <label className="control-row" key={control.key}>

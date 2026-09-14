@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>Inpaint focus shader preview</title>
+<style>
+  body { margin: 24px; background: #16191b; color: #e5e9e4; font: 14px system-ui; }
+  h1 { font-size: 20px; }
+  nav { display: flex; gap: 12px; align-items: center; margin: 16px 0; flex-wrap: wrap; }
+  button, select { padding: 7px; background: #303638; color: inherit; border: 1px solid #52605c; }
+  canvas { display: block; max-width: 100%; background: #293436; }
+  output { display: block; margin-top: 16px; white-space: pre-wrap; }
+</style>
+<h1>Inpaint focus shader preview</h1>
+<nav>
+  <button id="pause">Pause</button>
+  <button id="travel">Show travelling lines</button>
+  <button id="lock">Show focus lock</button>
+  <button id="lost">Lose GPU context</button>
+  <label>Mask <select id="mask"><option value="wide">Wide</option><option value="tiny">Tiny</option><option value="empty">Empty</option></select></label>
+  <label>Grid <select id="grid"><option value="72">Fine</option><option value="0">Coarse</option></select></label>
+  <label>Size <select id="size"><option value="960,600,1">Landscape</option><option value="600,900,1">Portrait</option><option value="1920,1200,2">2x scale</option></select></label>
+</nav>
+<canvas aria-label="Inpainting effect preview" width="960" height="600"></canvas>
+<output id="status">Starting...</output>
+<script type="module">
+  import { InpaintFocusRenderer } from "/src/lib/inpaintFocus.ts";
+  import { GlInpaintFocusRenderer, INPAINT_FOCUS_BOX_COUNT } from "/src/lib/inpaintFocusGl.ts";
+  import { MaskMosaicRenderer } from "/src/lib/maskMosaic.ts";
+  import { drawScene } from "/src/components/SceneCanvas.tsx";
+  import vertex from "/src/lib/shaders/inpaintFocus.vert?raw";
+  import fragment from "/src/lib/shaders/inpaintFocus.frag?raw";
+
+  // This standalone fixture exercises real GLSL without running an AI job.
+  const checks = [];
+  const probe = document.createElement("canvas").getContext("webgl2");
+  if (probe) {
+    for (const count of [1, 2, 3]) {
+      const program = probe.createProgram();
+      const stages = [[probe.VERTEX_SHADER, vertex], [probe.FRAGMENT_SHADER, fragment.replace(/#define FOCUS_BOX_COUNT \d+/, `#define FOCUS_BOX_COUNT ${count}`)]];
+      for (const [kind, source] of stages) {
+        const shader = probe.createShader(kind);
+        probe.shaderSource(shader, source);
+        probe.compileShader(shader);
+        if (!probe.getShaderParameter(shader, probe.COMPILE_STATUS)) throw new Error(probe.getShaderInfoLog(shader));
+        probe.attachShader(program, shader);
+        probe.deleteShader(shader);
+      }
+      probe.linkProgram(program);
+      if (!probe.getProgramParameter(program, probe.LINK_STATUS)) throw new Error(probe.getProgramInfoLog(program));
+      checks.push(`Count ${count}: shader compiled`);
+      probe.deleteProgram(program);
+    }
+    probe.getExtension("WEBGL_lose_context")?.loseContext();
+  }
+  const canvas = document.querySelector("canvas");
+  const status = document.querySelector("#status");
+  const focus = new InpaintFocusRenderer();
+  const mosaic = new MaskMosaicRenderer();
+  const plate = document.createElement("canvas");
+  let mask;
+  let project;
+  let gpu;
+  let frames = [];
+  let backend = "Waiting";
+  const create = GlInpaintFocusRenderer.create;
+  GlInpaintFocusRenderer.create = () => {
+    gpu = create();
+    backend = gpu ? "WebGL2" : "Canvas fallback";
+    if (gpu) {
+      const paint = gpu.paint.bind(gpu);
+      gpu.paint = (...args) => {
+        frames = args[4];
+        const result = paint(...args);
+        if (!result) backend = "Canvas fallback";
+        return result;
+      };
+    }
+    return gpu;
+  };
+  let time = 0.01;
+  let playing = true;
+  function reset() {
+    const [width, height, scale] = document.querySelector("#size").value.split(",").map(Number);
+    canvas.width = plate.width = width;
+    canvas.height = plate.height = height;
+    canvas.style.width = `${width / scale}px`;
+    canvas.style.height = `${height / scale}px`;
+    const context = plate.getContext("2d");
+    const gradient = context.createLinearGradient(0, 0, width, height);
+    gradient.addColorStop(0, "#183c40"); gradient.addColorStop(0.5, "#51494a"); gradient.addColorStop(1, "#19363b");
+    context.fillStyle = gradient; context.fillRect(0, 0, width, height);
+    mask = document.createElement("canvas"); mask.width = width; mask.height = height;
+    const maskContext = mask.getContext("2d");
+    maskContext.fillStyle = "white";
+    const mode = document.querySelector("#mask").value;
+    if (mode === "wide") maskContext.fillRect(width * 0.08, height * 0.08, width * 0.84, height * 0.84);
+    if (mode === "tiny") maskContext.fillRect(width * 0.48, height * 0.48, width * 0.035, height * 0.05);
+    project = { id: "focus-preview", width, height, sourceUrl: "plate", backgroundUrl: null, layers: [] };
+    focus.dispose(); time = 0.01; frames = []; backend = "Waiting";
+    render();
+  }
+  function render() {
+    const start = performance.now();
+    drawScene(canvas, project, { x: 0, y: 0, zoom: 1, strength: 0 }, new Map([["plate", plate]]), false, false, false, null,
+      { renderer: mosaic, focus, time, mask, progress: Number(document.querySelector("#grid").value) });
+    const elapsed = performance.now() - start;
+    const separate = frames.every((a, index) => frames.slice(index + 1).every((b) =>
+      a.target.x + a.target.width <= b.target.x + 1e-6 || b.target.x + b.target.width <= a.target.x + 1e-6 ||
+      a.target.y + a.target.height <= b.target.y + 1e-6 || b.target.y + b.target.height <= a.target.y + 1e-6));
+    status.textContent = [...checks, `Backend: ${backend}`, `Shader setting: ${INPAINT_FOCUS_BOX_COUNT}; visible target records: ${frames.length}; separate: ${separate}`, `Time: ${time.toFixed(2)}s; frame submission: ${elapsed.toFixed(2)}ms`].join("\n");
+  }
+  document.querySelector("#pause").onclick = () => {
+    playing = !playing;
+    document.querySelector("#pause").textContent = playing ? "Pause" : "Play";
+  };
+  for (const [id, value] of [["travel", 1.5], ["lock", 3]]) {
+    document.querySelector(`#${id}`).onclick = () => { reset(); time = value; playing = false; document.querySelector("#pause").textContent = "Play"; render(); };
+  }
+  document.querySelector("#lost").onclick = () => gpu?.gl.getExtension("WEBGL_lose_context")?.loseContext();
+  for (const id of ["mask", "size", "grid"]) document.querySelector(`#${id}`).onchange = reset;
+  reset();
+  let previous = performance.now();
+  function tick(now) {
+    if (playing) { time += Math.max(0, Math.min((now - previous) / 1000, 0.1)); render(); }
+    previous = now;
+    requestAnimationFrame(tick);
+  }
+  requestAnimationFrame(tick);
+  window.addEventListener("pagehide", () => { focus.dispose(); mosaic.dispose(); });
+</script>
+</html>

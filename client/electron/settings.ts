@@ -3,7 +3,7 @@ import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 export interface PersistedSettings {
-  version: 1;
+  version: 3;
   locale: "en" | "ja" | "ko" | "zh-CN";
   appearance: { reduceMotion: boolean; reduceEffects: boolean };
   service: { showConsole: boolean; origin: string; accessToken: string };
@@ -20,11 +20,11 @@ export interface PersistedSettings {
 }
 
 export const DEFAULT_SETTINGS: PersistedSettings = {
-  version: 1,
+  version: 3,
   locale: "en",
   appearance: { reduceMotion: false, reduceEffects: false },
   service: { showConsole: false, origin: "", accessToken: "" },
-  camera: { defaultZoom: 1, defaultStrength: 68 },
+  camera: { defaultZoom: 1.1, defaultStrength: 30 },
   motion: { speed: 1, horizontalAmount: 0.74, verticalAmount: 0.28 },
   processing: {
     pollIntervalMs: 1000,
@@ -93,10 +93,13 @@ export function normalizeSettings(value: unknown): PersistedSettings {
   const appearance = object(source.appearance);
   const service = object(source.service);
   const camera = object(source.camera);
+  // Upgrade the former default once; version 2 still permits choosing 1.00x.
+  const legacyDefaultZoom = (source.version === undefined || source.version === 1) && camera.defaultZoom === 1;
+  const legacyDefaultStrength = (source.version === undefined || source.version === 1 || source.version === 2) && camera.defaultStrength === 68;
   const motion = object(source.motion);
   const processing = object(source.processing);
   return {
-    version: 1,
+    version: 3,
     locale: normalizeLocale(source.locale),
     appearance: {
       reduceMotion:
@@ -117,8 +120,8 @@ export function normalizeSettings(value: unknown): PersistedSettings {
       accessToken: textSetting(service.accessToken, "", 512),
     },
     camera: {
-      defaultZoom: clamp(camera.defaultZoom, 1, 1, 1.35, 0.01),
-      defaultStrength: clamp(camera.defaultStrength, 68, 0, 100, 1),
+      defaultZoom: clamp(legacyDefaultZoom ? undefined : camera.defaultZoom, DEFAULT_SETTINGS.camera.defaultZoom, 1, 1.35, 0.01),
+      defaultStrength: clamp(legacyDefaultStrength ? undefined : camera.defaultStrength, DEFAULT_SETTINGS.camera.defaultStrength, 0, 100, 1),
     },
     motion: {
       speed: clamp(motion.speed, 1, 0.2, 2, 0.1),

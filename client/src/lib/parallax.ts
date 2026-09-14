@@ -55,7 +55,7 @@ export function layerTransform(
 ): LayerTransform {
   // Depth affects both lateral travel and a tiny scale correction; clamping
   // keeps malformed imported layer values from producing runaway transforms.
-  const normalizedDepth = clamp(depth, 0, 1);
+  const normalizedDepth = clamp(camera.inverseDepth ? 1 - depth : depth, 0, 1);
   const travel = camera.strength * 0.0015 * normalizedDepth;
   // 50% is neutral; the lower half pushes bounds away from center and the
   // upper half pulls them toward center.
@@ -86,6 +86,11 @@ export function layerTransform(
 }
 
 export function backgroundTransform(camera: CameraState): LayerTransform {
+  if (camera.inverseDepth) {
+    const transform = layerTransform(camera, 0, 1, 1);
+    // The background now travels most. Cover the exposed edge on either side.
+    return { ...transform, scale: transform.scale + 2 * Math.max(Math.abs(transform.x), Math.abs(transform.y)) };
+  }
   const displacement = Math.max(Math.abs(camera.x), Math.abs(camera.y));
   const overscan = 1 + camera.strength * 0.0007 * displacement;
   return {

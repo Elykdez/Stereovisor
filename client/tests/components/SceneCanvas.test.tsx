@@ -1,6 +1,7 @@
 import { fireEvent, render } from "@testing-library/react";
 import { demoVideoExtension, demoVideoFrameIndex, drawInpaintComposition, drawScene, SceneCanvas, selectDemoVideoType } from "@/components/SceneCanvas";
 import type { MaskMosaicRenderer } from "@/lib/maskMosaic";
+import type { InpaintFocusRenderer } from "@/lib/inpaintFocus";
 import type { SceneProject } from "@/types";
 
 const project: SceneProject = {
@@ -72,7 +73,7 @@ describe("SceneCanvas camera interaction", () => {
     fireEvent.pointerDown(canvas, { pointerId: 1, clientX: 100, clientY: 50 });
     fireEvent.pointerMove(canvas, { pointerId: 1, clientX: 150, clientY: 75 });
 
-    expect(onCameraChange).toHaveBeenLastCalledWith({ x: 0.5, y: 0.5, zoom: 1, strength: 68 });
+    expect(onCameraChange).toHaveBeenLastCalledWith({ x: 0.5, y: 0.5, zoom: 1, strength: 68, inverseDepth: false });
   });
 
   it("updates the camera after an inpainted background is available", () => {
@@ -139,7 +140,7 @@ describe("SceneCanvas camera interaction", () => {
     expect(onCameraChange).not.toHaveBeenCalled();
   });
 
-  it("draws only the rebuilt background while editing a post-build retouch mask", () => {
+  it("keeps post-build mask editing aligned to source coordinates despite camera defaults", () => {
     const drawImage = vi.fn();
     const context = {
       clearRect: vi.fn(),
@@ -185,19 +186,21 @@ describe("SceneCanvas camera interaction", () => {
     expect(drawScene(
       canvas,
       builtProject,
-      { x: 0, y: 0, zoom: 1, strength: 68 },
+      { x: 0.5, y: 0.2, zoom: 1.1, strength: 30 },
       new Map([["/background.png", background], ["/foreground.png", foreground]]),
       false,
       true
     )).toBe(true);
     expect(drawImage).toHaveBeenCalledTimes(1);
     expect(drawImage.mock.calls[0][0]).toBe(background);
+    expect(context.translate).toHaveBeenLastCalledWith(100, 50);
+    expect(context.scale).toHaveBeenLastCalledWith(1, 1);
 
     drawImage.mockClear();
     expect(drawScene(
       canvas,
       builtProject,
-      { x: 0, y: 0, zoom: 1, strength: 68 },
+      { x: 0.5, y: 0.2, zoom: 1.1, strength: 30 },
       new Map([["/background.png", background], ["/foreground.png", foreground]]),
       false,
       true,
@@ -205,6 +208,8 @@ describe("SceneCanvas camera interaction", () => {
     )).toBe(true);
     expect(drawImage).toHaveBeenCalledTimes(2);
     expect(drawImage.mock.calls[1][0]).toBe(foreground);
+    expect(context.translate).toHaveBeenLastCalledWith(100, 50);
+    expect(context.scale).toHaveBeenLastCalledWith(1, 1);
   });
 
   it.each([null, "/background.png"])("keeps foreground layers above the inpainting mosaic (background: %s)", (backgroundUrl) => {
@@ -228,6 +233,7 @@ describe("SceneCanvas camera interaction", () => {
     const foreground = {} as HTMLImageElement;
     const cells = {} as HTMLCanvasElement;
     const mask = {} as HTMLCanvasElement;
+    const focus = { draw: vi.fn() } as unknown as InpaintFocusRenderer;
     const renderer = {
       configure: vi.fn(),
       setMask: vi.fn(),
@@ -268,12 +274,13 @@ describe("SceneCanvas camera interaction", () => {
 
     // A job whose pending area is not known yet stays out of the way entirely.
     drawImage.mockClear();
-    expect(drawScene(canvas, layeredProject, camera, images, false, false, false, null, { renderer, time: 2, mask: null, progress: 0 })).toBe(true);
+    expect(drawScene(canvas, layeredProject, camera, images, false, false, false, null, { renderer, focus, time: 2, mask: null, progress: 0 })).toBe(true);
     expect(renderer.paint).not.toHaveBeenCalled();
+    expect(focus.draw).not.toHaveBeenCalled();
     expect(drawImage.mock.calls.some((call) => call[0] === cells)).toBe(false);
 
     drawImage.mockClear();
-    expect(drawScene(canvas, layeredProject, camera, images, false, false, false, null, { renderer, time: 2, mask, progress: 0 })).toBe(true);
+    expect(drawScene(canvas, layeredProject, camera, images, false, false, false, null, { renderer, focus, time: 2, mask, progress: 0 })).toBe(true);
     expect(renderer.paint).toHaveBeenCalledWith(2, expect.anything());
     // The pending area is what the effect is bound to, so it marks that region.
     expect(renderer.setMask).toHaveBeenCalledWith(mask);
@@ -282,13 +289,17 @@ describe("SceneCanvas camera interaction", () => {
     expect(drawImage.mock.calls[0][0]).toBe(background);
     expect(drawImage.mock.calls[1][0]).toBe(cells);
     expect(drawImage.mock.calls[2][0]).toBe(foreground);
+    expect(focus.draw).toHaveBeenCalledWith(context, mask, 200, 100, vi.mocked(renderer.configure).mock.calls.at(-1)?.[2], 2, 1);
+    expect(vi.mocked(focus.draw).mock.invocationCallOrder[0]).toBeGreaterThan(drawImage.mock.invocationCallOrder[1]);
+    expect(vi.mocked(focus.draw).mock.invocationCallOrder[0]).toBeLessThan(drawImage.mock.invocationCallOrder[2]);
 
     // Reported progress resolves the blocks: a fresh job is far coarser than one
     // about to finish.
     const queued = vi.mocked(renderer.configure).mock.calls.at(-1)?.[2];
-    drawScene(canvas, layeredProject, camera, images, false, false, false, null, { renderer, time: 2, mask, progress: 96 });
+    drawScene(canvas, layeredProject, camera, images, false, false, false, null, { renderer, focus, time: 2, mask, progress: 96 });
     const nearlyDone = vi.mocked(renderer.configure).mock.calls.at(-1)?.[2];
     expect(queued?.size).toBeLessThan(nearlyDone?.size ?? 0);
+    expect(vi.mocked(focus.draw).mock.calls.at(-1)?.[4]).toBe(nearlyDone);
   });
 
   it("omits hidden layers from the built composition used as inpaint reference", () => {

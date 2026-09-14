@@ -14,6 +14,7 @@ from .ai_models import (
     verify_vram_peak,
 )
 from .config import snapshot_ready
+from .compute import clear_compute, report_compute
 
 logger = logging.getLogger(__name__)
 
@@ -70,11 +71,13 @@ def estimate_near_map(image: Image.Image) -> tuple[np.ndarray, int]:
     prediction = None
     try:
         begin_vram_stage(torch)
+        report_compute(torch, "Depth Anything 3", device, "loading")
         model = (
             DepthAnything3.from_pretrained(str(DA3_PATH), local_files_only=True)
             .to(device)
             .eval()
         )
+        report_compute(torch, "Depth Anything 3", device, "inference")
         with torch.inference_mode():
             prediction = model.inference([image.convert("RGB")], process_res=504)
         near = normalize_depth(prediction.depth, image.size)
@@ -82,8 +85,10 @@ def estimate_near_map(image: Image.Image) -> tuple[np.ndarray, int]:
         logger.info("depth inference completed: peak_mb=%s", peak)
         return near, peak
     finally:
+        report_compute(torch, "Depth Anything 3", device, "cleanup")
         del prediction, model
         release_cuda(torch)
+        clear_compute(torch)
 
 
 def depth_for_mask(near_map: np.ndarray, mask: np.ndarray) -> float:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import sys
+from copy import deepcopy
 from pathlib import Path
 
 
@@ -28,6 +29,18 @@ if __name__ == "__main__":
     from service.src.config import SERVICE_HOST, SERVICE_PORT, ensure_bind_allowed
 
     ensure_bind_allowed()
+    # Uvicorn configures its own loggers; explicitly surface service diagnostics
+    # without enabling verbose INFO output from every model dependency.
+    log_config = deepcopy(uvicorn.config.LOGGING_CONFIG)
+    log_config["formatters"]["service"] = {
+        "format": "%(asctime)s %(levelname)s [%(name)s] %(message)s",
+    }
+    log_config["handlers"]["service"] = {
+        "class": "logging.StreamHandler", "formatter": "service", "stream": "ext://sys.stdout",
+    }
+    log_config["loggers"]["service"] = {
+        "handlers": ["service"], "level": "INFO", "propagate": False,
+    }
     # Routine 200 access lines obscure useful startup, warning, and failure
     # output in the launcher, and job progress now arrives over the event socket.
     uvicorn.run(
@@ -35,4 +48,5 @@ if __name__ == "__main__":
         host=SERVICE_HOST,
         port=SERVICE_PORT,
         access_log=False,
+        log_config=log_config,
     )

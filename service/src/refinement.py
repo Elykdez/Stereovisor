@@ -28,6 +28,13 @@ from .config import (
     powerpaint_snapshot_ready,
     snapshot_ready,
 )
+from .compute import (
+    check_compute_cancelled,
+    clear_compute,
+    publish_compute,
+    report_compute,
+)
+from .jobs import JobCancelled
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +50,12 @@ def _run_qwen(
         )
     try:
         import torch
-        from transformers import AutoProcessor, Qwen3VLForConditionalGeneration
+        from transformers import (
+            AutoProcessor,
+            Qwen3VLForConditionalGeneration,
+            StoppingCriteria,
+            StoppingCriteriaList,
+        )
     except ImportError as error:
         raise RuntimeError(
             "Qwen3-VL is unavailable. Run service/scripts/setup-ai.ps1."
@@ -58,6 +70,7 @@ def _run_qwen(
     inputs = None
     generated = None
     try:
+        report_compute(torch, "Qwen3-VL", device, "loading")
         begin_vram_stage(torch)
         processor = AutoProcessor.from_pretrained(QWEN_PATH, local_files_only=True)
         model = (
@@ -70,11 +83,15 @@ def _run_qwen(
             .to(device)
             .eval()
         )
+        report_compute(torch, "Qwen3-VL", device, "preparing")
+        # Captioning needs a bounded visual-token budget, not full-size scene pixels.
+        model_image = image.convert("RGB")
+        model_image.thumbnail((1024, 1024), Image.Resampling.LANCZOS)
         messages = [
             {
                 "role": "user",
                 "content": [
-                    {"type": "image", "image": image.convert("RGB")},
+                    {"type": "image", "image": model_image},
                     {
                         "type": "text",
                         "text": instruction,
@@ -89,9 +106,40 @@ def _run_qwen(
             return_dict=True,
             return_tensors="pt",
         ).to(device)
+        input_length = inputs.input_ids.shape[-1]
+        last_report_at = time.monotonic()
+        last_reported_tokens = 0
+
+        class ComputeProgress(StoppingCriteria):
+            def __call__(self, input_ids, scores, **kwargs):
+                nonlocal last_report_at, last_reported_tokens
+                check_compute_cancelled()
+                count = max(0, input_ids.shape[-1] - input_length)
+                now = time.monotonic()
+                if count == 1 or count >= max_new_tokens or now - last_report_at >= 1:
+                    report_compute(
+                        torch, "Qwen3-VL", device, "inference",
+                        completed=count, total=max_new_tokens, unit="tokens",
+                    )
+                    last_report_at = now
+                    last_reported_tokens = count
+                return False
+
+        report_compute(
+            torch, "Qwen3-VL", device, "inference",
+            completed=0, total=max_new_tokens, unit="tokens",
+        )
         with torch.inference_mode():
             generated = model.generate(
-                **inputs, max_new_tokens=max_new_tokens, do_sample=False
+                **inputs, max_new_tokens=max_new_tokens, do_sample=False,
+                stopping_criteria=StoppingCriteriaList([ComputeProgress()]),
+            )
+        check_compute_cancelled()
+        completed_tokens = max(0, generated.shape[-1] - input_length)
+        if completed_tokens != last_reported_tokens:
+            report_compute(
+                torch, "Qwen3-VL", device, "inference",
+                completed=completed_tokens, total=max_new_tokens, unit="tokens",
             )
         trimmed = [
             output[len(source) :] for source, output in zip(inputs.input_ids, generated)
@@ -104,9 +152,26 @@ def _run_qwen(
             "%s completed: length=%s peak_mb=%s", stage, len(prompt[:500]), peak
         )
         return prompt[:500], peak
+    except RuntimeError as error:
+        if device == "cuda" and (
+            "out of memory" in str(error).lower()
+            or isinstance(error, getattr(torch.cuda, "OutOfMemoryError", ()))
+        ):
+            raise RuntimeError(
+                "Qwen3-VL ran out of GPU memory. Close other GPU applications and retry, "
+                "or run the service with STEREOVISOR_DEVICE=cpu. A manual background "
+                "prompt or object vocabulary skips this model."
+            ) from error
+        raise
     finally:
-        del generated, inputs, processor, model
-        release_cuda(torch)
+        try:
+            report_compute(torch, "Qwen3-VL", device, "cleanup")
+        finally:
+            try:
+                del generated, inputs, processor, model
+                release_cuda(torch)
+            finally:
+                clear_compute(torch)
 
 
 def generate_background_prompt(image: Image.Image) -> tuple[str, int]:
@@ -233,6 +298,8 @@ def powerpaint_inpaint(
         str(progress_path),
     ]
     process: subprocess.Popen[str] | None = None
+    reported_compute: dict | None = None
+    retain_log = True
     try:
         with log_path.open("w", encoding="utf-8", errors="replace") as log:
             process = subprocess.Popen(
@@ -254,14 +321,19 @@ def powerpaint_inpaint(
                     process.kill()
                     process.wait()
                     raise RuntimeError("PowerPaint timed out after 15 minutes")
-                if progress is not None and progress_path.is_file():
+                if progress_path.is_file():
                     try:
                         report = json.loads(progress_path.read_text(encoding="utf-8"))
                         step = int(report["step"])
                         total = int(report["total"])
                         if step > reported_step:
-                            progress(step, total)
+                            if progress is not None:
+                                progress(step, total)
                             reported_step = step
+                        compute = report.get("compute")
+                        if isinstance(compute, dict) and compute != reported_compute:
+                            publish_compute(compute)
+                            reported_compute = compute
                     except (
                         KeyError,
                         OSError,
@@ -277,8 +349,16 @@ def powerpaint_inpaint(
         lines = output.strip().splitlines()
         if return_code != 0:
             detail = lines[-1] if lines else "unknown local runtime error"
+            phase = (reported_compute or {}).get("phase", "loading")
             logger.warning("PowerPaint process failed: return_code=%s", return_code)
-            raise RuntimeError(f"PowerPaint failed: {detail}")
+            if "out of memory" in output.lower():
+                detail = (
+                    "GPU or system memory was exhausted. Close other GPU applications "
+                    "and retry, or use Big LaMa for this background."
+                )
+            raise RuntimeError(
+                f"PowerPaint failed during {phase} (exit code {return_code}): {detail}"
+            )
         for line in reversed(lines):
             try:
                 payload = json.loads(line)
@@ -287,11 +367,28 @@ def powerpaint_inpaint(
             if "peak_vram_mb" in payload:
                 peak = verify_vram_peak("PowerPaint", int(payload["peak_vram_mb"]))
                 logger.info("PowerPaint completed: peak_mb=%s", peak)
+                retain_log = False
                 return peak
         raise RuntimeError("PowerPaint completed without a valid runtime report")
+    except JobCancelled:
+        retain_log = False
+        raise
     finally:
-        if process is not None and process.poll() is None:
-            process.kill()
-            process.wait()
-        progress_path.unlink(missing_ok=True)
-        log_path.unlink(missing_ok=True)
+        try:
+            if reported_compute is not None:
+                cleanup = {
+                    key: value for key, value in reported_compute.items()
+                    if key not in {"completed", "total", "unit"}
+                }
+                publish_compute({**cleanup, "phase": "cleanup"})
+        finally:
+            try:
+                if process is not None and process.poll() is None:
+                    process.kill()
+                    process.wait()
+                progress_path.unlink(missing_ok=True)
+                # Keep the failed run's diagnostics until the next attempt replaces them.
+                if not retain_log:
+                    log_path.unlink(missing_ok=True)
+            finally:
+                clear_compute()

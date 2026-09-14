@@ -12,6 +12,8 @@ import { featherLayerImage } from "../lib/layerFeather";
 import { appLog } from "../lib/logger";
 import { onServiceOriginChange } from "../lib/serviceOrigin";
 import { INPAINT_MOSAIC_STYLE, MaskMosaicRenderer, mosaicShapeForProgress } from "../lib/maskMosaic";
+import { InpaintFocusRenderer } from "../lib/inpaintFocus";
+import { GlInpaintForegroundRenderer } from "../lib/inpaintForegroundGl";
 import { useAppTranslation } from "../i18n";
 import { backgroundTransform, clamp, DEFAULT_DEMO_MOTION, demoCameraAt, fitCanvasDimensions, fitVideoDimensions, layerTransform, renderedLayerBlur, visibleLayers, type DemoMotionSettings, type LayerTransform } from "../lib/parallax";
 import { DEFAULT_LAYER_FEATHER, type CameraState, type SceneLayer, type SceneProject } from "../types";
@@ -49,8 +51,8 @@ interface Props {
   maskBlurRadius: number;
   motion?: DemoMotionSettings;
   reduceMotion?: boolean;
-  // Swaps the progress mosaic for a plain CSS blur. That drops the WebGL pass
-  // and the per-frame redraw it needs, which is the point on a slower GPU.
+  // Swaps the progress effects for a plain CSS blur, avoiding WebGL and its
+  // per-frame redraw on a slower GPU.
   reduceEffects?: boolean;
   // When set, a canvas drag repositions that layer's anchor instead of moving
   // the camera.
@@ -124,14 +126,16 @@ export function buildInpaintMaskCanvas(
 }
 
 /**
- * Progress mosaic, drawn over the background beneath foreground layers.
+ * Inpaint preview effects, with the mosaic beneath foreground layers.
  * The caller owns the renderer, the clock and the mask; leaving it out (exports,
  * tests, every state that is not mid-inpaint) draws the scene untouched.
  */
 export interface MaskMosaicFrame {
   renderer: MaskMosaicRenderer;
+  focus?: InpaintFocusRenderer;
+  foreground?: GlInpaintForegroundRenderer;
   time: number;
-  /** The area the job is rebuilding. Nothing is drawn until it is known. */
+  /** The area the job is rebuilding. The background effects wait for this. */
   mask: CanvasImageSource | null;
   /** How far along the job is, 0-100. Coarse blocks resolve as it climbs. */
   progress: number;
@@ -149,7 +153,8 @@ export function drawScene(
   showCompositionWhileMaskEditing = false,
   anchorLayerId: string | null = null,
   mosaic: MaskMosaicFrame | null = null,
-  purpose: SceneRenderPurpose = "final"
+  purpose: SceneRenderPurpose = "final",
+  reviewBlur: { image: CanvasImageSource; opacity: number } | null = null
 ): boolean {
   // Rendering is deliberately a pure projection of the current project and
   // camera state. Asset loading happens in the effect below, so a missing image
@@ -167,6 +172,9 @@ export function drawScene(
   // raw plate and cutout pixels so repeated inpaints never bake post-effects
   // back into editable assets.
   const postEffectsEnabled = purpose === "final" && Boolean(project.backgroundUrl) && !maskEditing;
+
+  // The brush overlay uses source coordinates, independent of camera defaults.
+  if (maskEditing) camera = { x: 0, y: 0, zoom: 1, strength: camera.strength };
 
   const bg = backgroundTransform(camera);
   const backgroundBlur = postEffectsEnabled
@@ -186,6 +194,12 @@ export function drawScene(
     canvas.width + backgroundBleed * 2,
     canvas.height + backgroundBleed * 2
   );
+  if (purpose === "final" && !project.backgroundUrl && !maskEditing && !showInpaintMask && reviewBlur && reviewBlur.opacity > 0) {
+    // Keep the sharp plate underneath so the blur's soft edges stay opaque.
+    context.globalAlpha = reviewBlur.opacity;
+    context.drawImage(reviewBlur.image, -canvas.width / 2, -canvas.height / 2, canvas.width, canvas.height);
+    context.globalAlpha = 1;
+  }
   context.filter = "none";
   context.restore();
 
@@ -208,7 +222,8 @@ export function drawScene(
 
   if (mosaic?.mask) {
     // Keep the effect aligned to the background and beneath foreground cutouts.
-    mosaic.renderer.configure(canvas.width, canvas.height, mosaicShapeForProgress(mosaic.progress));
+    const shape = mosaicShapeForProgress(mosaic.progress);
+    mosaic.renderer.configure(canvas.width, canvas.height, shape);
     mosaic.renderer.setMask(mosaic.mask);
     mosaic.renderer.setPlate(background);
     const cells = mosaic.renderer.paint(mosaic.time, INPAINT_MOSAIC_STYLE);
@@ -218,6 +233,8 @@ export function drawScene(
       context.scale(bg.scale, bg.scale);
       context.imageSmoothingEnabled = mosaic.renderer.smoothOutput;
       context.drawImage(cells, -canvas.width / 2, -canvas.height / 2, canvas.width, canvas.height);
+      context.translate(-canvas.width / 2, -canvas.height / 2);
+      mosaic.focus?.draw(context, mosaic.mask, canvas.width, canvas.height, shape, mosaic.time, canvas.width / (canvas.clientWidth || canvas.width));
       context.restore();
     }
   }
@@ -242,7 +259,12 @@ export function drawScene(
       ? renderedLayerBlur(camera, layer.depth, layer.blur ?? 0)
       : 0;
     context.filter = blur > 0 ? `blur(${blur.toFixed(2)}px)` : "none";
-    context.drawImage(featherLayerImage(image, feather), -canvas.width / 2, -canvas.height / 2, canvas.width, canvas.height);
+    const cutout = featherLayerImage(image, feather);
+    context.drawImage(cutout, -canvas.width / 2, -canvas.height / 2, canvas.width, canvas.height);
+    if (purpose === "final" && mosaic?.foreground) {
+      const effect = mosaic.foreground.paint(cutout, canvas.width, canvas.height, mosaic.time, layer.id, canvas.width / (canvas.clientWidth || canvas.width));
+      if (effect) context.drawImage(effect, -canvas.width / 2, -canvas.height / 2, canvas.width, canvas.height);
+    }
     context.filter = "none";
     context.restore();
     if (layer.id === anchorLayerId) drawAnchorOutline(context, canvas, layer, transform);
@@ -410,6 +432,8 @@ export const SceneCanvas = forwardRef<SceneCanvasHandle, Props>(function SceneCa
   const imageRevisionsRef = useRef<Map<string, string>>(new Map());
   const [serviceConnectionRevision, setServiceConnectionRevision] = useState(0);
   const mosaicRef = useRef(new MaskMosaicRenderer());
+  const focusRef = useRef(new InpaintFocusRenderer());
+  const foregroundRef = useRef<GlInpaintForegroundRenderer | null>(null);
   const clockRef = useRef(0);
   // Progress the mosaic has caught up to, and the latest figure it is heading
   // for. Both are refs: the animation loop reads them without being rebuilt on
@@ -417,13 +441,54 @@ export const SceneCanvas = forwardRef<SceneCanvasHandle, Props>(function SceneCa
   const resolveRef = useRef(0);
   const progressRef = useRef(inpaintProgress);
   progressRef.current = inpaintProgress;
-  const dragRef = useRef<{ x: number; y: number; camera: CameraState; anchor: { offsetX: number; offsetY: number } | null } | null>(null);
+  const dragRef = useRef<{ pointerId: number; x: number; y: number; camera: CameraState; anchor: { offsetX: number; offsetY: number } | null } | null>(null);
+  const [reviewDragging, setReviewDragging] = useState(false);
+  const reviewBlurOpacityRef = useRef(0);
   const anchorLayer = anchorLayerId ? project.layers.find((layer) => layer.id === anchorLayerId) ?? null : null;
   const anchoring = anchorLayer !== null;
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [displaySize, setDisplaySize] = useState<[number, number]>([0, 0]);
   const [pendingInpaintMask, setPendingInpaintMask] = useState<HTMLImageElement | null>(null);
+  const sourceReview = reviewingSource && !project.backgroundUrl;
+  const reviewBlurAllowed = sourceReview && interactive && !processing && !maskEditor && !showInpaintMask;
+  // Review and inpaint masks use source coordinates. Keep the plate and
+  // cutouts aligned until a review drag or the completed scene previews depth.
+  const restingCamera = useMemo(() => sourceReview || processing
+    ? { x: 0, y: 0, zoom: 1, strength: camera.strength, inverseDepth: camera.inverseDepth ?? false }
+    : camera, [camera, processing, sourceReview]);
+  const previewCamera = useMemo(() => sourceReview && reviewDragging && reviewBlurAllowed
+    ? { ...restingCamera, x: camera.x, y: camera.y }
+    : restingCamera, [camera.x, camera.y, restingCamera, reviewBlurAllowed, reviewDragging, sourceReview]);
+
+  const reviewBackground = useMemo(() => {
+    if (loading || !reviewingSource || project.backgroundUrl) return null;
+    const source = imagesRef.current.get(project.sourceUrl);
+    if (!source) return null;
+    // Blur once at display resolution; dragging only blends this cached plate.
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.min(project.width, Math.round(displaySize[0]) || project.width);
+    canvas.height = Math.max(1, Math.round(canvas.width * project.height / project.width));
+    const context = canvas.getContext("2d");
+    if (!context) return null;
+    context.filter = "blur(8px)";
+    context.drawImage(source, 0, 0, canvas.width, canvas.height);
+    return canvas;
+  }, [displaySize, loading, project.backgroundUrl, project.height, project.sourceUrl, project.width, reviewingSource]);
+
+  useEffect(() => {
+    const endDrag = () => {
+      const pointerId = dragRef.current?.pointerId;
+      dragRef.current = null;
+      setReviewDragging(false);
+      if (pointerId !== undefined && canvasRef.current?.hasPointerCapture(pointerId)) {
+        canvasRef.current.releasePointerCapture(pointerId);
+      }
+    };
+    endDrag();
+    window.addEventListener("blur", endDrag);
+    return () => window.removeEventListener("blur", endDrag);
+  }, [anchorLayerId, interactive, maskEditor, processing, project.backgroundUrl, project.id, project.sourceUrl, reviewingSource]);
 
   useEffect(
     () =>
@@ -488,7 +553,7 @@ export const SceneCanvas = forwardRef<SceneCanvasHandle, Props>(function SceneCa
     drawScene(
       canvas,
       project,
-      camera,
+      previewCamera,
       imagesRef.current,
       showInpaintMask,
       Boolean(maskEditor),
@@ -497,30 +562,59 @@ export const SceneCanvas = forwardRef<SceneCanvasHandle, Props>(function SceneCa
       // The mosaic belongs to a running job, so its presence is the gate. With
       // motion off there is no clock to walk the resolve along, so the reported
       // figure is used as it arrives.
-      processing
+      processing && !reduceEffects
         ? {
           renderer: mosaicRef.current,
+          focus: reduceMotion ? undefined : focusRef.current,
+          foreground: reduceMotion ? undefined : foregroundRef.current ?? undefined,
           time: clockRef.current,
           mask: inpaintMask,
           progress: reduceMotion ? inpaintProgress : resolveRef.current
         }
-        : null
+        : null,
+      "final",
+      reviewBlurAllowed && reviewBackground ? { image: reviewBackground, opacity: reviewBlurOpacityRef.current } : null
     );
   }, [
     anchorLayerId,
-    camera,
+    previewCamera,
     inpaintMask,
     inpaintProgress,
+    reduceEffects,
     reduceMotion,
     maskEditor,
     processing,
     project,
+    reviewBackground,
+    reviewBlurAllowed,
     showCompositionWhileMaskEditing,
     showInpaintMask
   ]);
 
   const renderRef = useRef(render);
   renderRef.current = render;
+
+  useEffect(() => {
+    const target = reviewDragging && reviewBlurAllowed ? 1 : 0;
+    const from = reviewBlurOpacityRef.current;
+    if (from === target) return;
+    if (!reviewBlurAllowed || reduceMotion || reduceEffects) {
+      reviewBlurOpacityRef.current = target;
+      if (!loading) renderRef.current();
+      return;
+    }
+    const started = performance.now();
+    let frame = 0;
+    const tick = (now: number) => {
+      const progress = Math.min(1, (now - started) / 160);
+      const eased = progress * progress * (3 - 2 * progress);
+      reviewBlurOpacityRef.current = from + (target - from) * eased;
+      renderRef.current();
+      if (progress < 1) frame = requestAnimationFrame(tick);
+    };
+    frame = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(frame);
+  }, [loading, reduceEffects, reduceMotion, reviewBlurAllowed, reviewDragging]);
 
   useEffect(() => {
     // Cache by source plus mask revision. Edited masks keep the same URL, so
@@ -573,15 +667,29 @@ export const SceneCanvas = forwardRef<SceneCanvasHandle, Props>(function SceneCa
 
   useEffect(() => {
     const mosaic = mosaicRef.current;
-    return () => mosaic.dispose();
+    const focus = focusRef.current;
+    return () => {
+      mosaic.dispose();
+      focus.dispose();
+    };
   }, []);
+
+  useEffect(() => {
+    if (loading || !processing || reduceEffects || reduceMotion) return;
+    const foreground = GlInpaintForegroundRenderer.create();
+    foregroundRef.current = foreground;
+    return () => {
+      foregroundRef.current = null;
+      foreground?.dispose();
+    };
+  }, [loading, processing, reduceEffects, reduceMotion]);
 
   useEffect(() => {
     if (!loading) render();
   }, [loading, render]);
 
   useEffect(() => {
-    // Only the in-progress mosaic animates; everything else on the stage is a
+    // Only the in-progress effects animate; everything else on the stage is a
     // pure projection of state and stays event-driven. With effects reduced
     // there is no mosaic to drive, so the loop never starts.
     if (loading || !processing || reduceMotion || reduceEffects) {
@@ -611,9 +719,14 @@ export const SceneCanvas = forwardRef<SceneCanvasHandle, Props>(function SceneCa
 
   useImperativeHandle(ref, () => ({
     exportPng: async () => {
-      const canvas = canvasRef.current;
-      if (!canvas) return;
-      render();
+      const preview = canvasRef.current;
+      if (!preview) return;
+      const canvas = document.createElement("canvas");
+      canvas.width = preview.width;
+      canvas.height = preview.height;
+      if (!drawScene(canvas, project, restingCamera, imagesRef.current, showInpaintMask, Boolean(maskEditor), showCompositionWhileMaskEditing, anchorLayerId)) {
+        throw new Error("The scene images are not ready for PNG export.");
+      }
       const dataUrl = canvas.toDataURL("image/png");
       appLog.info("workflow.png-export.started", { projectId: project.id });
       if (window.stereovisor?.savePng) {
@@ -669,12 +782,13 @@ export const SceneCanvas = forwardRef<SceneCanvasHandle, Props>(function SceneCa
   }));
 
   function pointerDown(event: React.PointerEvent<HTMLCanvasElement>): void {
-    if (!interactive) return;
+    if (!interactive || event.button > 0 || dragRef.current) return;
     event.currentTarget.setPointerCapture(event.pointerId);
     dragRef.current = {
+      pointerId: event.pointerId,
       x: event.clientX,
       y: event.clientY,
-      camera: { ...camera },
+      camera: { ...previewCamera },
       anchor: anchorLayer ? { offsetX: anchorLayer.offsetX, offsetY: anchorLayer.offsetY } : null
     };
   }
@@ -682,7 +796,8 @@ export const SceneCanvas = forwardRef<SceneCanvasHandle, Props>(function SceneCa
   function pointerMove(event: React.PointerEvent<HTMLCanvasElement>): void {
     if (!interactive) return;
     const drag = dragRef.current;
-    if (!drag) return;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    if (reviewBlurAllowed && (event.clientX !== drag.x || event.clientY !== drag.y)) setReviewDragging(true);
     const bounds = event.currentTarget.getBoundingClientRect();
     if (drag.anchor && anchorLayer) {
       // The canvas is drawn to fit the frame, so a pixel of pointer travel is
@@ -695,17 +810,19 @@ export const SceneCanvas = forwardRef<SceneCanvasHandle, Props>(function SceneCa
       return;
     }
     onCameraChange({
-      ...camera,
+      ...previewCamera,
       x: clamp(drag.camera.x + ((event.clientX - drag.x) / bounds.width) * 2, -1, 1),
       y: clamp(drag.camera.y + ((event.clientY - drag.y) / bounds.height) * 2, -1, 1)
     });
   }
 
   function pointerUp(event: React.PointerEvent<HTMLCanvasElement>): void {
+    if (dragRef.current?.pointerId !== event.pointerId) return;
+    dragRef.current = null;
+    setReviewDragging(false);
     if (event.currentTarget.hasPointerCapture(event.pointerId)) {
       event.currentTarget.releasePointerCapture(event.pointerId);
     }
-    dragRef.current = null;
   }
 
   return (
@@ -738,6 +855,7 @@ export const SceneCanvas = forwardRef<SceneCanvasHandle, Props>(function SceneCa
         onPointerMove={pointerMove}
         onPointerUp={pointerUp}
         onPointerCancel={pointerUp}
+        onLostPointerCapture={pointerUp}
       />
       {maskEditor && (
         <MaskEditorOverlay

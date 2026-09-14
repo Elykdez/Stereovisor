@@ -23,7 +23,7 @@ const layer: SceneLayer = {
 };
 
 describe("LayerAdjustments", () => {
-  it("starts feathering every layer at two pixels and lets the layer override it", () => {
+  it("starts feathering every layer at four pixels and lets the layer override it", () => {
     const onChange = vi.fn();
     const { getByRole, getByText } = render(
       <LayerAdjustments
@@ -35,7 +35,9 @@ describe("LayerAdjustments", () => {
     );
     const feather = getByRole("slider", { name: "Person Feather" });
 
-    expect(feather).toHaveValue("2");
+    expect(feather).toHaveValue("4");
+    expect(getByText("4px")).toBeInTheDocument();
+    expect(getByText("Default is 4 px for every layer.")).toBeInTheDocument();
     fireEvent.change(feather, { target: { value: "8" } });
     expect(onChange).toHaveBeenCalledWith({ feather: 8 });
     const blur = getByRole("slider", { name: "Person Blur offset" });
@@ -43,5 +45,21 @@ describe("LayerAdjustments", () => {
     fireEvent.change(blur, { target: { value: "-6" } });
     expect(onChange).toHaveBeenCalledWith({ blur: -6 });
     expect(getByText("Auto 6.0 px + offset 0 px = final 6.0 px")).toBeInTheDocument();
+  });
+
+  it.each([0, 2, 8])("preserves explicit feathering of %i pixels and resets to four", (feather) => {
+    const onChange = vi.fn();
+    const { getByRole } = render(
+      <LayerAdjustments
+        layer={{ ...layer, feather }}
+        camera={{ x: 0, y: 0, zoom: 1, strength: 68 }}
+        disabled={false}
+        onChange={onChange}
+      />
+    );
+
+    expect(getByRole("slider", { name: "Person Feather" })).toHaveValue(String(feather));
+    fireEvent.click(getByRole("button", { name: "Reset" }));
+    expect(onChange).toHaveBeenCalledWith({ centerPull: 0.5, scale: 1, feather: 4, blur: 0 });
   });
 });

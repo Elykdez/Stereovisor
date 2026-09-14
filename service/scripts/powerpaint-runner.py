@@ -5,12 +5,40 @@ import json
 import sys
 from pathlib import Path
 
-import numpy as np
-import torch
 from PIL import Image, ImageChops, ImageFilter
 
 
 DEFAULT_INFERENCE_STEPS = 25
+
+
+def write_progress(
+    path: Path | None, phase: str, step: int, total: int, torch_module=None
+) -> None:
+    if path is None:
+        return
+    compute = {
+        "model": "PowerPaint",
+        "device": "hybrid" if torch_module is not None else "cpu",
+        "phase": phase,
+        "reason": "offloading" if torch_module is not None else None,
+    }
+    if phase == "inference":
+        compute.update(completed=step, total=total, unit="steps")
+    if torch_module is not None:
+        try:
+            free, capacity = torch_module.cuda.mem_get_info()
+            compute.update(
+                gpuName=torch_module.cuda.get_device_name(),
+                vramUsedMb=round((capacity - free) / 1048576),
+                vramTotalMb=round(capacity / 1048576),
+            )
+        except Exception:
+            # Telemetry is optional when a driver cannot expose memory usage.
+            pass
+    path.write_text(
+        json.dumps({"step": step, "total": total, "compute": compute}),
+        encoding="utf-8",
+    )
 
 
 def fit_size(size: tuple[int, int]) -> tuple[int, int]:
@@ -41,7 +69,10 @@ def main() -> None:
     args = parser.parse_args()
     inference_steps = max(5, min(100, args.steps))
     sys.path.insert(0, str(args.vendor))
+    write_progress(args.progress, "loading", 0, inference_steps)
 
+    import numpy as np
+    import torch
     from diffusers import UniPCMultistepScheduler
     from safetensors.torch import load_file
     from transformers import CLIPTextModel
@@ -53,6 +84,7 @@ def main() -> None:
 
     if not torch.cuda.is_available():
         raise RuntimeError("PowerPaint requires the local CUDA runtime")
+    write_progress(args.progress, "loading", 0, inference_steps, torch)
     torch.set_grad_enabled(False)
     torch.cuda.reset_peak_memory_stats()
     dtype = torch.float16
@@ -65,18 +97,18 @@ def main() -> None:
     text_encoder_brushnet = CLIPTextModel.from_pretrained(
         base, subfolder="text_encoder", torch_dtype=dtype, local_files_only=True
     )
-    brushnet = BrushNetModel.from_unet(unet)
+    # The complete BrushNet checkpoint replaces these weights; copying them
+    # would also alias its input bias to the UNet that the pipeline reuses.
+    brushnet = BrushNetModel.from_unet(unet, load_weights_from_unet=False)
     pipe = StableDiffusionPowerPaintBrushNetPipeline.from_pretrained(
         base,
+        unet=unet,
         brushnet=brushnet,
         text_encoder_brushnet=text_encoder_brushnet,
         torch_dtype=dtype,
         low_cpu_mem_usage=False,
         safety_checker=None,
         local_files_only=True,
-    )
-    pipe.unet = UNet2DConditionModel.from_pretrained(
-        base, subfolder="unet", torch_dtype=dtype, local_files_only=True
     )
     pipe.tokenizer = TokenizerWrapper(
         from_pretrained=base,
@@ -101,6 +133,10 @@ def main() -> None:
     )
     pipe.scheduler = UniPCMultistepScheduler.from_config(pipe.scheduler.config)
     pipe.vae.enable_tiling()
+    write_progress(args.progress, "preparing", 0, inference_steps, torch)
+    # Include both PowerPaint additions and release the VAE after encoding;
+    # the upstream sequence leaves BrushNet resident on the GPU.
+    pipe.model_cpu_offload_seq = "text_encoder_brushnet->text_encoder->image_encoder->vae->brushnet->unet"
     pipe.enable_model_cpu_offload()
 
     source = Image.open(args.image).convert("RGB")
@@ -117,13 +153,12 @@ def main() -> None:
     generator = torch.Generator(device="cuda").manual_seed(42)
 
     def report_progress(_pipeline, step: int, _timestep, callback_kwargs):
-        if args.progress is not None:
-            args.progress.write_text(
-                json.dumps({"step": step + 1, "total": inference_steps}),
-                encoding="utf-8",
-            )
+        # The next step starts with BrushNet, so finish the offload cycle here.
+        _pipeline.unet.to("cpu")
+        write_progress(args.progress, "inference", step + 1, inference_steps, torch)
         return callback_kwargs
 
+    write_progress(args.progress, "inference", 0, inference_steps, torch)
     result = pipe(
         promptA=" P_ctxt",
         promptB=" P_ctxt",
@@ -143,6 +178,7 @@ def main() -> None:
         height=working_size[1],
         callback_on_step_end=report_progress,
     ).images[0]
+    write_progress(args.progress, "cleanup", inference_steps, inference_steps, torch)
     generated = result.resize(source.size, Image.Resampling.LANCZOS)
     final = composite_full_redraw(generated, source, mask_original)
     args.output.parent.mkdir(parents=True, exist_ok=True)

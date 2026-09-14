@@ -5,6 +5,7 @@ import {
   INPAINT_MOSAIC_STYLE,
   MaskMosaicRenderer,
   MOSAIC_RESOLVE_SIZES,
+  mosaicAnimationNoise,
   mosaicCellCounts,
   mosaicShapeForProgress,
   mosaicWorkSize,
@@ -32,6 +33,42 @@ describe("mosaic cell noise", () => {
     expect(blue).toBeLessThan(red);
     // Zero saturation stays neutral whatever the hue is.
     expect(hsvToRgb(0.42, 0, 1)).toEqual([255, 255, 255]);
+  });
+
+  it("keeps animated samples deterministic and bounded over a long job", () => {
+    for (const tick of [0, 12, 720, 7200, 86400]) {
+      for (let stream = 0; stream < 8; stream += 1) {
+        const sample = mosaicAnimationNoise(37, 91, tick, stream);
+        expect(sample).toBeGreaterThanOrEqual(0);
+        expect(sample).toBeLessThan(1);
+        expect(mosaicAnimationNoise(37, 91, tick, stream)).toBe(sample);
+      }
+    }
+  });
+
+  it("refreshes cells without spatial stripes or translated patterns between ticks", () => {
+    function correlation(tick: number, nextTick: number, dx: number, dy: number, stream: number) {
+      let sumA = 0, sumB = 0, squareA = 0, squareB = 0, product = 0;
+      const count = 128 * 128;
+      for (let y = 4; y < 132; y += 1) {
+        for (let x = 4; x < 132; x += 1) {
+          const a = mosaicAnimationNoise(x, y, tick, stream);
+          const b = mosaicAnimationNoise(x + dx, y + dy, nextTick, stream);
+          sumA += a; sumB += b; squareA += a * a; squareB += b * b; product += a * b;
+        }
+      }
+      return (product - sumA * sumB / count) /
+        Math.sqrt((squareA - sumA * sumA / count) * (squareB - sumB * sumB / count));
+    }
+
+    for (const tick of [12, 720, 7200]) {
+      for (const stream of [1, 6, 7]) {
+        for (const [dx, dy] of [[0, 0], [1, 0], [0, 1], [1, 1], [-1, 1], [4, 4], [-4, 4]]) {
+          if (dx || dy) expect(Math.abs(correlation(tick, tick, dx, dy, stream))).toBeLessThan(0.05);
+          expect(Math.abs(correlation(tick, tick + 1, dx, dy, stream))).toBeLessThan(0.05);
+        }
+      }
+    }
   });
 });
 

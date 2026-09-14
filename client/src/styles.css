@@ -334,12 +334,66 @@ button:disabled {
   font-size: 9px;
 }
 
+.server-status {
+  display: grid;
+  grid-template-columns: 7px minmax(0, 1fr) auto;
+}
+
+.server-gpu {
+  grid-column: 2 / -1;
+  display: grid;
+  gap: 4px;
+  padding-top: 8px;
+  border-top: 1px solid var(--line-soft);
+  color: var(--muted);
+  font: 400 9px/1.5 var(--mono);
+  overflow-wrap: anywhere;
+}
+
+.server-status-copy strong,
+.server-status-copy small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.server-status-offline .local-pulse,
+.server-status-preparing .local-pulse {
+  background: var(--muted);
+  box-shadow: none;
+}
+
+.server-status-queued .local-pulse,
+.server-status-stopping .local-pulse {
+  background: #e2c086;
+  box-shadow: none;
+}
+
 .local-pulse {
   width: 7px;
   height: 7px;
+  flex-shrink: 0;
   border-radius: 50%;
   background: var(--accent);
   box-shadow: 0 0 13px #8fae3d;
+}
+
+.fps-counter {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  flex-shrink: 0;
+  gap: 4px;
+  min-width: 3ch;
+  margin-left: auto;
+  color: var(--accent);
+  font: 500 14px/1.1 var(--mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.fps-label {
+  color: var(--muted);
+  font-size: 8px;
 }
 
 .workspace {
@@ -516,7 +570,8 @@ button:disabled {
 .processing-status {
   flex: 0 0 auto;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
   gap: 9px 18px;
   margin-bottom: 11px;
   padding: 11px 13px;
@@ -593,6 +648,10 @@ button:disabled {
 .processing-cancel:disabled {
   cursor: default;
   opacity: 0.48;
+}
+
+.compute-warning {
+  color: #e2c086;
 }
 
 .progress-track {
@@ -1034,6 +1093,14 @@ body.reduced-effects .about-overlay {
   font: 400 9px/1.5 var(--mono);
 }
 
+.settings-toggle.layer-depth-toggle {
+  gap: 10px;
+  margin-top: 6px;
+  padding: 0;
+  border: 0;
+  color: var(--text);
+}
+
 @container (max-width: 620px) {
   .camera-export-note {
     display: none;
@@ -1421,7 +1488,7 @@ input[type="range"] {
 
 .panel-note {
   margin: 0;
-  padding: 14px 17px;
+  padding: 10px 17px;
   color: var(--muted);
   font-size: 10px;
   line-height: 1.5;
@@ -1447,21 +1514,21 @@ input[type="range"] {
 
 .selection-summary {
   display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 8px;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
 }
 
 .selection-summary strong {
   color: var(--text);
   font-size: 9px;
   font-weight: 600;
+  white-space: nowrap;
 }
 
 .selection-summary span {
   color: var(--muted);
   font: 400 7px var(--mono);
-  text-align: right;
 }
 
 .selection-actions,
@@ -2020,16 +2087,6 @@ input[type="range"] {
 
 .build-options option:disabled {
   color: #62635c;
-}
-
-.build-panel.processing {
-  justify-content: center;
-}
-
-.build-panel.processing output {
-  margin-left: auto;
-  color: var(--accent);
-  font: 600 11px var(--mono);
 }
 
 .spinner {

@@ -12,6 +12,36 @@ describe("parallax transforms", () => {
     expect(near.scale).toBeGreaterThan(distant.scale);
   });
 
+  it("reverses depth-driven motion for every layer without changing its depth", () => {
+    const inverse = { ...camera, inverseDepth: true };
+    for (const depth of [0, 0.05, 0.25, 0.5, 0.95, 1]) {
+      const expected = layerTransform(camera, 1 - depth, 1000, 600);
+      const actual = layerTransform(inverse, depth, 1000, 600);
+      expect(actual.x).toBeCloseTo(expected.x);
+      expect(actual.y).toBeCloseTo(expected.y);
+      expect(actual.scale).toBeCloseTo(expected.scale);
+    }
+    const near = layerTransform(inverse, 0.95, 1000, 600);
+    const distant = layerTransform(inverse, 0.25, 1000, 600);
+    expect(Math.abs(near.x)).toBeLessThan(Math.abs(distant.x));
+    expect(depthOfFieldBlur({ ...inverse, depthOfField: 20, focusDepth: 0.95 }, 0.95)).toBe(0);
+    expect(demoCameraAt(inverse, 0.25).inverseDepth).toBe(true);
+  });
+
+  it("moves the background most in inverse mode and covers the viewport at maximum travel", () => {
+    for (const x of [-1, 0, 1]) {
+      const inverse = { ...camera, x, y: -x, zoom: 1, strength: 100, inverseDepth: true };
+      const background = backgroundTransform(inverse);
+      const foreground = layerTransform(inverse, 1, 1, 1);
+      expect(foreground.x).toBe(0);
+      expect(foreground.y).toBe(0);
+      expect(background.x).toBeCloseTo(-x * 0.15);
+      expect(background.y).toBeCloseTo(x * 0.15);
+      expect(background.scale / 2 - Math.abs(background.x)).toBeGreaterThanOrEqual(0.5);
+      expect(background.scale / 2 - Math.abs(background.y)).toBeGreaterThanOrEqual(0.5);
+    }
+  });
+
   it("offsets an anchored layer without dropping its parallax travel", () => {
     const plain = layerTransform(camera, 0.5, 1000, 600);
     const nudged = layerTransform(camera, 0.5, 1000, 600, { offsetX: 0.1, offsetY: -0.2 });
@@ -82,6 +112,16 @@ describe("parallax transforms", () => {
 
   it("shows the whole background before the camera moves", () => {
     expect(backgroundTransform({ ...camera, x: 0, y: 0, zoom: 1 }).scale).toBe(1);
+  });
+
+  it("uses the zoom value directly without a hidden 1.1 base scale", () => {
+    const neutral = { ...camera, x: 0, y: 0, zoom: 1, sceneScale: 1 };
+    expect(backgroundTransform(neutral).scale).toBe(1);
+    for (const depth of [0, 0.5, 1]) {
+      expect(layerTransform(neutral, depth, 1000, 600).scale).toBe(1);
+    }
+    expect(backgroundTransform({ ...neutral, zoom: 1.1 }).scale).toBe(1.1);
+    expect(backgroundTransform({ ...neutral, zoom: 1.25 }).scale).toBe(1.25);
   });
 
   it("clamps direct camera input", () => {

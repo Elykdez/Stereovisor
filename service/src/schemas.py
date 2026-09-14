@@ -22,6 +22,28 @@ class ProviderStatus(BaseModel):
     progress: int | None = Field(default=None, ge=0, le=100)
 
 
+class ComputeStatus(BaseModel):
+    model: str
+    device: Literal["cpu", "cuda", "hybrid"]
+    phase: Literal["loading", "preparing", "inference", "cleanup"]
+    reason: Literal["cpu_requested", "cuda_unavailable", "offloading"] | None = None
+    gpuName: str | None = None
+    vramUsedMb: int | None = Field(default=None, ge=0)
+    vramTotalMb: int | None = Field(default=None, gt=0)
+    completed: int | None = Field(default=None, ge=0)
+    total: int | None = Field(default=None, gt=0)
+    unit: Literal["tokens", "steps"] | None = None
+    elapsedSeconds: int = Field(default=0, ge=0)
+    idleSeconds: int = Field(default=0, ge=0)
+
+
+class ServerActivity(BaseModel):
+    state: Literal["idle", "running", "queued", "stopping"] = "idle"
+    queuedJobs: int = Field(default=0, ge=0)
+    stage: str | None = None
+    compute: ComputeStatus | None = None
+
+
 class HealthPayload(BaseModel):
     """Readiness summary consumed by renderer feature gates."""
 
@@ -39,6 +61,7 @@ class HealthPayload(BaseModel):
     startupDetail: str | None = None
     startupProvider: str | None = None
     startupProgress: int | None = Field(default=None, ge=0, le=100)
+    activity: ServerActivity | None = None
 
 
 class LayerPayload(BaseModel):
@@ -72,7 +95,7 @@ class LayerPayload(BaseModel):
     kind: Literal["instance", "depth-plane", "manual"] = "instance"
     confidence: float = 1.0
     # Final-scene alpha feather in source pixels; mask assets stay untouched.
-    feather: float = Field(default=2.0, ge=0, le=24)
+    feather: float = Field(default=4.0, ge=0, le=24)
     # Signed correction layered over the camera's automatic depth blur.
     blur: float = Field(default=0.0, ge=-24, le=24)
     centerPull: float = Field(default=0.5, ge=0, le=1)
@@ -133,6 +156,7 @@ class CameraPayload(BaseModel):
     y: float = Field(ge=-1, le=1)
     zoom: float = Field(ge=1, le=1.35)
     strength: float = Field(ge=0, le=100)
+    inverseDepth: bool = False
     centerPull: float = Field(default=0.5, ge=0, le=1)
     sceneScale: float = Field(default=1.0, ge=0.5, le=2)
     depthOfField: float = Field(default=0.0, ge=0, le=24)
@@ -147,7 +171,7 @@ class LayerEditorPayload(BaseModel):
     offsetY: float = Field(default=0.0, ge=-1, le=1)
     selected: bool
     visible: bool
-    feather: float = Field(default=2.0, ge=0, le=24)
+    feather: float = Field(default=4.0, ge=0, le=24)
     blur: float = Field(default=0.0, ge=-24, le=24)
     centerPull: float = Field(default=0.5, ge=0, le=1)
     scale: float = Field(default=1.0, ge=0.5, le=2)
@@ -269,4 +293,5 @@ class ProcessingJobPayload(BaseModel):
     # How many jobs must finish first; None once running or terminal. The same
     # information is mirrored into `message` so existing UI needs no change.
     queuePosition: int | None = Field(default=None, ge=0)
+    compute: ComputeStatus | None = None
     result: JobResult | None = None

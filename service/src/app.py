@@ -54,6 +54,7 @@ from .config import (
     runtime_device,
 )
 from .events import events
+from .compute import compute_scope
 from .jobqueue import JobQueue
 from .jobs import JobCancelled, ProcessingJobStore
 from .pipeline import (
@@ -130,7 +131,9 @@ def health_watch_interval(payload: HealthPayload) -> float:
     """Watch closely while readiness is still moving, then ease off."""
     return (
         HEALTH_WATCH_IDLE_SECONDS
-        if payload.startupState == "ready"
+        if payload.startupState == "ready" and (
+            payload.activity is None or payload.activity.state == "idle"
+        )
         else HEALTH_WATCH_INTERVAL_SECONDS
     )
 
@@ -1003,7 +1006,12 @@ def _run_job(
 
         report(1, "Starting", "Starting the local AI worker.")
         logger.info("job worker started: id=%s", job_id)
-        result = operation(report, lambda: jobs.ensure_active(job_id))
+        with compute_scope(
+            lambda status: jobs.set_compute(job_id, status),
+            lambda: jobs.ensure_active(job_id),
+            job_id=job_id,
+        ):
+            result = operation(report, lambda: jobs.ensure_active(job_id))
         jobs.ensure_active(job_id)
         jobs.complete(job_id, result)
         logger.info(
@@ -1129,6 +1137,7 @@ def compute_health() -> HealthPayload:
         startupDetail=startup_detail,
         startupProvider=bootstrap.provider,
         startupProgress=bootstrap.progress,
+        activity=jobs.activity(worker_busy=job_queue.is_busy()),
     )
     return payload
 

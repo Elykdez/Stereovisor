@@ -7,6 +7,8 @@ import type { InpaintHistoryState, SceneLayer, WorkflowPhase } from "../types";
 interface Props {
   layers: SceneLayer[];
   phase: WorkflowPhase;
+  inverseDepth?: boolean;
+  onInverseDepthChange?: (inverseDepth: boolean) => void;
   editingLayerId: string | null;
   refiningLayerId: string | null;
   confirmingLayerId: string | null;
@@ -72,12 +74,14 @@ function ServiceImage({ source }: { source: string }) {
     };
   }, [source]);
 
-  return <img src={url} alt="" />;
+  return <img src={url || undefined} alt="" />;
 }
 
 export function LayerInspector({
   layers,
   phase,
+  inverseDepth = false,
+  onInverseDepthChange,
   editingLayerId,
   refiningLayerId,
   confirmingLayerId,
@@ -92,7 +96,7 @@ export function LayerInspector({
   mergeHistoryBusy,
   merging,
   deletingLayerId,
-  disabled = false,
+  disabled: startupBlocked = false,
   onEditMask,
   onCancelEdit,
   onDeleteLayer,
@@ -111,6 +115,7 @@ export function LayerInspector({
 }: Props) {
   const { t, layerName } = useAppTranslation();
   const selecting = phase === "selecting";
+  const disabled = startupBlocked || phase === "inpainting";
   const maskOperationActive = editingLayerId !== null || inpaintingTargetId !== null || refiningLayerId !== null || confirmingLayerId !== null;
   // Cancelling an open editor stays available; a running refine or confirm has
   // to finish first because it is already rewriting that layer's mask.
@@ -119,6 +124,7 @@ export function LayerInspector({
   const selected = new Set(selectedLayerIds);
 
   function update(id: string, change: Partial<SceneLayer>): void {
+    if (disabled) return;
     // Keep layer edits immutable; App owns the project snapshot and merges this
     // small change with the rest of the scene state.
     onChange(layers.map((layer) => (layer.id === id ? { ...layer, ...change } : layer)));
@@ -126,12 +132,26 @@ export function LayerInspector({
 
   return (
     <section className={`layers-panel ${disabled ? "editor-locked" : ""}`} aria-disabled={disabled}>
-      {disabled && <div className="editor-lock-note" role="status">{t("startup.blockedDetail")}</div>}
-      <p className="panel-note">
+      {startupBlocked && <div className="editor-lock-note" role="status">{t("startup.blockedDetail")}</div>}
+      <div className="panel-note">
         {selecting
           ? t("layers.selectingHelp")
-          : t("layers.editingHelp")}
-      </p>
+          : t(inverseDepth ? "camera.inverseDepthHelp" : "layers.editingHelp")}
+        {onInverseDepthChange && (
+          <label className="settings-toggle layer-depth-toggle" title={t("camera.inverseDepthHelp")}>
+            <strong>{t("camera.inverseDepth")}</strong>
+            <input
+              type="checkbox"
+              aria-label={t("camera.inverseDepth")}
+              checked={inverseDepth}
+              disabled={selectionLocked}
+              data-toggle-on={t("layers.on")}
+              data-toggle-off={t("layers.off")}
+              onChange={(event) => onInverseDepthChange(event.target.checked)}
+            />
+          </label>
+        )}
+      </div>
       {selecting && (
         <div className="selection-toolbar" aria-label={t("layers.selectionControls")}>
           <div className="selection-summary">
@@ -227,7 +247,7 @@ export function LayerInspector({
             <article
               className={`layer-card ${enabled ? "enabled" : ""} ${isSelected ? "selected" : ""} ${editingLayerId === layer.id ? "editing" : ""} ${!selecting && focusedTargetId === layer.id ? "focused" : ""}`}
               key={layer.id}
-              tabIndex={selecting ? undefined : 0}
+              tabIndex={selecting ? undefined : disabled ? -1 : 0}
               aria-selected={selecting ? isSelected : undefined}
               aria-current={!selecting && focusedTargetId === layer.id ? "true" : undefined}
               onClick={(event) => {

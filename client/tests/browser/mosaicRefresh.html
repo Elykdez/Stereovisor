@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>Mosaic refresh regression</title>
+<style>
+  body { margin: 24px; background: #16191b; color: #e5e9e4; font: 14px system-ui; }
+  h1 { font-size: 20px; }
+  canvas { width: 640px; max-width: 100%; display: block; margin: 16px 0; }
+  output { white-space: pre-wrap; }
+</style>
+<h1>Mosaic refresh regression</h1>
+<canvas aria-label="Mosaic refresh preview" width="512" height="512"></canvas>
+<output id="checks">Checking actual GPU and CPU frames...</output>
+<script type="module">
+  import { DEFAULT_MOSAIC_SHAPE, INPAINT_MOSAIC_STYLE, MaskMosaicRenderer } from "/src/lib/maskMosaic.ts";
+  import { GlMaskMosaicRenderer } from "/src/lib/maskMosaicGl.ts";
+
+  const canvas = document.querySelector("canvas");
+  const context = canvas.getContext("2d", { willReadFrequently: true });
+  const checks = [];
+  function check(condition, name) {
+    if (!condition) throw new Error(name);
+    checks.push(`PASS: ${name}`);
+  }
+  function solid(color) {
+    const source = document.createElement("canvas");
+    source.width = source.height = 512;
+    const paint = source.getContext("2d");
+    paint.fillStyle = color; paint.fillRect(0, 0, 512, 512);
+    return source;
+  }
+  const mask = solid("white"), plate = solid("#808080");
+  const shape = { ...DEFAULT_MOSAIC_SHAPE, size: 128, aspect: 0.5 };
+  const gpu = GlMaskMosaicRenderer.create();
+  const cpu = new MaskMosaicRenderer();
+  function capture(renderer, time, style) {
+    const output = renderer.paint(time, style);
+    if (!output) throw new Error("Renderer did not produce a frame");
+    context.clearRect(0, 0, 512, 512);
+    context.drawImage(output, 0, 0, 512, 512);
+    const pixels = context.getImageData(0, 0, 512, 512).data;
+    const cells = new Float32Array(128 * 128);
+    for (let y = 0; y < 128; y++) for (let x = 0; x < 128; x++) {
+      cells[y * 128 + x] = pixels[((y * 4 + 2) * 512 + x * 4 + 2) * 4];
+    }
+    return { pixels, cells };
+  }
+  function correlation(a, b, dx, dy) {
+    let n = 0, sumA = 0, sumB = 0, squareA = 0, squareB = 0, product = 0;
+    for (let y = 4; y < 124; y++) for (let x = 4; x < 124; x++) {
+      const first = a[y * 128 + x], second = b[(y + dy) * 128 + x + dx];
+      n++; sumA += first; sumB += second;
+      squareA += first * first; squareB += second * second; product += first * second;
+    }
+    return (product - sumA * sumB / n) / Math.sqrt((squareA - sumA * sumA / n) * (squareB - sumB * sumB / n));
+  }
+  const neutral = {
+    ...INPAINT_MOSAIC_STYLE, alpha: 1, tintAmount: 0, brightness: 1,
+    dropout: 0, grain: 0, twinkleStrength: 0, glitch: 0, chromatic: 0,
+  };
+  try {
+    check(gpu, "Mosaic shader compiles and links");
+    gpu.configure(512, 512, shape); gpu.setMask(mask); gpu.setPlate(plate);
+    // Force only this fixture's fallback renderer to use the real Canvas backend.
+    const create = GlMaskMosaicRenderer.create;
+    try {
+      GlMaskMosaicRenderer.create = () => null;
+      cpu.configure(512, 512, shape); cpu.setMask(mask); cpu.setPlate(plate); cpu.paint(0, neutral);
+    }
+    finally { GlMaskMosaicRenderer.create = create; }
+    check(!cpu.smoothOutput, "Canvas fallback is exercised");
+    for (const [name, renderer] of [["WebGL", gpu], ["Canvas", cpu]]) {
+      for (const time of [0.5, 1, 2, 3]) {
+        const { pixels } = capture(renderer, time, neutral);
+        check(pixels.every((value, index) => index % 4 === 3 ? value === 255 : Math.abs(value - 128) <= 1),
+          `${name}: no travelling color band at ${time}s`);
+      }
+    }
+    const noisy = { ...neutral, grain: 0.15 };
+    for (const time of [1, 60, 600]) {
+      const a = capture(gpu, time, noisy).cells;
+      const b = capture(gpu, time + 0.11, noisy).cells;
+      let spatial = 0, temporal = 0;
+      for (let dy = -4; dy <= 4; dy++) for (let dx = -4; dx <= 4; dx++) {
+        if (dx || dy) spatial = Math.max(spatial, Math.abs(correlation(a, a, dx, dy)));
+        temporal = Math.max(temporal, Math.abs(correlation(a, b, dx, dy)));
+      }
+      check(spatial < 0.08, `No directional noise at ${time}s (${spatial.toFixed(3)})`);
+      check(temporal < 0.08, `Noise refresh does not slide across cells at ${time}s (${temporal.toFixed(3)})`);
+      const fallback = capture(cpu, time, noisy).cells;
+      check(a.every((value, index) => Math.abs(value - fallback[index]) <= 1), `GPU and CPU refresh agree at ${time}s`);
+    }
+    const twinkling = { ...neutral, twinkleStrength: 0.5, twinkleSpeed: 5, twinkleDensity: 0.12 };
+    const first = capture(gpu, 1, twinkling).cells;
+    const next = capture(gpu, 1.17, twinkling).cells;
+    check(first.some((value, index) => value !== next[index]), "Local twinkling remains animated");
+    document.querySelector("#checks").textContent = checks.join("\n");
+    gpu.configure(512, 512, { ...shape, size: 40 });
+    let started = performance.now();
+    function animate(now) {
+      context.clearRect(0, 0, 512, 512);
+      context.drawImage(gpu.paint((now - started) / 1000, INPAINT_MOSAIC_STYLE), 0, 0);
+      requestAnimationFrame(animate);
+    }
+    requestAnimationFrame(animate);
+  } catch (error) {
+    document.querySelector("#checks").textContent = [...checks, `FAIL: ${error.message}`].join("\n");
+    throw error;
+  }
+  window.addEventListener("pagehide", () => { gpu?.dispose(); cpu.dispose(); });
+</script>

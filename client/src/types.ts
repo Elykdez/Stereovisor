@@ -1,6 +1,6 @@
 export type Engine = "ai" | "preview";
 
-export const DEFAULT_LAYER_FEATHER = 2;
+export const DEFAULT_LAYER_FEATHER = 4;
 
 export interface ProviderStatus {
   available: boolean;
@@ -13,6 +13,13 @@ export interface ProviderStatus {
     | "ready"
     | "blocked";
   progress?: number | null;
+}
+
+export interface ServerActivity {
+  state: "idle" | "running" | "queued" | "stopping";
+  queuedJobs: number;
+  stage: string | null;
+  compute: ComputeStatus | null;
 }
 
 export interface HealthStatus {
@@ -33,6 +40,7 @@ export interface HealthStatus {
   startupDetail: string | null;
   startupProvider: string | null;
   startupProgress: number | null;
+  activity?: ServerActivity | null;
 }
 
 export interface SceneLayer {
@@ -83,6 +91,8 @@ export interface CameraState {
   y: number;
   zoom: number;
   strength: number;
+  // Reverse depth-driven motion without changing layer stacking or focus.
+  inverseDepth?: boolean;
   // Signed centering control: 0.5 is neutral, above pulls toward center and
   // below pushes away from center.
   centerPull?: number;
@@ -111,14 +121,30 @@ export type ProcessingJobKind =
   | "vlm:vocabulary"
   | "vlm:caption";
 
+export interface ComputeStatus {
+  model: string;
+  device: "cpu" | "cuda" | "hybrid";
+  phase: "loading" | "preparing" | "inference" | "cleanup";
+  reason?: "cpu_requested" | "cuda_unavailable" | "offloading" | null;
+  gpuName?: string | null;
+  // The latest worker-reported snapshot, not a live hardware monitor.
+  vramUsedMb?: number | null;
+  vramTotalMb?: number | null;
+  completed?: number | null;
+  total?: number | null;
+  unit?: "tokens" | "steps" | null;
+  elapsedSeconds: number;
+  idleSeconds: number;
+}
+
 export interface ProcessingProgress {
-  // Stages are coarse-grained by design; detailed model progress stays in the
-  // message while the UI can render one stable progress indicator.
+  // Overall stages stay stable while compute reports activity within a model.
   state: "queued" | "running" | "completed" | "failed" | "cancelled";
   progress: number;
   stage: string;
   message: string;
   queuePosition: number | null;
+  compute?: ComputeStatus | null;
 }
 
 export interface InpaintHistoryState {

@@ -9,6 +9,7 @@
 // Driven from maskMosaicGl.ts, which owns the textures and the uniform values.
 
 precision highp float;
+precision highp int;
 
 in vec2 vUv;
 out vec4 fragColor;
@@ -51,6 +52,16 @@ uniform vec4 uBounds;
 // Port of Rand() in FragmentUtils.cginc.
 float rand(vec2 uv) {
   return fract(sin(dot(uv, vec2(12.9898f, 78.233f))) * 43758.5453f);
+}
+
+// Keep time separate from position; translating sine noise creates moving bands.
+float animationNoise(vec2 cell, float tick, uint stream) {
+  uvec2 position = uvec2(cell);
+  uint value = position.x * 1973u ^ position.y * 9277u ^ uint(tick) * 26699u ^ stream * 31847u;
+  value = (value ^ (value >> 16u)) * 0x7feb352du;
+  value = (value ^ (value >> 15u)) * 0x846ca68bu;
+  value ^= value >> 16u;
+  return float(value >> 8u) / 16777216.0;
 }
 
 // Port of HSVtoRGB() in FragmentUtils.cginc.
@@ -114,24 +125,24 @@ void main() {
   vec2 offset = vec2(0.0f);
   float twinkle = 0.0f;
   if(uTwinkleStrength > 0.0f && uTwinkleDensity > 0.0f) {
-    float seed = rand(cell + 19.19f);
+    float seed = animationNoise(cell, 0.0f, 0u);
     float clock = uTime * uTwinkleSpeed + seed * 37.0f;
     float tick = floor(clock);
     float phase = clock - tick;
-    float gate = rand(vec2(cell.x * 2.17f + tick * 11.31f, cell.y * 2.17f + tick * 11.31f)) >= 1.0f - uTwinkleDensity ? 1.0f : 0.0f;
+    float gate = animationNoise(cell, tick, 1u) >= 1.0f - uTwinkleDensity ? 1.0f : 0.0f;
     twinkle = gate * smoothstep(0.0f, 0.18f, phase) * (1.0f - smoothstep(0.45f, 1.0f, phase));
     if(twinkle > 0.0f) {
       float jitterScale = uTwinkleJitter / max(cellCount.x, 1.0f);
-      offset.x += (rand(vec2(cell.x + 13.17f, cell.y + tick * 1.37f)) - 0.5f) * twinkle * jitterScale;
-      offset.y += (rand(vec2(cell.x + tick * 2.11f, cell.y + 31.41f)) - 0.5f) * twinkle * jitterScale;
+      offset.x += (animationNoise(cell, tick, 2u) - 0.5f) * twinkle * jitterScale;
+      offset.y += (animationNoise(cell, tick, 3u) - 0.5f) * twinkle * jitterScale;
     }
   }
 
   float grainTick = floor(uTime * 12.0f);
   float glitchTick = floor(uTime * 8.0f);
   // Scanline tearing: a few cell rows slide sideways for one time step.
-  if(uGlitch > 0.0f && rand(vec2(cell.y * 1.7f + glitchTick, 91.3f)) > 0.94f) {
-    offset.x += (rand(vec2(cell.y * 3.1f, glitchTick)) - 0.5f) * uGlitch;
+  if(uGlitch > 0.0f && animationNoise(vec2(0.0f, cell.y), glitchTick, 4u) > 0.94f) {
+    offset.x += (animationNoise(vec2(0.0f, cell.y), glitchTick, 5u) - 0.5f) * uGlitch;
   }
 
   vec2 sampleUV = pixelUV + offset;
@@ -147,10 +158,10 @@ void main() {
   }
 
   if(uGrain > 0.0f) {
-    base += (rand(vec2(cell.x * 7.13f + grainTick, cell.y * 7.13f)) - 0.5f) * 2.0f * uGrain;
+    base += (animationNoise(cell, grainTick, 6u) - 0.5f) * 2.0f * uGrain;
   }
   if(twinkle > 0.0f) {
-    base += (rand(vec2(cell.x * 2.37f + grainTick, cell.y * 2.37f)) - 0.5f) * 2.0f * uTwinkleStrength * twinkle;
+    base += (animationNoise(cell, grainTick, 7u) - 0.5f) * 2.0f * uTwinkleStrength * twinkle;
   }
 
   vec3 color = mix(base, uTint, uTintAmount) * uBrightness;

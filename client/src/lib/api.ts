@@ -279,7 +279,8 @@ export async function waitForJob(
   let previousStage = "";
   for (;;) {
     const job = await request<ProcessingJob>(`/api/jobs/${jobId}`);
-    const progressKey = `${job.state}:${job.progress}:${job.stage}:${job.message}:${job.queuePosition ?? ""}`;
+    const compute = job.state === "running" ? job.compute ?? null : null;
+    const progressKey = JSON.stringify([job.state, job.progress, job.stage, job.message, job.queuePosition, compute]);
     if (progressKey !== previousProgress) {
       onProgress({
         state: job.state,
@@ -287,6 +288,7 @@ export async function waitForJob(
         stage: job.stage,
         message: job.message,
         queuePosition: job.queuePosition,
+        compute,
       });
       previousProgress = progressKey;
     }
