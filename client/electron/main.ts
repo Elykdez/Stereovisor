@@ -429,7 +429,6 @@ function installApplicationMenu(): void {
           label: `${nativeText("options")}  ${
             process.platform === "darwin" ? "Cmd+," : "Ctrl+,"
           }`,
-          accelerator: "CommandOrControl+,",
           click: () => mainWindow?.webContents.send("stereovisor:open-options"),
         },
         { type: "separator" },

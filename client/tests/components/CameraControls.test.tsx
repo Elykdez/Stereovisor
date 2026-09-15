@@ -32,7 +32,7 @@ describe("CameraControls", () => {
     expect(getByRole("region", { name: "Scene depth" })).toBeInTheDocument();
     expect(getByRole("region", { name: "Lens focus" })).toBeInTheDocument();
     expect(getByRole("region", { name: "Camera controls" })).toHaveTextContent(
-      "Demo exports use this rig and the motion settings in Options > Camera."
+      "Video exports use this rig and the motion settings in Options > Camera."
     );
 
     fireEvent.change(getByRole("slider", { name: "Depth of field" }), { target: { value: "12.5" } });

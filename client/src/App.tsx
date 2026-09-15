@@ -202,7 +202,12 @@ export default function App() {
     centerPull: 0.5,
     sceneScale: 1
   };
-  const editingCameraDefaults = { ...cameraDefaults, inverseDepth: camera.inverseDepth ?? false };
+  const inverseDepth = camera.inverseDepth ?? false;
+  const editingCameraDefaults = {
+    ...cameraDefaults,
+    ...(inverseDepth ? { x: 0, y: 0 } : {}),
+    inverseDepth,
+  };
 
   useEffect(() => {
     mounted.current = true;
@@ -1763,11 +1768,11 @@ export default function App() {
                   </button>
                   {phase === "editing" && (
                     <>
-                      <button type="button" className="secondary-button compact" disabled={busy} title={t("file.demoVideoTitle")} onClick={() => void saveCanvas("video")}>
-                        {fileOperation === "video" ? t("file.rendering") : t("file.demoVideo")}
-                      </button>
-                      <button type="button" className="primary-button compact" disabled={busy} title={t("file.pngTitle")} onClick={() => void saveCanvas("png")}>
+                      <button type="button" className="secondary-button compact" disabled={busy} title={t("file.pngTitle")} onClick={() => void saveCanvas("png")}>
                         {fileOperation === "png" ? t("file.saving") : t("file.png")}
+                      </button>
+                      <button type="button" className="primary-button compact" disabled={busy} title={t("file.demoVideoTitle")} onClick={() => void saveCanvas("video")}>
+                        {fileOperation === "video" ? t("file.rendering") : t("file.demoVideo")}
                       </button>
                     </>
                   )}
@@ -1914,7 +1919,10 @@ export default function App() {
               layers={project.layers}
               phase={phase}
               inverseDepth={camera.inverseDepth}
-              onInverseDepthChange={(inverseDepth) => { setMoving(false); setCamera((current) => ({ ...current, inverseDepth })); }}
+              onInverseDepthChange={(inverseDepth) => {
+                setMoving(false);
+                setCamera((current) => ({ ...current, x: 0, y: 0, inverseDepth }));
+              }}
               editingLayerId={maskEditor?.kind === "layer" ? maskEditor.layerId : null}
               refiningLayerId={refiningLayerId}
               confirmingLayerId={confirmingLayerId}
