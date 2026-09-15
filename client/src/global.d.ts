@@ -1,6 +1,9 @@
 export {};
 
 declare global {
+  // Injected by the Vite define in client/vite.config.mts from versions.json.
+  const __CLIENT_VERSION__: string;
+
   interface Window {
     stereovisor?: {
       savePng: (dataUrl: string, suggestedName: string) => Promise<boolean>;

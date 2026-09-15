@@ -22,3 +22,6 @@ service/.models/
 
 # Generated contract snapshot; regenerate with `npm run openapi`.
 openapi.json
+
+# Local working agreement for automated contributors; not part of the release.
+AGENTS.md

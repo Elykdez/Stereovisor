@@ -22,6 +22,12 @@ def png_bytes(image: Image.Image) -> bytes:
     return output.getvalue()
 
 
+def encoded_bytes(image: Image.Image, image_format: str) -> bytes:
+    output = io.BytesIO()
+    image.save(output, format=image_format)
+    return output.getvalue()
+
+
 def _completed_job(response) -> dict:
     assert response.status_code == 200
     job_id = response.json()["jobId"]
@@ -629,6 +635,68 @@ def test_rejects_unsupported_upload() -> None:
     response = client.post(
         "/api/jobs/analyze",
         files={"file": ("not-image.txt", b"not an image", "text/plain")},
+    )
+
+    assert response.status_code == 415
+    assert response.json()["detail"]["code"] == "UNSUPPORTED_IMAGE"
+
+
+@pytest.mark.parametrize("image_format", ["PNG", "JPEG", "WEBP"])
+def test_analyze_accepts_every_documented_source_format(
+    monkeypatch, image_format
+) -> None:
+    monkeypatch.setenv("STEREOVISOR_MODE", "preview")
+    suffix = image_format.lower()
+    source = pipeline.create_sample_image()
+
+    response = client.post(
+        "/api/jobs/analyze",
+        files={
+            "file": (
+                f"scene.{suffix}",
+                encoded_bytes(source, image_format),
+                f"image/{suffix}",
+            )
+        },
+    )
+
+    assert response.status_code == 200
+    assert _completed_project(response)["layers"]
+
+
+def test_analyze_accepts_a_source_the_browser_could_not_label(monkeypatch) -> None:
+    # Windows without a WebP file association leaves File.type empty, so the
+    # part arrives as octet-stream. The decoded format has to decide, or a valid
+    # image is rejected for the operating system's missing registry entry.
+    monkeypatch.setenv("STEREOVISOR_MODE", "preview")
+    source = pipeline.create_sample_image()
+
+    response = client.post(
+        "/api/jobs/analyze",
+        files={
+            "file": (
+                "scene.webp",
+                encoded_bytes(source, "WEBP"),
+                "application/octet-stream",
+            )
+        },
+    )
+
+    assert response.status_code == 200
+    assert _completed_project(response)["layers"]
+
+
+def test_rejects_an_unlabeled_source_in_an_unsupported_format() -> None:
+    # Skipping the content-type gate must not let an unsupported format through.
+    response = client.post(
+        "/api/jobs/analyze",
+        files={
+            "file": (
+                "scene.gif",
+                encoded_bytes(Image.new("RGB", (64, 64), "white"), "GIF"),
+                "application/octet-stream",
+            )
+        },
     )
 
     assert response.status_code == 415

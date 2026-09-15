@@ -276,3 +276,15 @@ The visual language is a dark graphite workspace with warm ivory text and a rest
 ## 8. Packaging Plan
 
 Source launchers use the same `.venv`, `.venv-ai`, and `.venv-powerpaint` directory names on Windows and macOS while selecting the platform-native executable layout. The Apple Silicon package embeds an arm64 standalone Python runtime and isolated PowerPaint dependency tree; model weights remain in writable per-user storage. H.264 MP4 export uses Electron's bundled Chromium encoder, with WebM fallback, so FFmpeg is not installed or distributed.
+
+## 9. Technical References
+
+- [Grounding DINO in Transformers](https://huggingface.co/docs/transformers/model_doc/grounding-dino)
+- [Grounding DINO-B checkpoint](https://huggingface.co/IDEA-Research/grounding-dino-base)
+- [SAM 2 in Transformers](https://huggingface.co/docs/transformers/model_doc/sam2)
+- [SAM 2.1 Small](https://huggingface.co/facebook/sam2.1-hiera-small)
+- [Depth Anything 3](https://github.com/ByteDance-Seed/Depth-Anything-3)
+- [InSPyReNet transparent-background](https://github.com/plemeri/transparent-background)
+- [LaMa](https://github.com/advimman/lama)
+- [Qwen3-VL 2B](https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct)
+- [PowerPaint](https://github.com/open-mmlab/PowerPaint)

@@ -33,6 +33,7 @@ from PIL import Image, ImageOps, UnidentifiedImageError
 from starlette.datastructures import Headers
 from starlette.types import ASGIApp, Receive, Scope, Send
 
+from ._version import __version__ as SERVICE_VERSION
 from .config import (
     ALLOWED_ORIGINS,
     JOB_DB_PATH,
@@ -181,6 +182,9 @@ async def _evict_jobs() -> None:
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    # First line in the console window the client opens when service.showConsole
+    # is set, so a running service always identifies its own build.
+    logger.info("Stereovisor service %s", SERVICE_VERSION)
     # Enforce the authenticated network boundary even when somebody starts
     # Uvicorn directly instead of going through service/scripts/run-service.py.
     ensure_bind_allowed()
@@ -227,7 +231,7 @@ def _publish_job_event(payload: ProcessingJobPayload) -> None:
 
 app = FastAPI(
     title="Stereovisor local vision service",
-    version="0.1.0",
+    version=SERVICE_VERSION,
     lifespan=lifespan,
 )
 
@@ -469,10 +473,32 @@ def _analyze_image(
         ) from error
 
 
+# The declared content type is only a hint. A browser sends no type, or
+# application/octet-stream, when the operating system has no mapping for an
+# extension, so a real WebP can arrive unlabeled. The decoded format decides.
+SUPPORTED_UPLOAD_CONTENT_TYPES = {"image/png", "image/jpeg", "image/webp"}
+UNTYPED_UPLOAD_CONTENT_TYPES = {None, "", "application/octet-stream"}
+SUPPORTED_UPLOAD_FORMATS = {"PNG", "JPEG", "WEBP"}
+
+
+def _unsupported_image() -> HTTPException:
+    return HTTPException(
+        status_code=415,
+        detail={"code": "UNSUPPORTED_IMAGE", "message": "Use PNG, JPEG, or WebP."},
+    )
+
+
 def _decode_image_bytes(data: bytes, content_type: str | None) -> Image.Image:
     try:
         image = Image.open(io.BytesIO(data))
         image.load()
+        if image.format not in SUPPORTED_UPLOAD_FORMATS:
+            logger.warning(
+                "upload rejected: unsupported format=%s content_type=%s",
+                image.format,
+                content_type,
+            )
+            raise _unsupported_image()
         logger.info(
             "upload decoded: content_type=%s bytes=%s size=%sx%s",
             content_type,
@@ -504,14 +530,14 @@ def _decode_image_bytes(data: bytes, content_type: str | None) -> Image.Image:
 async def _decode_upload(file: UploadFile) -> Image.Image:
     # Read one byte beyond the limit and force a real decode. Extension and
     # content type alone are not sufficient validation for uploaded bytes.
-    if file.content_type not in {"image/png", "image/jpeg", "image/webp"}:
+    if (
+        file.content_type not in SUPPORTED_UPLOAD_CONTENT_TYPES
+        and file.content_type not in UNTYPED_UPLOAD_CONTENT_TYPES
+    ):
         logger.warning(
             "upload rejected: unsupported content_type=%s", file.content_type
         )
-        raise HTTPException(
-            status_code=415,
-            detail={"code": "UNSUPPORTED_IMAGE", "message": "Use PNG, JPEG, or WebP."},
-        )
+        raise _unsupported_image()
     data = await file.read(MAX_UPLOAD_BYTES + 1)
     if len(data) > MAX_UPLOAD_BYTES:
         logger.warning(

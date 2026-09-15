@@ -1,8 +1,8 @@
 {
   "name": "stereovisor",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "private": true,
-  "description": "Local-first image-to-parallax desktop studio",
+  "description": "Local-first desktop studio that puts a camera inside a single photograph",
   "author": "Stereovisor",
   "main": "client/dist-electron/main.js",
   "scripts": {
@@ -14,7 +14,11 @@
     "dev:service": "node scripts/platform-runner.mjs service",
     "i18n:generate": "node client/scripts/generate-locales.mjs",
     "i18n:check": "node client/scripts/generate-locales.mjs --check",
-    "prebuild": "npm run i18n:generate",
+    "version:generate": "node scripts/version.mjs",
+    "version:check": "node scripts/version.mjs --check",
+    "version:set": "node scripts/version.mjs set",
+    "version:bump": "node scripts/version.mjs bump",
+    "prebuild": "npm run version:generate && npm run i18n:generate",
     "build": "tsc -p client/tsconfig.electron.json && vite build --config client/vite.config.mts",
     "package": "node scripts/package.mjs",
     "package:mac": "sh scripts/prepare-macos-runtime.sh && npm run build && electron-builder --mac dmg zip --arm64",
@@ -28,7 +32,7 @@
     "smoke:package:mac": "node scripts/smoke-test-macos.mjs --packaged",
     "setup": "node scripts/platform-runner.mjs setup-core",
     "openapi": "node scripts/platform-runner.mjs openapi",
-    "check": "npm run i18n:check && npm run typecheck && npm test && npm run test:service && npm run build",
+    "check": "npm run version:check && npm run i18n:check && npm run typecheck && npm test && npm run test:service && npm run build",
     "prestart": "npm run build",
     "start": "electron ."
   },
@@ -94,7 +98,9 @@
           "**/*.mjs",
           "**/*.sh",
           "**/*.txt",
-          "!**/__pycache__{,/**}"
+          "!**/__pycache__{,/**}",
+          "!release.ps1",
+          "!publish.ps1"
         ]
       },
       {

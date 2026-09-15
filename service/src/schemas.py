@@ -4,6 +4,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+from ._version import __version__ as SERVICE_VERSION
+
 SegmentationDensity = Literal["sparse", "balanced", "dense"]
 
 
@@ -49,7 +51,7 @@ class HealthPayload(BaseModel):
     """Readiness summary consumed by renderer feature gates."""
 
     status: str = "ok"
-    version: str = "0.1.0"
+    version: str = SERVICE_VERSION
     configuredMode: str
     activeEngine: str
     device: str

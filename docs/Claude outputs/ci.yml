@@ -1,0 +1,44 @@
+name: CI
+
+# The packaged Windows installer is deliberately not built here. Its
+# extraResources ship .venv, .venv-ai, .venv-powerpaint and .cache/vendor,
+# which are multi-GB machine-local trees, so packaging stays a local step.
+
+on:
+  push:
+    branches: [main]
+    tags:
+      - "client-v*"
+      - "service-v*"
+  pull_request:
+    branches: [main]
+
+jobs:
+  client:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run version:check
+      - run: npm run i18n:check
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+
+  service:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r service/requirements-core.txt pytest
+      # Preview mode keeps the suite off the AI stack and its model weights.
+      - run: python -m pytest service/tests
+        env:
+          STEREOVISOR_MODE: preview

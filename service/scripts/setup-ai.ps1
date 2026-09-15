@@ -121,9 +121,21 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 Publish-BootstrapStatus -State "initializing" -Detail "Verifying CUDA availability." -Provider "runtime" -Progress 92
-& $PythonPath -c "import torch; assert torch.cuda.is_available(), 'CUDA is unavailable'; print('CUDA ready:', torch.__version__, torch.cuda.get_device_name(0))"
-if ($LASTEXITCODE -ne 0) {
-    throw "The managed Torch runtime cannot access CUDA."
+# A packaging machine installs the CUDA wheels without owning a GPU, so the
+# runtime probe cannot pass there. Build pipelines set this; a user install
+# must not, or a broken environment ships as a working one.
+if ($env:STEREOVISOR_SKIP_CUDA_VERIFY -eq "1") {
+    Write-Host "STEREOVISOR_SKIP_CUDA_VERIFY=1: skipping the CUDA runtime probe." -ForegroundColor Yellow
+    & $PythonPath -c "import torch; print('Torch installed:', torch.__version__, '(CUDA runtime unverified)')"
+    if ($LASTEXITCODE -ne 0) {
+        throw "The managed Torch runtime is not importable."
+    }
+}
+else {
+    & $PythonPath -c "import torch; assert torch.cuda.is_available(), 'CUDA is unavailable'; print('CUDA ready:', torch.__version__, torch.cuda.get_device_name(0))"
+    if ($LASTEXITCODE -ne 0) {
+        throw "The managed Torch runtime cannot access CUDA."
+    }
 }
 
 Write-Host "Local CUDA AI dependencies installed."

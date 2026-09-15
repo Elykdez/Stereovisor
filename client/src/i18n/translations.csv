@@ -99,7 +99,7 @@ startup.provider.depth,Depth model,深度モデル,깊이 모델,深度模型
 startup.provider.inpainting,Inpainting model,インペイントモデル,인페인팅 모델,修复模型
 about.close,Close,閉じる,닫기,关闭
 about.repository,Designed by Elykdez,デザイン: Elykdez,Elykdez 디자인,由 Elykdez 设计
-brand.tagline,Local depth studio,ローカル深度スタジオ,로컬 깊이 스튜디오,本地景深工作室
+brand.tagline,A camera in your photo,写真の中のカメラ,사진 속 카메라,照片里的相机
 file.importing,Importing...,読み込み中...,가져오는 중...,正在导入...
 file.importProject,Import project,プロジェクトを読み込む,프로젝트 가져오기,导入项目
 file.resetProject,Reset,リセット,초기화,重置
@@ -471,7 +471,7 @@ native.helpMenu,Help,ヘルプ,도움말,帮助
 native.options,Options...,オプション...,옵션...,选项...
 native.about,About Stereovisor,Stereovisor について,Stereovisor 정보,关于 Stereovisor
 native.aboutVersion,Version,バージョン,버전,版本
-native.aboutDescription,Local-first image-to-parallax desktop studio.,ローカル優先の画像から視差を作成するデスクトップスタジオ。,로컬 우선 이미지-패럴랙스 데스크톱 스튜디오.,本地优先的图像转视差桌面工作室。
+native.aboutDescription,Turns one photograph into a layered 2.5D scene you can move a camera through. Entirely on your machine.,1枚の写真をレイヤー分けした2.5Dシーンに変換しカメラで動かせます。すべてローカルで処理します。,사진 한 장을 레이어로 나눠 카메라로 움직일 수 있는 2.5D 장면으로 만듭니다. 모든 처리는 기기 안에서 이뤄집니다.,将一张照片转换为可用相机移动的分层 2.5D 场景。全部在本地设备上完成。
 native.ok,OK,OK,확인,确定
 native.exit,Exit,終了,종료,退出
 native.undo,Undo,元に戻す,실행 취소,撤销
