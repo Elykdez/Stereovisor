@@ -73,7 +73,6 @@
     "directories": {
       "output": "release"
     },
-    "electronDist": "node_modules/electron/dist",
     "files": [
       "client/dist/**/*",
       "client/dist-electron/**/*",

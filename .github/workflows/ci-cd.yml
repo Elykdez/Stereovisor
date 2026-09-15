@@ -112,7 +112,10 @@ jobs:
           TAG_VERSION=${GITHUB_REF_NAME#client-}
           test "${TAG_VERSION#v}" = "$(node -p "require('./versions.json').client")"
       - run: npm ci
-      - run: npm run package:mac
+      - name: Package Apple Silicon app
+        run: |
+          ulimit -n 10240
+          npm run package:mac
       - run: npm run smoke:package:mac
         env:
           STEREOVISOR_SMOKE_MODE: preview
