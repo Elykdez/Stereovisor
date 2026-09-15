@@ -114,7 +114,7 @@ jobs:
       - run: npm ci
       - name: Package Apple Silicon app
         run: |
-          ulimit -n 10240
+          ulimit -n 65536
           npm run package:mac
       - run: npm run smoke:package:mac
         env:

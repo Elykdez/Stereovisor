@@ -46,6 +46,8 @@ requirements_hash=$(
 )
 ready_marker="$runtime_root/.stereovisor-runtime-$requirements_hash"
 powerpaint_vendor="$project_root/.cache/vendor/PowerPaint"
+torch_include="$runtime_root/lib/python3.12/site-packages/torch/include"
+rm -rf "$torch_include"
 if [ -f "$ready_marker" ] \
   && [ -f "$powerpaint_vendor/powerpaint/pipelines/pipeline_PowerPaint.py" ] \
   && "$runtime_root/bin/python3" -W ignore -c 'import torch, transformers, transparent_background, depth_anything_3, cv2, fastapi' >/dev/null 2>&1 \
@@ -57,6 +59,7 @@ fi
 "$runtime_root/bin/python3" -m pip install --disable-pip-version-check --upgrade pip
 "$runtime_root/bin/python3" -m pip install --disable-pip-version-check -r "$project_root/service/requirements-core.txt"
 "$runtime_root/bin/python3" -m pip install --disable-pip-version-check "torch==2.8.0" "torchvision==0.23.0"
+rm -rf "$torch_include"
 "$runtime_root/bin/python3" -m pip install --disable-pip-version-check -r "$project_root/service/requirements-ai.txt"
 "$runtime_root/bin/python3" -m pip uninstall -y opencv-python
 "$runtime_root/bin/python3" -m pip install --force-reinstall --no-deps "opencv-python-headless==4.11.0.86"
