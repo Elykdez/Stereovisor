@@ -6,7 +6,6 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
-import torch
 from PIL import Image
 
 from service.src.config import snapshot_ready
@@ -26,6 +25,8 @@ def test_default_inference_steps_are_25() -> None:
 def test_runner_reuses_unet_and_falls_back_to_cpu(
     monkeypatch, tmp_path: Path, cuda_available: bool
 ) -> None:
+    torch = pytest.importorskip("torch", reason="Torch ships with the local AI runtime")
+
     def model(bias: float):
         result = torch.nn.Linear(1, 1)
         result.bias.data.fill_(bias)
