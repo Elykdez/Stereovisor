@@ -466,6 +466,7 @@ def test_mask_refine_history_round_trips_layer_mask_and_state(tmp_path: Path) ->
 
 
 def test_guided_mask_refine_preserves_foreground_and_rejects_distant_pixels() -> None:
+    pytest.importorskip("cv2", reason="OpenCV ships with the local AI runtime")
     pixels = np.full((100, 100, 3), 235, dtype=np.uint8)
     pixels[30:80, 20:80] = (35, 90, 130)
     rough = proposal(15, 25, 85, 85)
@@ -557,6 +558,7 @@ def test_depth_normalization_converts_far_depth_to_low_parallax() -> None:
 
 
 def test_depth_plane_excludes_semantic_instance() -> None:
+    pytest.importorskip("cv2", reason="OpenCV ships with the local AI runtime")
     near = np.full((100, 100), 0.2, dtype=np.float32)
     near[60:100, :] = 0.95
     semantic = proposal(40, 65, 60, 95)
