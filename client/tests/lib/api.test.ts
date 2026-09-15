@@ -5,6 +5,7 @@ import {
   importProjectPackage,
   JOB_POLL_INTERVAL_MS,
   ProcessingCancelledError,
+  probeHealth,
   refineProjectLayer,
   resolveServiceAsset,
   setServiceConnection,
@@ -12,6 +13,7 @@ import {
   waitForJob
 } from "@/lib/api";
 import type { ComputeStatus, ProcessingProgress, SceneProject } from "@/types";
+import { isLocalAiReady, REQUIRED_AI_PROVIDERS } from "@/lib/startup";
 
 const project: SceneProject = {
   id: "finished-project",
@@ -231,6 +233,89 @@ describe("startup request resilience", () => {
     await expect(resultPromise).resolves.toEqual(imported);
     expect(fetchMock).toHaveBeenCalledTimes(2);
     vi.useRealTimers();
+  });
+});
+
+describe("runtime preparation health", () => {
+  afterEach(() => {
+    setServiceConnection("", "");
+    vi.unstubAllGlobals();
+  });
+
+  it("reports a dependency download without contacting the uninstalled service", async () => {
+    setServiceConnection("http://127.0.0.1:5772", "");
+    const getRuntimePreparation = vi.fn().mockResolvedValue({
+      state: "downloading", detail: "Downloading Python (42%).", progress: 42,
+    });
+    vi.stubGlobal("stereovisor", { getRuntimePreparation });
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const health = await probeHealth();
+
+    expect(health).toMatchObject({
+      activeEngine: "preview", configuredMode: "auto", localOnly: true,
+      startupState: "downloading", startupDetail: "Downloading Python (42%).",
+      startupProvider: "runtime", startupProgress: 42,
+      providers: {
+        runtime: { available: false, state: "downloading", progress: 42 },
+        depth: { available: false, state: "waiting", progress: null },
+      },
+    });
+    expect(Object.keys(health.providers)).toEqual([...REQUIRED_AI_PROVIDERS]);
+    expect(Object.values(health.providers).every((provider) => !provider.available)).toBe(true);
+    expect(isLocalAiReady(health)).toBe(false);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("keeps the installer failure visible while the runtime is blocked", async () => {
+    const detail = "Python download failed: connection timed out. Restart Stereovisor to retry.";
+    vi.stubGlobal("stereovisor", {
+      getRuntimePreparation: vi.fn().mockResolvedValue({ state: "blocked", detail, progress: null }),
+    });
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const health = await probeHealth();
+
+    expect(health).toMatchObject({
+      message: detail, startupState: "blocked", startupDetail: detail,
+      providers: { runtime: { available: false, state: "blocked", detail } },
+    });
+    expect(isLocalAiReady(health)).toBe(false);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { getRuntimePreparation: vi.fn().mockResolvedValue(null) },
+    {},
+    undefined,
+  ])("uses HTTP when preparation is finished or its bridge is absent (%#)", async (bridge) => {
+    vi.stubGlobal("stereovisor", bridge);
+    const httpHealth = { status: "ok", startupState: "ready" };
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify(httpHealth)));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(probeHealth()).resolves.toEqual(httpHealth);
+
+    expect(fetchMock).toHaveBeenCalledWith("/api/health", undefined);
+  });
+
+  it("ignores local preparation for a configured external service", async () => {
+    setServiceConnection("http://192.168.1.20:5772", "shared-secret");
+    const getRuntimePreparation = vi.fn().mockResolvedValue({
+      state: "blocked", detail: "Local Python unavailable.", progress: null,
+    });
+    vi.stubGlobal("stereovisor", { getRuntimePreparation });
+    const httpHealth = { status: "ok", startupState: "ready" };
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify(httpHealth)));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(probeHealth()).resolves.toEqual(httpHealth);
+
+    expect(getRuntimePreparation).not.toHaveBeenCalled();
+    expect(fetchMock.mock.calls[0][0]).toBe("http://192.168.1.20:5772/api/health");
+    expect(new Headers(fetchMock.mock.calls[0][1].headers).get("Authorization")).toBe("Bearer shared-secret");
   });
 });
 

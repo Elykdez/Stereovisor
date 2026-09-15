@@ -28,7 +28,18 @@ function Test-FileSha256 {
     if (-not (Test-Path -LiteralPath $Path)) {
         return $false
     }
-    return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash -eq $Expected.ToUpperInvariant()
+    # Hash directly so setup also works when the parent process supplied a
+    # PowerShell module path that does not expose the Get-FileHash script module.
+    $Stream = [System.IO.File]::OpenRead($Path)
+    $Hasher = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $Actual = [BitConverter]::ToString($Hasher.ComputeHash($Stream)).Replace("-", "")
+        return $Actual -eq $Expected.ToUpperInvariant()
+    }
+    finally {
+        $Hasher.Dispose()
+        $Stream.Dispose()
+    }
 }
 
 function Get-ResumableFile {
@@ -70,8 +81,9 @@ function Get-ResumableFile {
         # Same transfer options the Electron runtime download uses.
         # --speed-limit/--speed-time abort a socket that has gone quiet instead
         # of blocking on it, so a stalled CDN connection becomes a fast resume
-        # rather than an hour without progress. The outer loop exists because a
-        # multi-gigabyte wheel can outlast even curl's own retry budget.
+        # rather than an hour without progress. Retry here so curl recalculates
+        # the resume offset; its internal retries reuse the original offset and
+        # can discard bytes received during the failed attempt.
         & $Curl `
             --location `
             --fail `
@@ -79,9 +91,6 @@ function Get-ResumableFile {
             --connect-timeout 30 `
             --speed-limit 1024 `
             --speed-time 30 `
-            --retry 20 `
-            --retry-all-errors `
-            --retry-delay 2 `
             --progress-bar `
             --output $Partial `
             $Uri

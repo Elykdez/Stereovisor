@@ -1,8 +1,12 @@
+param(
+    [string]$ResourceRoot = (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)),
+    [string]$RuntimeRoot = $ResourceRoot,
+    [string]$BasePython
+)
 $ErrorActionPreference = "Stop"
-$ProjectRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
-$VenvPath = Join-Path $ProjectRoot ".venv-ai"
+$VenvPath = Join-Path $RuntimeRoot ".venv-ai"
 $PythonPath = Join-Path $VenvPath "Scripts\python.exe"
-$WheelCache = Join-Path $ProjectRoot ".cache\wheels"
+$WheelCache = Join-Path $RuntimeRoot ".cache\wheels"
 
 # Installing this environment is the longest part of a first launch. Publishing
 # each step keeps the app's startup gate moving instead of sitting at zero.
@@ -10,10 +14,12 @@ $WheelCache = Join-Path $ProjectRoot ".cache\wheels"
 . (Join-Path $PSScriptRoot "bootstrap-status.ps1")
 . (Join-Path $PSScriptRoot "download-file.ps1")
 
-if (-not (Test-Path -LiteralPath $PythonPath)) {
+# Re-running venv preserves installed packages and repairs an interrupted
+# first-run creation that left python.exe present but pip incomplete.
+if ($BasePython -or -not (Test-Path -LiteralPath $PythonPath)) {
     Publish-BootstrapStatus -State "initializing" -Detail "Creating the local CUDA AI environment." -Provider "runtime" -Progress 12
-    $SystemPython = (Get-Command python -ErrorAction Stop).Source
-    & $SystemPython -m venv $VenvPath
+    if (-not $BasePython) { $BasePython = (Get-Command python -ErrorAction Stop).Source }
+    & $BasePython -I -m venv $VenvPath
     if ($LASTEXITCODE -ne 0) {
         throw "Creating the local CUDA AI environment failed."
     }
@@ -32,6 +38,11 @@ if ($ConfigLines -match "include-system-site-packages\s*=\s*true") {
 }
 
 $CudaTag = "cu128"
+if ($BasePython) {
+    # The NuGet runtime seeds an older pip that cannot resume timed-out wheels.
+    & $PythonPath -m pip install --upgrade --timeout 60 --retries 10 "pip>=25.2,<27"
+    if ($LASTEXITCODE -ne 0) { throw "Updating the local package installer failed." }
+}
 $TorchVersion = "2.8.0"
 $TorchvisionVersion = "0.23.0"
 $WheelBase = $env:STEREOVISOR_TORCH_WHEEL_BASE
@@ -69,7 +80,7 @@ function Test-VenvCudaTorch {
     $PreviousErrorAction = $ErrorActionPreference
     try {
         $ErrorActionPreference = "SilentlyContinue"
-        & $PythonPath -W ignore -c "import pathlib, sys, torch; sys.exit(0 if torch.cuda.is_available() and str(pathlib.Path(torch.__file__).resolve()).lower().startswith(sys.prefix.lower()) else 2)" *> $null
+        & $PythonPath -W ignore -c "import pathlib, sys, torch; sys.exit(0 if torch.version.cuda and str(pathlib.Path(torch.__file__).resolve()).lower().startswith(sys.prefix.lower()) else 2)" *> $null
         $ProbeExitCode = $LASTEXITCODE
     }
     finally {
@@ -94,28 +105,37 @@ if (-not (Test-VenvCudaTorch)) {
     }
 }
 Publish-BootstrapStatus -State "downloading" -Detail "Installing the local AI dependencies." -Provider "runtime" -Progress 55
-& $PythonPath -m pip install --timeout 60 --retries 10 -r (Join-Path $ProjectRoot "service\requirements-ai.txt")
+& $PythonPath -m pip install --timeout 60 --retries 10 -r (Join-Path $ResourceRoot "service\requirements-ai.txt")
 if ($LASTEXITCODE -ne 0) {
     throw "Local AI dependency installation failed."
 }
 
 Publish-BootstrapStatus -State "downloading" -Detail "Pinning the Depth Anything 3 and PowerPaint sources." -Provider "runtime" -Progress 70
+if ($PSBoundParameters.ContainsKey("RuntimeRoot")) {
+    $env:STEREOVISOR_RUNTIME_ROOT = $RuntimeRoot
+}
 & $PythonPath (Join-Path $PSScriptRoot "setup-vendors.py")
 if ($LASTEXITCODE -ne 0) {
     throw "Pinned Depth Anything 3 and PowerPaint source setup failed."
 }
 
 Publish-BootstrapStatus -State "downloading" -Detail "Installing the optional PowerPaint runtime." -Provider "runtime" -Progress 80
-$PowerPaintVenv = Join-Path $ProjectRoot ".venv-powerpaint"
+$PowerPaintVenv = Join-Path $RuntimeRoot ".venv-powerpaint"
 $PowerPaintPython = Join-Path $PowerPaintVenv "Scripts\python.exe"
-if (-not (Test-Path -LiteralPath $PowerPaintPython)) {
+if ($BasePython -or -not (Test-Path -LiteralPath $PowerPaintPython)) {
     & $PythonPath -m venv $PowerPaintVenv
+    if ($LASTEXITCODE -ne 0) {
+        throw "Creating the optional PowerPaint environment failed."
+    }
 }
 $PowerPaintPackages = Join-Path $PowerPaintVenv "Lib\site-packages"
-$RuntimePackages = & $PythonPath -c "import sys; print('\n'.join(path for path in sys.path if path.lower().endswith('site-packages')))"
-$RuntimePackages | Set-Content -LiteralPath (Join-Path $PowerPaintPackages "stereovisor-ai-runtime.pth") -Encoding Ascii
+$RuntimePackages = Join-Path $VenvPath "Lib\site-packages"
+& $PythonPath -c "import pathlib, sys; pathlib.Path(sys.argv[1]).write_text('import site; site.addsitedir(' + ascii(sys.argv[2]) + ')\n', encoding='ascii')" (Join-Path $PowerPaintPackages "stereovisor-ai-runtime.pth") $RuntimePackages
+if ($LASTEXITCODE -ne 0) {
+    throw "Linking the optional PowerPaint runtime failed."
+}
 & $PowerPaintPython -m pip install --upgrade pip
-& $PowerPaintPython -m pip install --timeout 60 --retries 10 --no-deps "diffusers==0.27.0" "transformers==4.38.2" "huggingface-hub==0.25.2" "accelerate==0.34.2" "peft==0.9.0" "mmengine==0.10.7" "numpy==1.26.4" "opencv-python==4.10.0.84" "safetensors==0.6.2" "pillow==11.3.0" "tokenizers==0.15.2" "importlib-metadata>=8,<9" "rich>=13,<15" "termcolor>=2,<4" "yapf>=0.40,<1"
+& $PowerPaintPython -m pip install --timeout 60 --retries 10 --no-deps -r (Join-Path $ResourceRoot "service\requirements-powerpaint.txt") "opencv-python==4.10.0.84"
 if ($LASTEXITCODE -ne 0) {
     throw "Optional PowerPaint runtime installation failed."
 }

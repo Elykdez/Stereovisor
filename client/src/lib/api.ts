@@ -9,9 +9,12 @@ import type {
   SceneProject,
 } from "../types";
 import type { SegmentationDensity } from "../settings";
+import { i18n } from "../i18n";
 import { appLog } from "./logger";
 import { isChannelConnected, waitForJobEvent } from "./events";
+import { REQUIRED_AI_PROVIDERS } from "./startup";
 import {
+  DEFAULT_SERVICE_ORIGIN,
   resolveServiceAccessToken,
   resolveServiceOrigin,
 } from "./serviceOrigin";
@@ -241,7 +244,36 @@ export async function getHealth(): Promise<HealthStatus> {
 }
 
 /** Make one readiness request; startup owns the retry cadence and UI state. */
-export function probeHealth(): Promise<HealthStatus> {
+export async function probeHealth(): Promise<HealthStatus> {
+  const origin = resolveServiceOrigin();
+  if (!origin || origin === DEFAULT_SERVICE_ORIGIN) {
+    const preparation = await window.stereovisor?.getRuntimePreparation?.();
+    if (preparation) {
+      // Python cannot answer health until its first-launch installation finishes.
+      const detail = preparation.detail ?? i18n.t(
+        preparation.state === "blocked" ? "startup.blockedDetail" : "startup.startingDetail",
+      );
+      return {
+        status: preparation.state,
+        version: "",
+        configuredMode: "auto",
+        activeEngine: "preview",
+        device: "unknown",
+        localOnly: true,
+        providers: Object.fromEntries(REQUIRED_AI_PROVIDERS.map((key) => [key, {
+          available: false,
+          detail: key === "runtime" ? detail : i18n.t("startup.waiting"),
+          state: key === "runtime" ? preparation.state : "waiting",
+          progress: key === "runtime" ? preparation.progress : null,
+        }])),
+        message: detail,
+        startupState: preparation.state,
+        startupDetail: detail,
+        startupProvider: "runtime",
+        startupProgress: preparation.progress,
+      };
+    }
+  }
   return request<HealthStatus>("/api/health");
 }
 

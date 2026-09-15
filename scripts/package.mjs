@@ -16,7 +16,10 @@ if (process.platform === "darwin" && process.arch !== "arm64") {
   process.exit(2);
 }
 
-const child = spawn(process.platform === "win32" ? "npm.cmd" : "npm", ["run", target], {
+const windows = process.platform === "win32";
+const command = windows ? (process.env.ComSpec || "cmd.exe") : "npm";
+const args = windows ? ["/d", "/s", "/c", `npm.cmd run ${target}`] : ["run", target];
+const child = spawn(command, args, {
   stdio: "inherit",
 });
 for (const signal of ["SIGINT", "SIGTERM"]) {

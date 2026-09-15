@@ -58,6 +58,7 @@ describe("localization", () => {
     expect(translateRuntimeText("Creating 3 editable object layers.", translate)).toBe("正在创建 3 个可编辑对象图层。");
     expect(translateLayerName("Object 02", translate)).toBe("对象 02");
     expect(translateRuntimeText("Unrecognized diagnostic", translate)).toBe("Unrecognized diagnostic");
+    expect(translateRuntimeText("Installing the local Python runtime.", translate)).toBe("正在安装本地 Python 运行时。");
   });
 
   it("rerenders and persists when the user changes language", async () => {

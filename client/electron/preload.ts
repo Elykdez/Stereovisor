@@ -13,6 +13,11 @@ contextBridge.exposeInMainWorld("stereovisor", {
   openProject: (): Promise<ArrayBuffer | null> => ipcRenderer.invoke("stereovisor:open-project"),
   getSettings: () => ipcRenderer.invoke("stereovisor:get-settings"),
   getAppVersion: (): Promise<string> => ipcRenderer.invoke("stereovisor:get-app-version"),
+  getRuntimePreparation: (): Promise<{
+    state: "starting" | "downloading" | "initializing" | "blocked";
+    detail: string | null;
+    progress: number | null;
+  } | null> => ipcRenderer.invoke("stereovisor:get-runtime-preparation"),
   saveSettings: (settings: unknown): Promise<void> => ipcRenderer.invoke("stereovisor:save-settings", settings),
   onOpenOptions: (listener: () => void): (() => void) => {
     const handler = () => listener();

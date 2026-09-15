@@ -1,5 +1,10 @@
 ﻿key,en,ja,ko,zh-CN
 language.label,Language,言語,언어,语言
+startup.runtimeChecking,Checking the local AI runtime.,ローカル AI ランタイムを確認中です。,로컬 AI 런타임을 확인하는 중입니다.,正在检查本地 AI 运行时。
+startup.pythonDownloading,Downloading Python 3.12.8 from the official Python package server.,公式 Python パッケージサーバーから Python 3.12.8 をダウンロード中です。,공식 Python 패키지 서버에서 Python 3.12.8을 다운로드하는 중입니다.,正在从官方 Python 软件包服务器下载 Python 3.12.8。
+startup.pythonInstalling,Installing the local Python runtime.,ローカル Python ランタイムをインストール中です。,로컬 Python 런타임을 설치하는 중입니다.,正在安装本地 Python 运行时。
+startup.runtimeValidating,Initializing and validating the local CUDA AI runtime.,ローカル CUDA AI ランタイムを初期化して検証中です。,로컬 CUDA AI 런타임을 초기화하고 검증하는 중입니다.,正在初始化并验证本地 CUDA AI 运行时。
+startup.runtimeInstalled,Local AI dependencies installed.,ローカル AI の依存パッケージをインストールしました。,로컬 AI 종속 패키지가 설치되었습니다.,本地 AI 依赖项已安装。
 language.en,English,English,English,English
 language.ja,Japanese,日本語,日本語,日本語
 language.ko,Korean,한국어,한국어,한국어
