@@ -54,8 +54,6 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
-          cache: pip
-          cache-dependency-path: service/requirements-core.txt
       - run: pip install -r service/requirements-core.txt
       - run: python -m pytest service/tests
         env:
