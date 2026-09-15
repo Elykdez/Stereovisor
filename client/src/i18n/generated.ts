@@ -3,6 +3,11 @@ export const localeResources = {
   "en": {
     "translation": {
       "language.label": "Language",
+      "startup.runtimeChecking": "Checking the local AI runtime.",
+      "startup.pythonDownloading": "Downloading Python 3.12.8 from the official Python package server.",
+      "startup.pythonInstalling": "Installing the local Python runtime.",
+      "startup.runtimeValidating": "Initializing and validating the local CUDA AI runtime.",
+      "startup.runtimeInstalled": "Local AI dependencies installed.",
       "language.en": "English",
       "language.ja": "Japanese",
       "language.ko": "Korean",
@@ -502,6 +507,11 @@ export const localeResources = {
   "ja": {
     "translation": {
       "language.label": "言語",
+      "startup.runtimeChecking": "ローカル AI ランタイムを確認中です。",
+      "startup.pythonDownloading": "公式 Python パッケージサーバーから Python 3.12.8 をダウンロード中です。",
+      "startup.pythonInstalling": "ローカル Python ランタイムをインストール中です。",
+      "startup.runtimeValidating": "ローカル CUDA AI ランタイムを初期化して検証中です。",
+      "startup.runtimeInstalled": "ローカル AI の依存パッケージをインストールしました。",
       "language.en": "English",
       "language.ja": "日本語",
       "language.ko": "한국어",
@@ -1001,6 +1011,11 @@ export const localeResources = {
   "ko": {
     "translation": {
       "language.label": "언어",
+      "startup.runtimeChecking": "로컬 AI 런타임을 확인하는 중입니다.",
+      "startup.pythonDownloading": "공식 Python 패키지 서버에서 Python 3.12.8을 다운로드하는 중입니다.",
+      "startup.pythonInstalling": "로컬 Python 런타임을 설치하는 중입니다.",
+      "startup.runtimeValidating": "로컬 CUDA AI 런타임을 초기화하고 검증하는 중입니다.",
+      "startup.runtimeInstalled": "로컬 AI 종속 패키지가 설치되었습니다.",
       "language.en": "English",
       "language.ja": "日本語",
       "language.ko": "한국어",
@@ -1500,6 +1515,11 @@ export const localeResources = {
   "zh-CN": {
     "translation": {
       "language.label": "语言",
+      "startup.runtimeChecking": "正在检查本地 AI 运行时。",
+      "startup.pythonDownloading": "正在从官方 Python 软件包服务器下载 Python 3.12.8。",
+      "startup.pythonInstalling": "正在安装本地 Python 运行时。",
+      "startup.runtimeValidating": "正在初始化并验证本地 CUDA AI 运行时。",
+      "startup.runtimeInstalled": "本地 AI 依赖项已安装。",
       "language.en": "English",
       "language.ja": "日本語",
       "language.ko": "한국어",

@@ -125,7 +125,8 @@ def release_cuda(torch_module: Any) -> None:
             synchronize()
         cuda.empty_cache()
     mps = getattr(torch_module, "mps", None)
-    if mps is not None and callable(getattr(mps, "empty_cache", None)):
+    mps_backend = getattr(getattr(torch_module, "backends", None), "mps", None)
+    if mps_backend is not None and mps_backend.is_available() and callable(getattr(mps, "empty_cache", None)):
         mps.empty_cache()
 
 

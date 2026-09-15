@@ -1,6 +1,6 @@
 import { act, fireEvent, render, waitFor, within } from "@testing-library/react";
 import App from "@/App";
-import { analyzeSample, cancelProcessingJob, exportProjectPackage, getInpaintHistory, getLayerMergeHistory, getMaskHistory, inpaintProject, probeHealth, ProcessingCancelledError, resolveServiceAsset, waitForJob } from "@/lib/api";
+import { analyzeSample, cancelProcessingJob, exportProjectPackage, getInpaintHistory, getLayerMergeHistory, getMaskHistory, inpaintProject, probeHealth, ProcessingCancelledError, refineProjectLayer, resolveServiceAsset, waitForJob } from "@/lib/api";
 import { readProcessingSession, saveProcessingSession } from "@/lib/processingSession";
 import { subscribeToHealthEvents } from "@/lib/events";
 import { SceneCanvas } from "@/components/SceneCanvas";
@@ -79,6 +79,57 @@ describe("App processing status", () => {
   afterEach(() => {
     window.localStorage.clear();
     vi.unstubAllGlobals();
+  });
+
+  it("shows the whole source during initial processing and restores it after reload", async () => {
+    const preview = { sourceUrl: "data:image/jpeg;base64,preview", width: 200, height: 100 };
+    let finish!: (result: SceneProject) => void;
+    vi.mocked(analyzeSample).mockImplementation((_progress, onStarted) => {
+      onStarted?.("analysis-job", preview);
+      return new Promise((resolve) => { finish = resolve; });
+    });
+    const original = render(<App />);
+    await waitFor(() => expect(original.getByRole("button", { name: "Use sample scene" })).toBeEnabled());
+    fireEvent.click(original.getByRole("button", { name: "Use sample scene" }));
+    const canvasProps = () => vi.mocked(SceneCanvas).mock.calls.at(-1)![0];
+    await waitFor(() => expect(canvasProps()).toMatchObject({
+      processing: true, processingTarget: "source", interactive: false,
+      project: { ...preview, layers: [] },
+    }));
+    expect(readProcessingSession()).toMatchObject({ preview, project: null });
+    original.unmount();
+    let finishRecovery!: (result: SceneProject) => void;
+    vi.mocked(waitForJob).mockImplementation(() => new Promise((resolve) => { finishRecovery = resolve; }));
+    const recovered = render(<App />);
+    await waitFor(() => expect(waitForJob).toHaveBeenCalledWith("analysis-job", expect.any(Function)));
+    expect(canvasProps()).toMatchObject({ processing: true, processingTarget: "source", project: preview });
+    await act(async () => { finish(project); finishRecovery(project); });
+    expect(canvasProps()).toMatchObject({ processing: false, interactive: true, project: { id: project.id } });
+    expect(recovered.queryByRole("progressbar")).not.toBeInTheDocument();
+    expect(readProcessingSession()).toBeNull();
+  });
+
+  it("marks only the refining layer and clears the effect when cancelled", async () => {
+    let reject!: (error: Error) => void;
+    vi.mocked(refineProjectLayer).mockImplementation((_project, _layer, _progress, onStarted) => {
+      onStarted?.("refine-job");
+      return new Promise((_resolve, rejectJob) => { reject = rejectJob; });
+    });
+    const view = render(<App />);
+    await waitFor(() => expect(view.getByRole("button", { name: "Use sample scene" })).toBeEnabled());
+    fireEvent.click(view.getByRole("button", { name: "Use sample scene" }));
+    fireEvent.click(await view.findByRole("button", { name: "Edit" }));
+    const canvasProps = () => vi.mocked(SceneCanvas).mock.calls.at(-1)![0];
+    act(() => canvasProps().onMaskReadyChange(true));
+    fireEvent.click(view.getByRole("button", { name: "Refine" }));
+    await waitFor(() => expect(canvasProps()).toMatchObject({
+      processing: true, interactive: false, maskEditor: null, processingTarget: { layerId: "person" },
+    }));
+    expect(readProcessingSession()).toMatchObject({ kind: "refine", layerId: "person" });
+    await act(async () => { reject(new ProcessingCancelledError()); });
+    expect(canvasProps()).toMatchObject({ processing: false, interactive: true });
+    expect(canvasProps().processingTarget).toBeUndefined();
+    expect(readProcessingSession()).toBeNull();
   });
 
   it("shows server activity before this client has started a job and follows health updates", async () => {

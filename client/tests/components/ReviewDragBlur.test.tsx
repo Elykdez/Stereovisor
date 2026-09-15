@@ -59,7 +59,7 @@ describe("mask review drag blur", () => {
       if (!contexts.has(this)) {
         const canvas = this;
         contexts.set(canvas, {
-          clearRect: vi.fn(), save: vi.fn(), restore: vi.fn(), translate: vi.fn(), scale: vi.fn(),
+          clearRect: vi.fn(), fillRect: vi.fn(), save: vi.fn(), restore: vi.fn(), translate: vi.fn(), scale: vi.fn(),
           getImageData: () => ({ data: new Uint8ClampedArray(canvas.width * canvas.height * 4) }),
           putImageData: vi.fn(),
           filter: "none", globalAlpha: 1,
@@ -189,6 +189,68 @@ describe("mask review drag blur", () => {
       expect(vi.mocked(context.translate).mock.calls.at(-1)).not.toEqual([100, 50]);
       expect(vi.mocked(context.scale).mock.calls.at(-1)?.[0]).toBeGreaterThan(1.1);
     });
+    expect(frames.size).toBe(0);
+  });
+
+  it.each(["source", "layer"])("covers the %s during processing, above the cutouts, without affecting exports", async (target) => {
+    const mosaic = document.createElement("canvas");
+    const paint = vi.spyOn(MaskMosaicRenderer.prototype, "paint").mockReturnValue(mosaic);
+    const setMask = vi.spyOn(MaskMosaicRenderer.prototype, "setMask").mockImplementation(() => {});
+    vi.spyOn(MaskMosaicRenderer.prototype, "configure").mockImplementation(() => {});
+    vi.spyOn(MaskMosaicRenderer.prototype, "setPlate").mockImplementation(() => {});
+    vi.spyOn(InpaintFocusRenderer.prototype, "draw").mockImplementation(() => {});
+    const shader = vi.spyOn(GlInpaintForegroundRenderer, "create").mockReturnValue(null);
+    const { canvas, input, rerender, ref } = await mount({
+      processing: true, interactive: false,
+      processingTarget: target === "source" ? "source" : { layerId: "subject" },
+    });
+    await waitFor(() => expect(paint).toHaveBeenCalled());
+    const mask = setMask.mock.calls.at(-1)![0] as HTMLCanvasElement;
+    if (target === "source") {
+      expect(contexts.get(mask)!.fillRect).toHaveBeenCalledExactlyOnceWith(0, 0, 200, 100);
+    } else {
+      expect(draws.filter((draw) => draw.canvas === mask).map((draw) => (draw.image as HTMLImageElement).src))
+        .toEqual([expect.stringContaining("/mask.png?maskRevision=0")]);
+      expect(contexts.get(mask)!.fillRect).not.toHaveBeenCalled();
+    }
+    expect(draws.filter((draw) => draw.canvas === canvas).at(-1)?.image).toBe(mosaic);
+    expect(shader).not.toHaveBeenCalled();
+    expect(frames.size).toBe(1);
+    vi.spyOn(HTMLCanvasElement.prototype, "toBlob").mockImplementation((callback) => callback(new Blob(["clean"])));
+    paint.mockClear();
+    await act(async () => { await ref.current!.exportInpaintComposition(); });
+    expect(paint).not.toHaveBeenCalled();
+    draws = [];
+    rerender(<SceneCanvas {...input} processing={false} />);
+    expect(frames.size).toBe(0);
+    expect(canvas).not.toHaveClass("processing");
+    expect(draws.some((draw) => draw.image === mosaic)).toBe(false);
+  });
+
+  it.each(["source", "layer"])("uses the blur fallback for %s processing with effects disabled", async (target) => {
+    const paint = vi.spyOn(MaskMosaicRenderer.prototype, "paint");
+    const shader = vi.spyOn(GlInpaintForegroundRenderer, "create");
+    const { canvas, input, rerender } = await mount({
+      processing: true, interactive: false, reduceEffects: true,
+      processingTarget: target === "source" ? "source" : { layerId: "subject" },
+    });
+    expect(canvas).toHaveClass("processing", "reduced");
+    expect(paint).not.toHaveBeenCalled();
+    expect(shader).not.toHaveBeenCalled();
+    expect(frames.size).toBe(0);
+    rerender(<SceneCanvas {...input} processing={false} />);
+    expect(canvas).not.toHaveClass("processing");
+  });
+
+  it("keeps the initial mosaic static with reduced motion", async () => {
+    const paint = vi.spyOn(MaskMosaicRenderer.prototype, "paint").mockReturnValue(document.createElement("canvas"));
+    vi.spyOn(MaskMosaicRenderer.prototype, "setMask").mockImplementation(() => {});
+    vi.spyOn(MaskMosaicRenderer.prototype, "configure").mockImplementation(() => {});
+    vi.spyOn(MaskMosaicRenderer.prototype, "setPlate").mockImplementation(() => {});
+    const focus = vi.spyOn(InpaintFocusRenderer.prototype, "draw");
+    await mount({ processing: true, interactive: false, processingTarget: "source", reduceMotion: true });
+    expect(paint).toHaveBeenCalled();
+    expect(focus).not.toHaveBeenCalled();
     expect(frames.size).toBe(0);
   });
 

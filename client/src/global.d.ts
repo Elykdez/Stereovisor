@@ -34,6 +34,11 @@ declare global {
         };
       }>;
       getAppVersion: () => Promise<string>;
+      getRuntimePreparation?: () => Promise<{
+        state: "starting" | "downloading" | "initializing" | "blocked";
+        detail: string | null;
+        progress: number | null;
+      } | null>;
       saveSettings: (settings: {
         version: 3;
         locale: "en" | "ja" | "ko" | "zh-CN";

@@ -1,4 +1,5 @@
 import { appLog } from "./logger";
+import { glsl } from "./shaders/glsl";
 import VERTEX_SHADER from "./shaders/inpaintForeground.vert?raw";
 import FRAGMENT_SHADER from "./shaders/inpaintForeground.frag?raw";
 
@@ -19,7 +20,7 @@ export class GlInpaintForegroundRenderer {
         const shader = gl.createShader(type);
         if (!shader) throw new Error("Could not allocate a foreground shader.");
         shaders.push(shader);
-        gl.shaderSource(shader, source);
+        gl.shaderSource(shader, glsl(source));
         gl.compileShader(shader);
         if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(shader) ?? "Foreground shader compilation failed.");
         gl.attachShader(program, shader);

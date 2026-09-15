@@ -1,15 +1,19 @@
 #version 300 es
 
-// Mask mosaic, ported from the Poupiu Unity shader "AIP/UI/MosaicEffect".
-// Everything the original does per fragment is done per fragment here too: the
-// cell mapping, twinkle, dropout, glitch and the bright sweep from its line
-// pass. Uniforms map one to one onto the shader's properties, so _MosaicSize is
-// uSize and the remaining uniforms map to the corresponding effect settings.
-//
+// Uniforms map one to one onto the shader's properties, so _MosaicSize is uSize
+// and the remaining uniforms map to the corresponding effect settings.
 // Driven from maskMosaicGl.ts, which owns the textures and the uniform values.
-
 precision highp float;
 precision highp int;
+
+// Shared helpers, defined in fragmentUtils.glsl and spliced in by glsl.ts.
+// GLSL ES has no #include, so the directive is written as a comment that only
+// the composer reads; these prototypes are what the compiler and the editor's
+// validator resolve the calls against.
+float rand(vec2 uv);
+float animationNoise(vec2 cell, float tick, uint stream);
+vec3 hsvToRgb(vec3 hsv);
+//#include "fragmentUtils.glsl"
 
 in vec2 vUv;
 out vec4 fragColor;
@@ -45,31 +49,9 @@ uniform float uSweepStrength;
 uniform float uSweepSpeed;
 uniform float uSweepWidth;
 
-// Covered area of the mask in UV (minU, minV, maxU, maxV), so the sweep crosses
-// the painted region rather than the whole composition.
+// Covered area of the mask in UV (minU, minV, maxU, maxV), 
+// so the sweep crosses the painted region rather than the whole composition.
 uniform vec4 uBounds;
-
-// Port of Rand() in FragmentUtils.cginc.
-float rand(vec2 uv) {
-  return fract(sin(dot(uv, vec2(12.9898f, 78.233f))) * 43758.5453f);
-}
-
-// Keep time separate from position; translating sine noise creates moving bands.
-float animationNoise(vec2 cell, float tick, uint stream) {
-  uvec2 position = uvec2(cell);
-  uint value = position.x * 1973u ^ position.y * 9277u ^ uint(tick) * 26699u ^ stream * 31847u;
-  value = (value ^ (value >> 16u)) * 0x7feb352du;
-  value = (value ^ (value >> 15u)) * 0x846ca68bu;
-  value ^= value >> 16u;
-  return float(value >> 8u) / 16777216.0;
-}
-
-// Port of HSVtoRGB() in FragmentUtils.cginc.
-vec3 hsvToRgb(vec3 hsv) {
-  vec3 rgb = clamp(abs(mod(hsv.x * 6.0f + vec3(0.0f, 4.0f, 2.0f), 6.0f) - 3.0f) - 1.0f, 0.0f, 1.0f);
-  rgb = rgb * rgb * (3.0f - 2.0f * rgb);
-  return hsv.z * mix(vec3(1.0f), rgb, hsv.y);
-}
 
 // Port of mosaicCells(). The display aspect comes from a uniform rather than
 // _ScreenParams so the grid never wobbles within the quad.

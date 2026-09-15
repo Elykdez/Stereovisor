@@ -1,4 +1,4 @@
-import type { AppTranslate } from "../i18n";
+import { translateRuntimeText, type AppTranslate } from "../i18n";
 import type { HealthStatus } from "../types";
 import {
   readyProviderCount,
@@ -106,7 +106,7 @@ export function StartupGate({ phase, health, error, t }: StartupGateProps) {
             <h2>{gateTitle(state, t)}</h2>
           </div>
         </header>
-        <p className="startup-detail">{gateDetail(state, health, error, readyCount, total, t)}</p>
+        <p className="startup-detail">{translateRuntimeText(gateDetail(state, health, error, readyCount, total, t), t)}</p>
         <div className="startup-progress-label">
           <span>{t("startup.required")}</span>
           <strong>{readyCount} / {total}</strong>
@@ -142,7 +142,7 @@ export function StartupGate({ phase, health, error, t }: StartupGateProps) {
                 <span className="startup-provider-dot" aria-hidden="true" />
                 <div>
                   <strong>{providerLabel(key, t)}</strong>
-                  <small>{provider?.detail ?? t("startup.waiting")}</small>
+                  <small>{translateRuntimeText(provider?.detail ?? t("startup.waiting"), t)}</small>
                 </div>
                 <em>{stateLabel}{providerProgress}</em>
               </li>

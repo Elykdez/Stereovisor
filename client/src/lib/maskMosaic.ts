@@ -1,5 +1,5 @@
 /**
- * Mosaic mask visuals: a port of the cell system from the Poupiu Unity shader
+ * Mosaic mask visuals: a port of the cell system from the Unity shader
  * "AIP/UI/MosaicEffect". The shader shatters a whole frame into pixel cells
  * while a generation runs; here the same cells are confined to the area a
  * running inpaint job is rebuilding, so that region reads as a field of shards
@@ -132,7 +132,9 @@ export function mosaicShapeForProgress(
   percent: number,
   shape: MosaicShape = DEFAULT_MOSAIC_SHAPE,
 ): MosaicShape {
-  const ladder: number[] = MOSAIC_RESOLVE_SIZES.filter((size) => size < shape.size);
+  const ladder: number[] = MOSAIC_RESOLVE_SIZES.filter(
+    (size) => size < shape.size,
+  );
   ladder.push(shape.size);
   const step = Math.min(
     ladder.length - 1,
@@ -169,8 +171,17 @@ export function rand(x: number, y: number): number {
 }
 
 /** Hash cell, tick and stream independently so animation cannot translate the noise field. */
-export function mosaicAnimationNoise(x: number, y: number, tick: number, stream: number): number {
-  let value = Math.imul(x, 1973) ^ Math.imul(y, 9277) ^ Math.imul(tick, 26699) ^ Math.imul(stream, 31847);
+export function mosaicAnimationNoise(
+  x: number,
+  y: number,
+  tick: number,
+  stream: number,
+): number {
+  let value =
+    Math.imul(x, 1973) ^
+    Math.imul(y, 9277) ^
+    Math.imul(tick, 26699) ^
+    Math.imul(stream, 31847);
   value = Math.imul(value ^ (value >>> 16), 0x7feb352d);
   value = Math.imul(value ^ (value >>> 15), 0x846ca68b);
   value ^= value >>> 16;
@@ -538,8 +549,12 @@ class CpuMaskMosaicRenderer {
       }
 
       // Scanline tearing: a few cell rows slide sideways for one time step.
-      if (style.glitch > 0 && mosaicAnimationNoise(0, idY, glitchStep, 4) > 0.94) {
-        offsetU += (mosaicAnimationNoise(0, idY, glitchStep, 5) - 0.5) * style.glitch;
+      if (
+        style.glitch > 0 &&
+        mosaicAnimationNoise(0, idY, glitchStep, 4) > 0.94
+      ) {
+        offsetU +=
+          (mosaicAnimationNoise(0, idY, glitchStep, 5) - 0.5) * style.glitch;
       }
 
       const u = field.sampleU[slot] + offsetU;

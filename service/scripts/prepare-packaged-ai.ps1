@@ -1,12 +1,13 @@
 param(
     [Parameter(Mandatory = $true)][string]$ResourceRoot,
-    [Parameter(Mandatory = $true)][string]$ModelRoot
+    [Parameter(Mandatory = $true)][string]$ModelRoot,
+    [string]$RuntimeRoot = $ResourceRoot
 )
 $ErrorActionPreference = "Stop"
 
-$PythonPath = Join-Path $ResourceRoot ".venv-ai\Scripts\python.exe"
+$PythonPath = Join-Path $RuntimeRoot ".venv-ai\Scripts\python.exe"
 $PrepareScript = Join-Path $ResourceRoot "service\scripts\prepare-models.py"
-$VendorRoot = Join-Path $ResourceRoot ".cache\vendor"
+$VendorRoot = Join-Path $RuntimeRoot ".cache\vendor"
 $RunningMarker = Join-Path $ModelRoot ".stereovisor-bootstrap-running"
 $StatusFile = Join-Path $ModelRoot ".stereovisor-bootstrap-status"
 
@@ -33,7 +34,9 @@ try {
     $env:STEREOVISOR_APP_ROOT = $ResourceRoot
     $env:STEREOVISOR_MODEL_ROOT = $ModelRoot
     $env:STEREOVISOR_POWERPAINT_VENDOR = Join-Path $VendorRoot "PowerPaint"
+    $env:STEREOVISOR_POWERPAINT_PYTHON = Join-Path $RuntimeRoot ".venv-powerpaint\Scripts\python.exe"
     $env:STEREOVISOR_SKIP_HQ = "1"
+    Complete-BootstrapProvider -Provider "runtime"
     Write-Host "Preparing Stereovisor local AI models in $ModelRoot..." -ForegroundColor Cyan
     Publish-BootstrapStatus -State "downloading" -Detail "Downloading required local model weights. Keep this window open."
     & $PythonPath $PrepareScript

@@ -33,6 +33,38 @@ export interface ServiceLaunchPolicy {
 
 export type DesktopPlatform = "win32" | "darwin" | "linux";
 
+export interface RuntimePreparationStatus {
+  state: "starting" | "downloading" | "initializing" | "blocked";
+  detail: string | null;
+  progress: number | null;
+}
+
+export function windowsRuntimeReady(
+  root: string,
+  fileExists: (filePath: string) => boolean = existsSync,
+): boolean {
+  return [
+    path.join(root, ".stereovisor-runtime-ready"),
+    path.join(root, ".python-runtime", "tools", "python.exe"),
+    managedPythonPath(root, ".venv-ai", "win32"),
+    managedPythonPath(root, ".venv-powerpaint", "win32"),
+  ].every(fileExists);
+}
+
+export function parseRuntimePreparationStatus(contents: string): RuntimePreparationStatus {
+  const lines = contents.replace(/^\uFEFF/, "").split(/\r?\n/);
+  const state = lines[0];
+  const rawProgress = lines.find((line) => line.startsWith("progress="))?.slice(9);
+  const progress = rawProgress === undefined ? NaN : Number(rawProgress);
+  return {
+    state: state === "downloading" || state === "initializing" || state === "blocked"
+      ? state
+      : "starting",
+    detail: lines[1]?.trim() || null,
+    progress: Number.isFinite(progress) ? Math.min(100, Math.max(0, progress)) : null,
+  };
+}
+
 export function managedPythonPath(
   root: string,
   environmentName: string,

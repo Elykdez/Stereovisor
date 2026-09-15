@@ -86,6 +86,13 @@ logging. No images, prompts, or model tensors are included in these records.
 
 ### Render
 
+Initial analysis displays a bounded JPEG preview of the entire uploaded or sample
+image under the progress mosaic. The preview is returned once when the job starts
+and saved with the renderer's recovery session; it never replaces inference input.
+Layer refinement applies the same mosaic only to the active layer's mask, above
+the cutouts so it remains visible. Both use the existing plain processing blur
+when effects are reduced and a static mosaic when only motion is reduced.
+
 While an inpaint job runs, the background progress mosaic stays beneath the
 foreground cutouts. A separate WebGL2 shader briefly flickers on each rendered
 foreground layer, combining RGB-separated echoes, cyan/magenta rims, torn scan
@@ -161,7 +168,7 @@ Portable manifests store both sets of state so a load operation restores the exa
 ## 4. API
 
 - `GET /api/health`: service version, active mode, dependency and model readiness.
-- `POST /api/jobs/analyze`: multipart source image; returns a job ID.
+- `POST /api/jobs/analyze`: multipart source image; returns a job ID and bounded image preview (also returned by the sample endpoint).
 - `POST /api/jobs/projects/{id}/inpaint`: selected layer IDs, `lama`/`powerpaint` mode, and an optional prompt; returns a job ID.
 - `GET /api/jobs/{id}`: authoritative state and the typed result after completion.
 - `GET /api/projects/{id}/assets/{name}`: validated project asset delivery.

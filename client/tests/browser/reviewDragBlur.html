@@ -13,10 +13,15 @@
 <button id="hold">Hold test drag</button>
 <button id="release">Release</button>
 <button id="cancel">Cancel pointer</button>
+<button id="process-source">Process entire image</button>
+<button id="refine-layer">Refine foreground</button>
+<button id="finish">Finish processing</button>
+<label><input id="reduce-effects" type="checkbox"> Reduce effects</label>
+<label><input id="reduce-motion" type="checkbox"> Reduce motion</label>
 <span id="status">Ready</span>
 <div id="preview"></div>
 <script type="module">
-  import React, { useState } from "react";
+  import React, { useEffect, useState } from "react";
   import { createRoot } from "react-dom/client";
   import { SceneCanvas } from "/src/components/SceneCanvas.tsx";
   import "/src/styles.css";
@@ -39,21 +44,44 @@
   for (let x = 680; x < 1048; x += 16) foreground.fillRect(x, 300, 5, 480);
   context.drawImage(cutout, 0, 0);
   const cutoutUrl = cutout.toDataURL();
+  const mask = document.createElement("canvas");
+  mask.width = source.width; mask.height = source.height;
+  const maskContext = mask.getContext("2d");
+  maskContext.fillStyle = "white";
+  maskContext.fillRect(664, 270, 400, 540);
   const project = {
     id: "review-browser-check", width: source.width, height: source.height,
     sourceUrl: source.toDataURL(), backgroundUrl: null, layers: [{
-      id: "foreground", name: "Foreground", cutoutUrl, maskUrl: cutoutUrl,
+      id: "foreground", name: "Foreground", cutoutUrl, maskUrl: mask.toDataURL(),
       selected: true, visible: true, depth: 0.8, order: 0, offsetX: 0, offsetY: 0,
       // Inline fixture images have no revision query.
       bounds: [664, 270, 1064, 810], feather: 0, maskRevision: null,
     }],
   };
   // Add ?processing to inspect the same scene during an active inpaint job.
-  const processing = new URLSearchParams(location.search).has("processing");
+  const initialProcessing = new URLSearchParams(location.search).has("processing") ? "inpaint" : "";
   function Preview() {
     const [camera, setCamera] = useState({ x: 0.5, y: 0.2, zoom: 1.1, strength: 30 });
+    const [mode, setMode] = useState(initialProcessing);
+    const [reduceEffects, setReduceEffects] = useState(false);
+    const [reduceMotion, setReduceMotion] = useState(false);
+    const processing = Boolean(mode);
+    useEffect(() => {
+      document.getElementById("process-source").onclick = () => setMode("source");
+      document.getElementById("refine-layer").onclick = () => setMode("layer");
+      document.getElementById("finish").onclick = () => setMode("");
+      document.getElementById("reduce-effects").onchange = event => setReduceEffects(event.target.checked);
+      document.getElementById("reduce-motion").onchange = event => setReduceMotion(event.target.checked);
+    }, []);
+    useEffect(() => {
+      document.getElementById("status").textContent = processing
+        ? `${mode}: ${reduceEffects ? "blur fallback" : reduceMotion ? "static mosaic" : "animated mosaic"}`
+        : "Ready";
+    }, [mode, reduceEffects, reduceMotion]);
     return React.createElement(SceneCanvas, {
       project, camera, interactive: !processing, reviewingSource: !processing, processing,
+      processingTarget: mode === "source" ? "source" : mode === "layer" ? { layerId: "foreground" } : undefined,
+      reduceEffects, reduceMotion,
       inpaintProgress: 24,
       showInpaintMask: false, maskEditor: null, showCompositionWhileMaskEditing: false,
       brushMode: "add", brushSize: 48, maskBlurRadius: 0, anchorLayerId: null,

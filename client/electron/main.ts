@@ -17,6 +17,9 @@ import {
   probeStereovisorService,
   requiredModelsReady,
   serviceLaunchPolicy,
+  windowsRuntimeReady,
+  parseRuntimePreparationStatus,
+  type RuntimePreparationStatus,
 } from "./serviceLifecycle";
 import {
   nativeMessages,
@@ -27,6 +30,9 @@ import {
 let mainWindow: BrowserWindow | null = null;
 let serviceProcess: ChildProcess | null = null;
 let modelPreparationProcess: ChildProcess | null = null;
+let runtimePreparationProcess: ChildProcess | null = null;
+let runtimePreparationActive = false;
+let runtimePreparationFailure: string | null = null;
 let serviceStopsWithApp = true;
 let appIsQuitting = false;
 let preparationWindowActive = false;
@@ -96,6 +102,62 @@ function resourceRoot(): string {
   return app.isPackaged ? process.resourcesPath : appRoot();
 }
 
+function runtimeRoot(): string {
+  return app.isPackaged && process.platform === "win32"
+    ? path.join(app.getPath("userData"), "runtime")
+    : resourceRoot();
+}
+
+async function runtimePreparationStatus(): Promise<RuntimePreparationStatus | null> {
+  if (!runtimePreparationActive && !runtimePreparationFailure) return null;
+  let status: RuntimePreparationStatus = { state: "starting", detail: null, progress: null };
+  try {
+    status = parseRuntimePreparationStatus(await readFile(
+      path.join(findPackagedModelRoot(), ".stereovisor-bootstrap-status"), "utf8",
+    ));
+  } catch {
+    // The first status file is written after the preparation process starts.
+  }
+  return runtimePreparationFailure
+    ? { ...status, state: "blocked", detail: status.state === "blocked" && status.detail ? status.detail : runtimePreparationFailure }
+    : status;
+}
+
+async function prepareAndStartService(showConsole: boolean, accessToken = ""): Promise<void> {
+  if (app.isPackaged && process.platform === "win32" && !windowsRuntimeReady(runtimeRoot())) {
+    runtimePreparationActive = true;
+    runtimePreparationFailure = null;
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const child = spawn("powershell.exe", [
+          "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+          path.join(resourceRoot(), "service", "scripts", "setup-packaged-runtime.ps1"),
+          "-ResourceRoot", resourceRoot(), "-RuntimeRoot", runtimeRoot(),
+          "-ModelRoot", findPackagedModelRoot(),
+        ], { cwd: resourceRoot(), windowsHide: !showConsole, stdio: showConsole ? "inherit" : "pipe" });
+        runtimePreparationProcess = child;
+        child.stdout?.on("data", (chunk: Buffer) => console.info("[Stereovisor][runtime]", chunk.toString().trimEnd()));
+        child.stderr?.on("data", (chunk: Buffer) => console.warn("[Stereovisor][runtime]", chunk.toString().trimEnd()));
+        child.once("error", reject);
+        child.once("exit", (code) => {
+          runtimePreparationProcess = null;
+          if (code === 0 && windowsRuntimeReady(runtimeRoot())) resolve();
+          else reject(new Error(`Runtime preparation exited with code ${code}.`));
+        });
+      });
+    } catch (error) {
+      runtimePreparationFailure = error instanceof Error ? error.message : String(error);
+      console.error("[Stereovisor][runtime] Preparation failed", error);
+      return;
+    } finally {
+      runtimePreparationActive = false;
+    }
+  }
+  if (appIsQuitting) return;
+  await startService(showConsole, accessToken);
+  startPackagedModelPreparation(showConsole);
+}
+
 function findPackagedModelRoot(): string {
   const configured = process.env.STEREOVISOR_MODEL_ROOT?.trim();
   if (configured) return configured;
@@ -161,7 +223,10 @@ function startPackagedModelPreparation(showConsole: boolean): void {
     ...process.env,
     STEREOVISOR_APP_ROOT: root,
     STEREOVISOR_MODEL_ROOT: modelRoot,
+    PYTHONNOUSERSITE: "1",
   };
+  delete environment.PYTHONHOME;
+  delete environment.PYTHONPATH;
   if (process.platform === "darwin") {
     // Python bytecode written inside Contents/Resources invalidates the sealed app.
     environment.PYTHONDONTWRITEBYTECODE = "1";
@@ -180,6 +245,8 @@ function startPackagedModelPreparation(showConsole: boolean): void {
           root,
           "-ModelRoot",
           modelRoot,
+          "-RuntimeRoot",
+          runtimeRoot(),
         ];
   modelPreparationProcess = spawn(
     command,
@@ -259,7 +326,7 @@ async function startService(
   const managedPython =
     app.isPackaged && process.platform === "darwin"
       ? path.join(root, ".python-runtime", "bin", "python3")
-      : managedPythonPath(root, app.isPackaged ? ".venv-ai" : ".venv");
+      : managedPythonPath(runtimeRoot(), app.isPackaged ? ".venv-ai" : ".venv");
   const python =
     process.env.STEREOVISOR_PYTHON ??
     (existsSync(managedPython)
@@ -280,12 +347,15 @@ async function startService(
     if (app.isPackaged) environment.PYTHONDONTWRITEBYTECODE = "1";
   }
   if (app.isPackaged) {
+    environment.PYTHONNOUSERSITE = "1";
+    delete environment.PYTHONHOME;
+    delete environment.PYTHONPATH;
     environment.STEREOVISOR_PROJECT_ROOT = path.join(packagedDataRoot, "projects");
     environment.STEREOVISOR_MODEL_ROOT = findPackagedModelRoot();
     environment.STEREOVISOR_POWERPAINT_PYTHON =
       process.platform === "darwin"
         ? managedPython
-        : managedPythonPath(root, ".venv-powerpaint");
+        : managedPythonPath(runtimeRoot(), ".venv-powerpaint");
     if (process.platform === "darwin") {
       environment.STEREOVISOR_POWERPAINT_PACKAGES = path.join(
         root,
@@ -293,7 +363,7 @@ async function startService(
         "powerpaint-site-packages",
       );
     }
-    environment.STEREOVISOR_POWERPAINT_VENDOR = path.join(root, ".cache", "vendor", "PowerPaint");
+    environment.STEREOVISOR_POWERPAINT_VENDOR = path.join(runtimeRoot(), ".cache", "vendor", "PowerPaint");
   }
   // macOS GUI applications do not own a console window to inherit. Keep the
   // bundled service attached so closing the app cannot leave an orphan behind.
@@ -539,6 +609,7 @@ ipcMain.handle("stereovisor:open-project", async () => {
 
 ipcMain.handle("stereovisor:get-settings", () => readSettings());
 ipcMain.handle("stereovisor:get-app-version", () => app.getVersion());
+ipcMain.handle("stereovisor:get-runtime-preparation", () => runtimePreparationStatus());
 ipcMain.handle(
   "stereovisor:save-settings",
   async (_event, settings: unknown) => {
@@ -587,7 +658,8 @@ if (!hasSingleInstanceLock) {
     // service in the background without re-entering model preparation.
     const preparationOnly =
       process.env.STEREOVISOR_PREPARATION_ONLY === "1" ||
-      (app.isPackaged && requiredModelsReady(findPackagedModelRoot()) === false);
+      (app.isPackaged && (requiredModelsReady(findPackagedModelRoot()) === false ||
+        (process.platform === "win32" && !windowsRuntimeReady(runtimeRoot()))));
     if (!preparationOnly) installApplicationMenu();
     createWindow(preparationOnly);
 
@@ -601,11 +673,10 @@ if (!hasSingleInstanceLock) {
             origin: settings.service.origin,
           });
         } else {
-          void startService(
+          void prepareAndStartService(
             settings.service.showConsole,
             settings.service.accessToken,
           );
-          startPackagedModelPreparation(settings.service.showConsole);
         }
         void installReactDevTools();
       })
@@ -614,8 +685,7 @@ if (!hasSingleInstanceLock) {
         // The renderer can still recover with its defaults and expose the
         // local-service error through the startup gate.
         console.error("[Stereovisor][electron] Settings unavailable; using defaults", error);
-        void startService(false);
-        startPackagedModelPreparation(false);
+        void prepareAndStartService(false);
         void installReactDevTools();
       });
     app.on("activate", () => {
@@ -631,7 +701,15 @@ if (!hasSingleInstanceLock) {
   app.on("before-quit", () => {
     appIsQuitting = true;
     electronLog("app.quitting");
-    modelPreparationProcess?.kill();
+    for (const child of [runtimePreparationProcess, modelPreparationProcess]) {
+      if (process.platform === "win32" && child?.pid) {
+        spawn("taskkill.exe", ["/PID", String(child.pid), "/T", "/F"], {
+          windowsHide: true, stdio: "ignore",
+        }).unref();
+      } else {
+        child?.kill();
+      }
+    }
     if (serviceStopsWithApp) {
       serviceProcess?.kill();
     } else if (serviceProcess) {

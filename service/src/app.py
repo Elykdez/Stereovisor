@@ -106,6 +106,7 @@ from .schemas import (
     MergeLayersRequest,
     ProcessingJobPayload,
     ProcessingJobStart,
+    ProcessingPreview,
     ProjectExportRequest,
     ProjectImportPayload,
     ProjectPayload,
@@ -1249,6 +1250,19 @@ async def service_events(websocket: WebSocket) -> None:
         logger.info("event channel closed: subscribers=%s", events.subscriber_count())
 
 
+def _analysis_preview(image: Image.Image) -> ProcessingPreview:
+    # Send a small, browser-readable preview once, without changing AI input.
+    preview = ImageOps.exif_transpose(image).convert("RGB")
+    preview.thumbnail((1024, 1024), Image.Resampling.LANCZOS)
+    output = io.BytesIO()
+    preview.save(output, format="JPEG", quality=80)
+    return ProcessingPreview(
+        sourceUrl="data:image/jpeg;base64," + base64.b64encode(output.getvalue()).decode("ascii"),
+        width=preview.width,
+        height=preview.height,
+    )
+
+
 @app.post("/api/jobs/analyze", response_model=ProcessingJobStart)
 async def start_analyze_job(
     file: UploadFile = File(...),
@@ -1258,12 +1272,13 @@ async def start_analyze_job(
 ) -> ProcessingJobStart:
     _require_ready_for_ai_job()
     image = await _decode_upload(file)
+    preview = _analysis_preview(image)
     logger.info(
         "job accepted: kind=analyze density=%s vlm_vocabulary=%s",
         segmentation_density,
         use_vlm_vocabulary,
     )
-    return _enqueue_job(
+    job = _enqueue_job(
         "analyze",
         lambda progress, cancelled: _analyze_image(
             image,
@@ -1274,6 +1289,7 @@ async def start_analyze_job(
             use_vlm_vocabulary=use_vlm_vocabulary,
         ),
     )
+    return job.model_copy(update={"preview": preview})
 
 
 @app.post("/api/jobs/sample", response_model=ProcessingJobStart)
@@ -1284,12 +1300,13 @@ def start_sample_job(
 ) -> ProcessingJobStart:
     _require_ready_for_ai_job()
     image = create_sample_image()
+    preview = _analysis_preview(image)
     logger.info(
         "job accepted: kind=sample density=%s vlm_vocabulary=%s",
         segmentation_density,
         use_vlm_vocabulary,
     )
-    return _enqueue_job(
+    job = _enqueue_job(
         "analyze",
         lambda progress, cancelled: _analyze_image(
             image,
@@ -1300,6 +1317,7 @@ def start_sample_job(
             use_vlm_vocabulary=use_vlm_vocabulary,
         ),
     )
+    return job.model_copy(update={"preview": preview})
 
 
 @app.post("/api/jobs/projects/{project_id}/inpaint", response_model=ProcessingJobStart)

@@ -33,9 +33,10 @@ interface Props {
   camera: CameraState;
   interactive: boolean;
   reviewingSource: boolean;
-  // An inpainting job is running. Shatters the area being rebuilt into the
+  // A local image job is running. Shatters the area being processed into the
   // progress mosaic. Exports redraw offscreen, so they are untouched.
   processing: boolean;
+  processingTarget?: "source" | { layerId: string };
   // Mask of a running full-redraw job. It was painted in the editor and lives
   // nowhere else, so the caller hands it over for the mosaic to mark; a
   // background rebuild leaves this out and the union of selected masks is used.
@@ -126,7 +127,8 @@ export function buildInpaintMaskCanvas(
 }
 
 /**
- * Inpaint preview effects, with the mosaic beneath foreground layers.
+ * Processing preview effects. Inpainting stays beneath foreground layers;
+ * analysis and refinement mark the source or target layer above the scene.
  * The caller owns the renderer, the clock and the mask; leaving it out (exports,
  * tests, every state that is not mid-inpaint) draws the scene untouched.
  */
@@ -139,6 +141,7 @@ export interface MaskMosaicFrame {
   mask: CanvasImageSource | null;
   /** How far along the job is, 0-100. Coarse blocks resolve as it climbs. */
   progress: number;
+  target?: "source" | { layerId: string };
 }
 
 type SceneRenderPurpose = "final" | "inpaint-reference";
@@ -164,6 +167,7 @@ export function drawScene(
   const backgroundPath = project.backgroundUrl ?? project.sourceUrl;
   const background = images.get(backgroundPath);
   if (!background) return false;
+  if (purpose !== "final") mosaic = null;
 
   context.clearRect(0, 0, canvas.width, canvas.height);
   context.imageSmoothingEnabled = true;
@@ -220,17 +224,24 @@ export function drawScene(
     }
   }
 
-  if (mosaic?.mask) {
-    // Keep the effect aligned to the background and beneath foreground cutouts.
+  function drawMosaic(): void {
+    if (!context || !mosaic?.mask || !background) return;
+    const target = mosaic.target;
+    const layer = typeof target === "object"
+      ? project.layers.find((candidate) => candidate.id === target.layerId)
+      : null;
+    const transform = layer
+      ? layerTransform(camera, layer.depth, canvas.width, canvas.height, layer, [project.width, project.height])
+      : { x: bg.x * canvas.width, y: bg.y * canvas.height, scale: bg.scale };
     const shape = mosaicShapeForProgress(mosaic.progress);
     mosaic.renderer.configure(canvas.width, canvas.height, shape);
     mosaic.renderer.setMask(mosaic.mask);
-    mosaic.renderer.setPlate(background);
+    mosaic.renderer.setPlate(layer ? images.get(project.sourceUrl) ?? background : background);
     const cells = mosaic.renderer.paint(mosaic.time, INPAINT_MOSAIC_STYLE);
     if (cells) {
       context.save();
-      context.translate(canvas.width / 2 + bg.x * canvas.width, canvas.height / 2 + bg.y * canvas.height);
-      context.scale(bg.scale, bg.scale);
+      context.translate(canvas.width / 2 + transform.x, canvas.height / 2 + transform.y);
+      context.scale(transform.scale, transform.scale);
       context.imageSmoothingEnabled = mosaic.renderer.smoothOutput;
       context.drawImage(cells, -canvas.width / 2, -canvas.height / 2, canvas.width, canvas.height);
       context.translate(-canvas.width / 2, -canvas.height / 2);
@@ -238,6 +249,7 @@ export function drawScene(
       context.restore();
     }
   }
+  if (!mosaic?.target) drawMosaic();
 
   const layers = project.backgroundUrl
     ? visibleLayers(project.layers)
@@ -261,7 +273,7 @@ export function drawScene(
     context.filter = blur > 0 ? `blur(${blur.toFixed(2)}px)` : "none";
     const cutout = featherLayerImage(image, feather);
     context.drawImage(cutout, -canvas.width / 2, -canvas.height / 2, canvas.width, canvas.height);
-    if (purpose === "final" && mosaic?.foreground) {
+    if (mosaic?.foreground && !mosaic.target) {
       const effect = mosaic.foreground.paint(cutout, canvas.width, canvas.height, mosaic.time, layer.id, canvas.width / (canvas.clientWidth || canvas.width));
       if (effect) context.drawImage(effect, -canvas.width / 2, -canvas.height / 2, canvas.width, canvas.height);
     }
@@ -269,6 +281,7 @@ export function drawScene(
     context.restore();
     if (layer.id === anchorLayerId) drawAnchorOutline(context, canvas, layer, transform);
   }
+  if (mosaic?.target) drawMosaic();
 
   return true;
 }
@@ -403,6 +416,7 @@ export const SceneCanvas = forwardRef<SceneCanvasHandle, Props>(function SceneCa
     interactive,
     reviewingSource,
     processing,
+    processingTarget,
     pendingInpaintMaskUrl = null,
     inpaintProgress = 0,
     showInpaintMask,
@@ -451,6 +465,8 @@ export const SceneCanvas = forwardRef<SceneCanvasHandle, Props>(function SceneCa
   const [displaySize, setDisplaySize] = useState<[number, number]>([0, 0]);
   const [pendingInpaintMask, setPendingInpaintMask] = useState<HTMLImageElement | null>(null);
   const sourceReview = reviewingSource && !project.backgroundUrl;
+  const processingSource = processingTarget === "source";
+  const processingLayerId = typeof processingTarget === "object" ? processingTarget.layerId : null;
   const reviewBlurAllowed = sourceReview && interactive && !processing && !maskEditor && !showInpaintMask;
   // Review and inpaint masks use source coordinates. Keep the plate and
   // cutouts aligned until a review drag or the completed scene previews depth.
@@ -541,11 +557,26 @@ export const SceneCanvas = forwardRef<SceneCanvasHandle, Props>(function SceneCa
     // extra hole. Cached rather than rebuilt per frame, because binding a new
     // mask costs the renderer a texture upload and a bounds probe.
     if (!processing || loading || reduceEffects) return null;
+    if (processingSource) {
+      const mask = document.createElement("canvas");
+      mask.width = project.width;
+      mask.height = project.height;
+      const context = mask.getContext("2d");
+      if (!context) return null;
+      context.fillStyle = "white";
+      context.fillRect(0, 0, mask.width, mask.height);
+      return mask;
+    }
+    if (processingLayerId) {
+      const layer = project.layers.find((candidate) => candidate.id === processingLayerId);
+      const image = layer ? imagesRef.current.get(layer.maskUrl) : null;
+      return image ? imageToAlphaMask(image, project.width, project.height) : null;
+    }
     if (pendingInpaintMaskUrl) {
       return pendingInpaintMask ? imageToAlphaMask(pendingInpaintMask, project.width, project.height) : null;
     }
     return buildInpaintMaskCanvas(project, imagesRef.current, project.width, project.height);
-  }, [loading, pendingInpaintMask, pendingInpaintMaskUrl, processing, project, reduceEffects]);
+  }, [loading, pendingInpaintMask, pendingInpaintMaskUrl, processing, processingSource, processingLayerId, project, reduceEffects]);
 
   const render = useCallback(() => {
     const canvas = canvasRef.current;
@@ -569,7 +600,8 @@ export const SceneCanvas = forwardRef<SceneCanvasHandle, Props>(function SceneCa
           foreground: reduceMotion ? undefined : foregroundRef.current ?? undefined,
           time: clockRef.current,
           mask: inpaintMask,
-          progress: reduceMotion ? inpaintProgress : resolveRef.current
+          progress: reduceMotion ? inpaintProgress : resolveRef.current,
+          target: processingSource ? "source" : processingLayerId ? { layerId: processingLayerId } : undefined
         }
         : null,
       "final",
@@ -584,6 +616,8 @@ export const SceneCanvas = forwardRef<SceneCanvasHandle, Props>(function SceneCa
     reduceMotion,
     maskEditor,
     processing,
+    processingSource,
+    processingLayerId,
     project,
     reviewBackground,
     reviewBlurAllowed,
@@ -675,14 +709,14 @@ export const SceneCanvas = forwardRef<SceneCanvasHandle, Props>(function SceneCa
   }, []);
 
   useEffect(() => {
-    if (loading || !processing || reduceEffects || reduceMotion) return;
+    if (loading || !processing || processingSource || processingLayerId || reduceEffects || reduceMotion) return;
     const foreground = GlInpaintForegroundRenderer.create();
     foregroundRef.current = foreground;
     return () => {
       foregroundRef.current = null;
       foreground?.dispose();
     };
-  }, [loading, processing, reduceEffects, reduceMotion]);
+  }, [loading, processing, processingSource, processingLayerId, reduceEffects, reduceMotion]);
 
   useEffect(() => {
     if (!loading) render();
@@ -715,7 +749,7 @@ export const SceneCanvas = forwardRef<SceneCanvasHandle, Props>(function SceneCa
     };
     frame = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(frame);
-  }, [loading, processing, reduceEffects, reduceMotion]);
+  }, [loading, processing, processingSource, processingLayerId, reduceEffects, reduceMotion]);
 
   useImperativeHandle(ref, () => ({
     exportPng: async () => {

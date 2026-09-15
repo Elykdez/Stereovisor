@@ -1,4 +1,4 @@
-import type { SceneProject, WorkflowPhase } from "../types";
+import type { ProcessingPreview, SceneProject, WorkflowPhase } from "../types";
 import { appLog } from "./logger";
 import { resolveServiceOrigin } from "./serviceOrigin";
 
@@ -7,6 +7,8 @@ export interface ProcessingSession {
   kind: "analyze" | "inpaint" | "refine" | "target-inpaint";
   project: SceneProject | null;
   phase: WorkflowPhase;
+  preview?: ProcessingPreview | null;
+  layerId?: string | null;
 }
 
 function storageKey(): string {
@@ -29,6 +31,13 @@ export function readProcessingSession(): ProcessingSession | null {
       window.localStorage.removeItem(storageKey());
       return null;
     }
+    const preview = session.preview;
+    if (preview && (
+      typeof preview.sourceUrl !== "string" || !preview.sourceUrl.startsWith("data:image/jpeg;base64,") ||
+      !Number.isInteger(preview.width) || preview.width < 1 || preview.width > 1024 ||
+      !Number.isInteger(preview.height) || preview.height < 1 || preview.height > 1024
+    )) session.preview = null;
+    if (session.layerId != null && typeof session.layerId !== "string") session.layerId = null;
     return session;
   } catch (error) {
     appLog.warn("processing.session.read-failed", { error: String(error) });

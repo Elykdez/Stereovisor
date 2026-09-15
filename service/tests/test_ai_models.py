@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 from types import SimpleNamespace
 
 from service.src.ai_models import (
@@ -8,9 +9,11 @@ from service.src.ai_models import (
     release_cuda,
     resolve_device,
 )
+from service.src.pipeline import _release_cuda
 
 
-def test_auto_device_prefers_apple_silicon_mps(monkeypatch) -> None:
+@pytest.mark.parametrize("cleanup", [release_cuda, _release_cuda])
+def test_auto_device_prefers_apple_silicon_mps(monkeypatch, cleanup) -> None:
     from service.src import ai_models
 
     emptied = []
@@ -22,8 +25,29 @@ def test_auto_device_prefers_apple_silicon_mps(monkeypatch) -> None:
     monkeypatch.setattr(ai_models, "DEVICE", "auto")
 
     assert resolve_device(torch) == "mps"
-    release_cuda(torch)
+    cleanup(torch)
     assert emptied == [True]
+
+
+@pytest.mark.parametrize("cleanup", [release_cuda, _release_cuda])
+def test_cuda_cleanup_skips_unavailable_mps(cleanup) -> None:
+    cleaned = []
+
+    def unavailable_mps_cache() -> None:
+        raise RuntimeError("Cannot execute emptyCache() without MPS backend.")
+
+    torch = SimpleNamespace(
+        cuda=SimpleNamespace(
+            is_available=lambda: True,
+            synchronize=lambda: cleaned.append("synchronize"),
+            empty_cache=lambda: cleaned.append("cuda"),
+        ),
+        backends=SimpleNamespace(mps=SimpleNamespace(is_available=lambda: False)),
+        mps=SimpleNamespace(empty_cache=unavailable_mps_cache),
+    )
+
+    cleanup(torch)
+    assert cleaned == ["synchronize", "cuda"]
 
 
 def test_segmentation_density_falls_back_to_balanced() -> None:

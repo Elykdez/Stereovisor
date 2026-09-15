@@ -1,3 +1,4 @@
+import base64
 import io
 import json
 from zipfile import ZipFile
@@ -11,6 +12,7 @@ from service.src import pipeline
 from service.src.app import app
 from service.src.config import BootstrapStatus
 from service.src.jobs import JobCancelled, ProcessingJobStore
+from service.src.schemas import ProcessingJobStart
 from service.src.storage import ProjectStore
 
 client = TestClient(app)
@@ -44,6 +46,42 @@ def _completed_project(response) -> dict:
 
 def _sample_project() -> dict:
     return _completed_project(client.post("/api/jobs/sample"))
+
+
+@pytest.mark.parametrize("sample", [False, True])
+def test_analysis_returns_a_preview_before_the_worker_runs(monkeypatch, sample) -> None:
+    monkeypatch.setattr(service_module, "_require_ready_for_ai_job", lambda: None)
+    operations = []
+
+    def enqueue(kind, operation):
+        operations.append((kind, operation))
+        return ProcessingJobStart(jobId="preview-job")
+
+    monkeypatch.setattr(service_module, "_enqueue_job", enqueue)
+    response = client.post("/api/jobs/sample") if sample else client.post(
+        "/api/jobs/analyze",
+        files={"file": ("source.png", png_bytes(Image.new("RGB", (1800, 1200), "red")), "image/png")},
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["jobId"] == "preview-job"
+    preview = payload["preview"]
+    assert max(preview["width"], preview["height"]) == 1024
+    prefix, pixels = preview["sourceUrl"].split(",", 1)
+    assert prefix == "data:image/jpeg;base64"
+    with Image.open(io.BytesIO(base64.b64decode(pixels))) as image:
+        assert image.size == (preview["width"], preview["height"])
+    assert len(operations) == 1
+    assert operations[0][0] == "analyze"
+
+
+def test_analysis_preview_respects_orientation_without_changing_inference_input() -> None:
+    image = Image.new("RGB", (1800, 1200), "red")
+    image.getexif()[274] = 6
+    preview = service_module._analysis_preview(image)
+    assert (preview.width, preview.height) == (683, 1024)
+    assert image.size == (1800, 1200)
+    assert image.getexif()[274] == 6
 
 
 def _inpaint_project(project_id: str, layer_ids: list[str]) -> dict:

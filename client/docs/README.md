@@ -171,6 +171,22 @@ The app picks a supported system language on first launch, persists the user's
 selector choice, falls back to English for unknown service diagnostics, and
 applies the selected locale to Electron's native file dialogs.
 
+### User manual
+
+The end-user manual is maintained alongside the UI in the same four languages.
+It is prose, not generated output, so `npm run i18n:check` does not cover it:
+when a user-visible label changes, update the manual in every language by hand.
+
+| Language | Manual |
+| --- | --- |
+| English | [`USER-MANUAL.md`](USER-MANUAL.md) |
+| Japanese | [`USER-MANUAL.ja.md`](USER-MANUAL.ja.md) |
+| Korean | [`USER-MANUAL.ko.md`](USER-MANUAL.ko.md) |
+| Simplified Chinese | [`USER-MANUAL.zh-CN.md`](USER-MANUAL.zh-CN.md) |
+
+Each manual quotes the UI labels as that locale renders them, so the strings in
+a manual must match the corresponding column of `src/i18n/translations.csv`.
+
 ## Options And Settings
 
 The header language selector is also in `File > Options...` (`Ctrl+,`), grouped
@@ -206,22 +222,25 @@ disabled, and the preload bridge exposes only narrow typed save-dialog methods.
 Double-click `Build Stereovisor.cmd`, which runs the production build and
 electron-builder to produce both:
 
-- `release/Stereovisor-0.1.0-setup.exe` - installer with a desktop shortcut.
-- `release/Stereovisor-0.1.0-portable.exe` - self-contained portable executable.
+- `release/Stereovisor-1.0.0-setup.exe` - installer with a desktop shortcut.
+- `release/Stereovisor-1.0.0-portable.exe` - portable executable.
 
-The package includes Electron, the local service code, the prepared Python
-environments, and the pinned vendor sources. Model weights in `service/.models`
-are intentionally excluded: they exceed 15 GB and are hardware-dependent. A
-packaged app stores new projects and model downloads under the Windows per-user
-application-data folder; an unpacked portable build placed inside this repository
-can reuse the existing `service/.models` cache. On first packaged launch the
-bundled bootstrap prepares the required core weights automatically, while
-Qwen3-VL and PowerPaint stay opt-in.
+The Windows package includes Electron, the local service code, and setup scripts.
+Python environments, AI libraries, vendor sources, and model weights are fetched
+on first launch. Python comes from the pinned official NuGet package; dependencies
+come from Python/PyTorch package servers and pinned vendor source archives.
+No system Python, Git, or npm installation is required. The preparation screen
+reports progress before the local service starts, and closing the app stops setup.
 
-Prefer the installed shortcut for daily use. The portable executable unpacks its
-bundled runtime on first launch, which can take several minutes before the window
-appears; do not terminate it during extraction. If a launch is force-quit during
-model preparation, the next launch clears the stale marker and resumes safely.
+The runtime is installed under the Windows per-user application-data folder in
+`runtime/`; projects and downloaded models are stored there separately. An
+unpacked build placed inside this repository can reuse `service/.models`.
+Required core weights are prepared automatically; Qwen3-VL and PowerPaint model
+weights stay opt-in.
+
+Prefer the installed shortcut for daily use. Both Windows variants need an
+internet connection and sufficient disk space for the first setup. Later launches
+reuse the downloaded runtime. Interrupted downloads resume on the next launch.
 
 The package is unsigned, so Windows SmartScreen may warn on first run. This is
 expected for a locally built executable.

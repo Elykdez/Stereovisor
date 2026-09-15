@@ -4,6 +4,7 @@
   "private": true,
   "description": "Local-first desktop studio that puts a camera inside a single photograph",
   "author": "Stereovisor",
+  "license": "MIT",
   "main": "client/dist-electron/main.js",
   "scripts": {
     "dev": "concurrently -k -s first \"npm:dev:service\" \"npm:dev:renderer\" \"npm:dev:electron\"",
@@ -102,14 +103,6 @@
           "!release.ps1",
           "!publish.ps1"
         ]
-      },
-      {
-        "from": ".cache/vendor",
-        "to": ".cache/vendor",
-        "filter": [
-          "**/*",
-          "!**/.git{,/**}"
-        ]
       }
     ],
     "win": {
@@ -119,24 +112,7 @@
       ],
       "icon": "client/public/app-icon.png",
       "signAndEditExecutable": false,
-      "signExecutable": false,
-      "extraResources": [
-        {
-          "from": ".venv",
-          "to": ".venv",
-          "filter": ["**/*", "!**/__pycache__{,/**}", "!**/*.pyc"]
-        },
-        {
-          "from": ".venv-ai",
-          "to": ".venv-ai",
-          "filter": ["**/*", "!**/__pycache__{,/**}", "!**/*.pyc"]
-        },
-        {
-          "from": ".venv-powerpaint",
-          "to": ".venv-powerpaint",
-          "filter": ["**/*", "!**/__pycache__{,/**}", "!**/*.pyc"]
-        }
-      ]
+      "signExecutable": false
     },
     "mac": {
       "target": [
@@ -150,6 +126,11 @@
       "entitlementsInherit": "build/entitlements.mac.plist",
       "artifactName": "Stereovisor-${version}-mac-arm64.${ext}",
       "extraResources": [
+        {
+          "from": ".cache/vendor",
+          "to": ".cache/vendor",
+          "filter": ["**/*", "!**/.git{,/**}"]
+        },
         {
           "from": ".python-runtime",
           "to": ".python-runtime",

@@ -192,8 +192,15 @@ class ProjectImportPayload(BaseModel):
     camera: CameraPayload
 
 
+class ProcessingPreview(BaseModel):
+    sourceUrl: str
+    width: int
+    height: int
+
+
 class ProcessingJobStart(BaseModel):
     jobId: str
+    preview: ProcessingPreview | None = None
 
 
 class CapabilityParameter(BaseModel):

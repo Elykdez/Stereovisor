@@ -1,7 +1,6 @@
 /**
- * WebGL2 backend for the mask mosaic. This is the closest thing to the original
- * Poupiu shader: the cell mapping, twinkle, dropout, glitch and sweep all run
- * per fragment, the way "AIP/UI/MosaicEffect" runs them.
+ * WebGL2 backend for the mask mosaic. This is the closest thing to the original shader:
+ * the cell mapping, twinkle, dropout, glitch and sweep all run per fragment.
  *
  * Against the CPU backend in maskMosaic.ts it wins twice over. Cost stops
  * scaling with the cell count, because no JavaScript runs per cell or per
@@ -18,6 +17,7 @@ import type { MosaicShape, MosaicStyle } from "./maskMosaic";
 // The shader stages are ordinary .vert/.frag files. Vite's `?raw` suffix inlines
 // their text at build time, so they stay editable (and highlightable) as GLSL
 // instead of living in a string literal here.
+import { glsl } from "./shaders/glsl";
 import VERTEX_SHADER from "./shaders/maskMosaic.vert?raw";
 import FRAGMENT_SHADER from "./shaders/maskMosaic.frag?raw";
 
@@ -35,7 +35,7 @@ function compile(
 ): WebGLShader | null {
   const shader = gl.createShader(type);
   if (!shader) return null;
-  gl.shaderSource(shader, source);
+  gl.shaderSource(shader, glsl(source));
   gl.compileShader(shader);
   if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
     // A failed stage would otherwise disappear into the CPU fallback, which
@@ -285,7 +285,17 @@ export class GlMaskMosaicRenderer {
     const { gl } = this;
     const texture = gl.createTexture();
     gl.bindTexture(gl.TEXTURE_2D, texture);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, fill);
+    gl.texImage2D(
+      gl.TEXTURE_2D,
+      0,
+      gl.RGBA,
+      1,
+      1,
+      0,
+      gl.RGBA,
+      gl.UNSIGNED_BYTE,
+      fill,
+    );
     // A 1x1 texture still has to be mip complete, or the mipmapped filter below
     // samples black however low the requested LOD is.
     gl.generateMipmap(gl.TEXTURE_2D);
@@ -327,7 +337,17 @@ export class GlMaskMosaicRenderer {
   ): void {
     const { gl } = this;
     gl.bindTexture(gl.TEXTURE_2D, texture);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+    gl.texImage2D(
+      gl.TEXTURE_2D,
+      0,
+      gl.RGBA,
+      width,
+      height,
+      0,
+      gl.RGBA,
+      gl.UNSIGNED_BYTE,
+      pixels,
+    );
     gl.generateMipmap(gl.TEXTURE_2D);
   }
 

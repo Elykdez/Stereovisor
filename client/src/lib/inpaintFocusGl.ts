@@ -1,5 +1,6 @@
 import { appLog } from "./logger";
 import type { FocusAnimation } from "./inpaintFocus";
+import { glsl } from "./shaders/glsl";
 import VERTEX_SHADER from "./shaders/inpaintFocus.vert?raw";
 import FRAGMENT_SHADER from "./shaders/inpaintFocus.frag?raw";
 
@@ -27,7 +28,7 @@ export class GlInpaintFocusRenderer {
         const shader = gl.createShader(type);
         if (!shader) throw new Error("Could not allocate a focus shader.");
         shaders.push(shader);
-        gl.shaderSource(shader, source);
+        gl.shaderSource(shader, glsl(source));
         gl.compileShader(shader);
         if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(shader) ?? "Focus shader compilation failed.");
         gl.attachShader(program, shader);

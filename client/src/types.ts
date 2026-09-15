@@ -71,6 +71,12 @@ export interface SceneLayer {
   scale?: number;
 }
 
+export interface ProcessingPreview {
+  sourceUrl: string;
+  width: number;
+  height: number;
+}
+
 export interface SceneProject {
   id: string;
   width: number;
