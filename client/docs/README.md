@@ -171,6 +171,22 @@ The app picks a supported system language on first launch, persists the user's
 selector choice, falls back to English for unknown service diagnostics, and
 applies the selected locale to Electron's native file dialogs.
 
+### User manual
+
+The end-user manual is maintained alongside the UI in the same four languages.
+It is prose, not generated output, so `npm run i18n:check` does not cover it:
+when a user-visible label changes, update the manual in every language by hand.
+
+| Language | Manual |
+| --- | --- |
+| English | [`USER-MANUAL.md`](USER-MANUAL.md) |
+| Japanese | [`USER-MANUAL.ja.md`](USER-MANUAL.ja.md) |
+| Korean | [`USER-MANUAL.ko.md`](USER-MANUAL.ko.md) |
+| Simplified Chinese | [`USER-MANUAL.zh-CN.md`](USER-MANUAL.zh-CN.md) |
+
+Each manual quotes the UI labels as that locale renders them, so the strings in
+a manual must match the corresponding column of `src/i18n/translations.csv`.
+
 ## Options And Settings
 
 The header language selector is also in `File > Options...` (`Ctrl+,`), grouped
