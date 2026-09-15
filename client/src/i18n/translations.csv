@@ -52,7 +52,7 @@ settings.defaultZoomHelp,Initial camera zoom from 1.00 to 1.35.,初期カメラ�
 settings.defaultStrength,Default strength,既定の強度,기본 강도,默认强度
 settings.defaultStrengthHelp,Initial parallax strength from 0 to 100.,初期パララックス強度は 0 から 100 です。,초기 패럴랙스 강도는 0에서 100입니다.,初始视差强度范围为 0 至 100。
 settings.motionSpeed,Motion speed,モーション速度,모션 속도,运动速度
-settings.motionSpeedHelp,Speed multiplier for automatic preview and demo video motion.,自動プレビューとデモ動画のカメラモーション速度倍率。,자동 미리보기 및 데모 비디오 모션의 속도 배율입니다.,自动预览和演示视频运动的速度倍数。
+settings.motionSpeedHelp,Speed multiplier for automatic preview and exported video motion.,自動プレビューと書き出し動画のカメラモーション速度倍率。,자동 미리보기 및 내보낸 비디오 모션의 속도 배율입니다.,自动预览和导出视频运动的速度倍数。
 settings.horizontalAmount,Horizontal amount,水平振幅,가로 범위,水平幅度
 settings.verticalAmount,Vertical amount,垂直振幅,세로 범위,垂直幅度
 settings.advanced,Advanced,詳細設定,고급,高级
@@ -104,7 +104,7 @@ startup.provider.depth,Depth model,深度モデル,깊이 모델,深度模型
 startup.provider.inpainting,Inpainting model,インペイントモデル,인페인팅 모델,修复模型
 about.close,Close,閉じる,닫기,关闭
 about.repository,Designed by Elykdez,デザイン: Elykdez,Elykdez 디자인,由 Elykdez 设计
-brand.tagline,A camera in your photo,写真の中のカメラ,사진 속 카메라,照片里的相机
+brand.tagline,A camera gives it depth.,写真に奥行きを与える。,사진에 깊이를 더합니다.,赋予照片纵深感。
 file.importing,Importing...,読み込み中...,가져오는 중...,正在导入...
 file.importProject,Import project,プロジェクトを読み込む,프로젝트 가져오기,导入项目
 file.resetProject,Reset,リセット,초기화,重置
@@ -114,11 +114,11 @@ file.projectFile,Export,エクスポート,내보내기,导出
 file.projectFileTitle,Export the editable project package,編集可能なプロジェクトパッケージを書き出します,편집 가능한 프로젝트 패키지를 내보냅니다,导出可编辑的项目包
 file.projectFileInput,Choose project file,プロジェクトファイルを選択,프로젝트 파일 선택,选择项目文件
 file.rendering,Rendering...,レンダリング中...,렌더링 중...,正在渲染...
-file.demoVideo,Demo,デモ,데모,演示
-file.demoVideoTitle,Render a parallax demo video,パララックスのデモ動画をレンダリングします,패럴랙스 데모 영상을 렌더링합니다,渲染视差演示视频
-file.pngTitle,Save the current frame as a PNG image,現在のフレームを PNG 画像として保存します,현재 프레임을 PNG 이미지로 저장합니다,将当前帧保存为 PNG 图像
+file.demoVideo,Render,レンダリング,렌더링,渲染
+file.demoVideoTitle,Render a parallax video,パララックス動画をレンダリングします,패럴랙스 비디오를 렌더링합니다,渲染视差视频
+file.pngTitle,Capture the current frame as a PNG image,現在のフレームを PNG 画像としてキャプチャします,현재 프레임을 PNG 이미지로 캡처합니다,将当前帧截取为 PNG 图像
 file.saving,Saving...,保存中...,저장 중...,正在保存...
-file.png,PNG,PNG,PNG,PNG
+file.png,Capture,キャプチャ,캡처,截图
 engine.localAI,Local AI,ローカル AI,로컬 AI,本地 AI
 engine.preview,Preview engine,プレビューエンジン,미리보기 엔진,预览引擎
 source.title,Source,ソース,소스,源图像
@@ -328,7 +328,7 @@ layers.confirm,Confirm,確定,확인,确认
 camera.controls,Camera controls,カメラコントロール,카메라 컨트롤,相机控件
 camera.title,Camera,カメラ,카메라,相机
 camera.rig,Parallax rig,パララックスリグ,패럴랙스 리그,视差相机架
-camera.exportMotionHint,Demo exports use this rig and the motion settings in Options > Camera.,デモの書き出しではこのリグと「オプション > カメラ」のモーション設定を使用します。,데모 내보내기는 이 리그와 옵션 > 카메라의 모션 설정을 사용합니다.,演示导出使用此相机架以及“选项 > 相机”中的运动设置。
+camera.exportMotionHint,Video exports use this rig and the motion settings in Options > Camera.,動画の書き出しではこのリグと「オプション > カメラ」のモーション設定を使用します。,비디오 내보내기는 이 리그와 옵션 > 카메라의 모션 설정을 사용합니다.,视频导出使用此相机架以及“选项 > 相机”中的运动设置。
 camera.reset,Reset,リセット,초기화,重置
 camera.viewGroup,View,視点,보기,视图
 camera.depthGroup,Scene depth,シーンの奥行き,장면 깊이,场景深度
@@ -443,9 +443,9 @@ error.canvasNotReady,The scene canvas is not ready.,シーンキャンバスの�
 error.confirmReset,Discard the current editor state and return to the image upload screen?,現在の編集状態を破棄して画像アップロード画面に戻りますか？,현재 편집 상태를 버리고 이미지 업로드 화면으로 돌아가시겠습니까?,要放弃当前编辑状态并返回图像上传界面吗？
 error.loadAsset,Could not load {{source}},{{source}} を読み込めませんでした,{{source}}을(를) 불러오지 못했습니다,无法加载 {{source}}
 error.loadAssets,Could not load scene assets.,シーンアセットを読み込めませんでした。,장면 에셋을 불러오지 못했습니다.,无法加载场景资源。
-error.videoUnsupported,This runtime cannot encode demo video.,このランタイムではデモ動画をエンコードできません。,이 런타임에서는 데모 동영상을 인코딩할 수 없습니다.,此运行环境无法编码演示视频。
+error.videoUnsupported,This runtime cannot encode video.,このランタイムでは動画をエンコードできません。,이 런타임에서는 비디오를 인코딩할 수 없습니다.,此运行环境无法编码视频。
 error.videoFormatUnsupported,This runtime has no supported MP4 or WebM encoder.,このランタイムには対応する MP4 または WebM エンコーダーがありません。,이 런타임에는 지원되는 MP4 또는 WebM 인코더가 없습니다.,此运行环境没有受支持的 MP4 或 WebM 编码器。
-error.videoEncoding,Demo video encoding failed.,デモ動画のエンコードに失敗しました。,데모 동영상 인코딩에 실패했습니다.,演示视频编码失败。
+error.videoEncoding,Video encoding failed.,動画のエンコードに失敗しました。,비디오 인코딩에 실패했습니다.,视频编码失败。
 error.videoAssetsNotReady,The scene images are not ready for video export.,動画を書き出すためのシーン画像が準備できていません。,동영상 내보내기에 필요한 장면 이미지가 준비되지 않았습니다.,场景图像尚未准备好，无法导出视频。
 error.videoEmpty,The video encoder produced an empty file.,動画エンコーダーが空のファイルを生成しました。,동영상 인코더가 빈 파일을 만들었습니다.,视频编码器生成了空文件。
 error.pngExport,PNG export failed.,PNG の書き出しに失敗しました。,PNG 내보내기에 실패했습니다.,PNG 导出失败。

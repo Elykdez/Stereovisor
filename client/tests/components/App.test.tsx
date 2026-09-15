@@ -228,7 +228,7 @@ describe("App processing status", () => {
     expect(toggle).not.toBeChecked();
     fireEvent.click(toggle);
     const rendered = () => vi.mocked(SceneCanvas).mock.calls.at(-1)![0];
-    expect(rendered().camera.inverseDepth).toBe(true);
+    expect(rendered().camera).toEqual(expect.objectContaining({ x: 0, y: 0, inverseDepth: true }));
     expect(rendered().project.layers).toEqual(project.layers);
     fireEvent.click(view.getByRole("button", { name: "Inpaint holes" }));
     expect(view.getByRole("checkbox", { name: "Inverse depth" })).toBeChecked();
@@ -237,7 +237,7 @@ describe("App processing status", () => {
     expect(view.getAllByRole("checkbox", { name: "Inverse depth" })).toHaveLength(1);
     expect(view.getByRole("checkbox", { name: "Inverse depth" })).toBeChecked();
     expect(view.getByRole("checkbox", { name: "Inverse depth" })).toBeEnabled();
-    expect(rendered().camera.inverseDepth).toBe(true);
+    expect(rendered().camera).toEqual(expect.objectContaining({ x: 0, y: 0, inverseDepth: true }));
     expect(view.container.querySelector(".layers-panel .panel-note"))
       .toHaveTextContent("Near layers move less. Distant layers and the background move more.");
 
@@ -252,6 +252,26 @@ describe("App processing status", () => {
     fireEvent.click(within(view.getByRole("region", { name: "Camera controls" })).getByRole("button", { name: "Reset" }));
     expect(view.getByRole("checkbox", { name: "Inverse depth" })).not.toBeChecked();
     expect(rendered().project.layers).toEqual(project.layers);
+  });
+
+  it("shows Capture before Render and makes Render the primary action", async () => {
+    vi.mocked(inpaintProject).mockResolvedValue({ ...project, backgroundUrl: "/background.png" });
+    const view = render(<App />);
+    await waitFor(() => expect(view.getByRole("button", { name: "Use sample scene" })).toBeEnabled());
+    fireEvent.click(view.getByRole("button", { name: "Use sample scene" }));
+    await waitFor(() => expect(view.getByRole("button", { name: "Inpaint holes" })).toBeEnabled());
+    fireEvent.click(view.getByRole("button", { name: "Inpaint holes" }));
+
+    const videoButton = await view.findByRole("button", { name: "Render" });
+    const actions = within(videoButton.closest(".stage-actions")!);
+    expect(actions.getAllByRole("button").map((button) => button.textContent)).toEqual([
+      "Reset",
+      "Export",
+      "Capture",
+      "Render",
+    ]);
+    expect(actions.getByRole("button", { name: "Capture" })).toHaveClass("secondary-button");
+    expect(videoButton).toHaveClass("primary-button");
   });
 
   it("shows one generation status and locks layer editing until inpainting finishes", async () => {

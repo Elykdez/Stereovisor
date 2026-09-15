@@ -83,7 +83,7 @@
           h("span", { className: "eyebrow" }, phase === "selecting" ? "Layer proposals" : "Scene stack"),
           h("h2", null, "2 foreground layers"))),
         h(LayerInspector, { layers, phase, inverseDepth: camera.inverseDepth,
-          onInverseDepthChange: inverseDepth => { setMoving(false); setCamera(current => ({ ...current, inverseDepth })); },
+          onInverseDepthChange: inverseDepth => { setMoving(false); setCamera(current => ({ ...current, x: 0, y: 0, inverseDepth })); },
           editingLayerId: null, refiningLayerId: null, confirmingLayerId: null, backgroundUrl: currentProject.backgroundUrl,
           inpaintingTargetId: null, focusedTargetId: null, layerInpaintAvailable: false,
           maskHistory: {}, maskHistoryBusy: null, selectedLayerIds: [], mergeHistory: null, mergeHistoryBusy: null,
