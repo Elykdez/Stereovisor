@@ -65,7 +65,16 @@ if (action === "service") {
     ? powershell(path.join(root, "scripts", "smoke-test.ps1"), forwarded)
     : {
         command: process.execPath,
-        args: [path.join(root, "scripts", "smoke-test-macos.mjs"), ...forwarded],
+        args: [
+          path.join(
+            root,
+            "scripts",
+            process.platform === "darwin"
+              ? "smoke-test-macos.mjs"
+              : "smoke-test-linux.mjs",
+          ),
+          ...forwarded,
+        ],
       };
 } else {
   console.error(`Unknown platform action: ${action || "<missing>"}`);

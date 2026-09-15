@@ -1,5 +1,13 @@
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+} from "node:fs";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -7,20 +15,17 @@ import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const packaged = process.argv.includes("--packaged");
-const smokeMode = process.env.STEREOVISOR_SMOKE_MODE || (packaged ? "ai" : "preview");
 const serviceVersion = JSON.parse(readFileSync(path.join(root, "versions.json"), "utf8")).service;
-const temporaryRoot = mkdtempSync(path.join(os.tmpdir(), "stereovisor-macos-smoke-"));
+const temporaryRoot = mkdtempSync(path.join(os.tmpdir(), "stereovisor-linux-smoke-"));
 const projectsRoot = path.join(temporaryRoot, "projects");
-const modelsRoot = packaged
-  ? path.join(root, "service", ".models")
-  : path.join(temporaryRoot, "models");
+const modelsRoot = path.join(temporaryRoot, "models");
 const userDataRoot = path.join(temporaryRoot, "user-data");
 const children = [];
 let output = "";
 
-mkdirSync(projectsRoot, { recursive: true });
-mkdirSync(modelsRoot, { recursive: true });
-mkdirSync(userDataRoot, { recursive: true });
+for (const directory of [projectsRoot, modelsRoot, userDataRoot]) {
+  mkdirSync(directory, { recursive: true });
+}
 
 function run(command, args, label, options = {}) {
   const result = spawnSync(command, args, { cwd: root, encoding: "utf8", ...options });
@@ -112,30 +117,26 @@ async function runSample(origin) {
 
 function packagedArtifacts() {
   const releaseRoot = path.join(root, "release");
-  const appCandidates = [
-    path.join(releaseRoot, "mac-arm64", "Stereovisor.app"),
-    path.join(releaseRoot, "mac", "Stereovisor.app"),
-  ];
-  const appBundle = appCandidates.find(existsSync);
-  if (!appBundle) throw new Error("The packaged Stereovisor.app was not found.");
+  const unpackedRoot = path.join(releaseRoot, "linux-unpacked");
+  const executable = path.join(unpackedRoot, "stereovisor");
+  if (!existsSync(executable)) throw new Error("The packaged Linux executable was not found.");
   const files = readdirSync(releaseRoot);
-  const dmg = files.find((name) => name.endsWith("-mac-arm64.dmg"));
-  const zip = files.find((name) => name.endsWith("-mac-arm64.zip"));
-  if (!dmg || !zip) throw new Error("The macOS DMG and ZIP artifacts were not both found.");
+  const appImage = files.find((name) => name.endsWith("-linux-x64.AppImage"));
+  const deb = files.find((name) => name.endsWith("-linux-x64.deb"));
+  if (!appImage || !deb) throw new Error("The Linux AppImage and deb artifacts were not both found.");
   return {
-    appBundle,
-    executable: path.join(appBundle, "Contents", "MacOS", "Stereovisor"),
-    runtimePython: path.join(appBundle, "Contents", "Resources", ".python-runtime", "bin", "python3"),
-    powerpaintPackages: path.join(appBundle, "Contents", "Resources", ".python-runtime", "powerpaint-site-packages"),
-    powerpaintVendor: path.join(appBundle, "Contents", "Resources", ".cache", "vendor", "PowerPaint"),
-    dmg: path.join(releaseRoot, dmg),
-    zip: path.join(releaseRoot, zip),
+    executable,
+    runtimePython: path.join(unpackedRoot, "resources", ".python-runtime", "bin", "python3"),
+    powerpaintPackages: path.join(unpackedRoot, "resources", ".python-runtime", "powerpaint-site-packages"),
+    powerpaintVendor: path.join(unpackedRoot, "resources", ".cache", "vendor", "PowerPaint"),
+    appImage: path.join(releaseRoot, appImage),
+    deb: path.join(releaseRoot, deb),
   };
 }
 
 async function main() {
-  if (process.platform !== "darwin" || process.arch !== "arm64") {
-    throw new Error("The macOS smoke test supports Apple Silicon only.");
+  if (process.platform !== "linux" || process.arch !== "x64") {
+    throw new Error("The Linux smoke test supports x64 only.");
   }
 
   const port = await availablePort();
@@ -143,27 +144,28 @@ async function main() {
   const env = { ...process.env };
   delete env.ELECTRON_RUN_AS_NODE;
   Object.assign(env, {
-    STEREOVISOR_MODE: smokeMode,
-    STEREOVISOR_DEVICE: "mps",
+    STEREOVISOR_MODE: "preview",
+    STEREOVISOR_DEVICE: "auto",
     STEREOVISOR_PROJECT_ROOT: projectsRoot,
     STEREOVISOR_MODEL_ROOT: modelsRoot,
     STEREOVISOR_SERVICE_PORT: String(port),
-    PYTORCH_ENABLE_MPS_FALLBACK: "1",
     PYTHONDONTWRITEBYTECODE: "1",
   });
 
   let electronProcess;
-  let packagedApp;
   if (packaged) {
     const artifacts = packagedArtifacts();
-    packagedApp = artifacts.appBundle;
     const binaryInfo = run("file", [artifacts.executable], "Architecture check");
-    if (!binaryInfo.includes("arm64") || binaryInfo.includes("x86_64")) {
-      throw new Error(`The packaged executable is not arm64-only: ${binaryInfo}`);
+    if (!binaryInfo.includes("x86-64") || binaryInfo.includes("ARM aarch64")) {
+      throw new Error(`The packaged executable is not x64-only: ${binaryInfo}`);
     }
-    run("codesign", ["--verify", "--deep", "--strict", artifacts.appBundle], "Code signature check");
-    run("hdiutil", ["verify", artifacts.dmg], "DMG verification");
-    run("unzip", ["-tq", artifacts.zip], "ZIP verification");
+    run("dpkg-deb", ["--info", artifacts.deb], "deb verification");
+    chmodSync(artifacts.appImage, 0o755);
+    const extractionRoot = path.join(temporaryRoot, "appimage");
+    mkdirSync(extractionRoot);
+    run(artifacts.appImage, ["--appimage-extract"], "AppImage verification", {
+      cwd: extractionRoot,
+    });
     const powerpaintInfo = run(
       artifacts.runtimePython,
       [
@@ -177,45 +179,30 @@ async function main() {
     if (!powerpaintInfo.includes("0.27.0 CPU fallback")) {
       throw new Error(`Unexpected PowerPaint runtime: ${powerpaintInfo}`);
     }
-    electronProcess = start(
-      artifacts.executable,
-      [`--user-data-dir=${userDataRoot}`],
-      env,
-    );
+    const electronArgs = [`--user-data-dir=${userDataRoot}`];
+    if (process.env.CI) electronArgs.push("--no-sandbox");
+    electronProcess = start(artifacts.executable, electronArgs, env);
   } else {
     run("sh", [path.join(root, "scripts", "setup-core.sh")], "Core setup");
     const python = path.join(root, ".venv", "bin", "python");
-    const electron = path.join(
-      root,
-      "node_modules",
-      "electron",
-      "dist",
-      "Electron.app",
-      "Contents",
-      "MacOS",
-      "Electron",
-    );
+    const electron = path.join(root, "node_modules", "electron", "dist", "electron");
     env.STEREOVISOR_APP_ROOT = root;
     env.STEREOVISOR_PYTHON = python;
     start(python, [path.join(root, "service", "scripts", "run-service.py")], env);
     start("npm", ["run", "dev:renderer"], env);
     await waitForDocument("http://127.0.0.1:5173/");
     env.VITE_DEV_SERVER_URL = "http://127.0.0.1:5173";
-    electronProcess = start(electron, [root, `--user-data-dir=${userDataRoot}`], env);
+    const electronArgs = [root, `--user-data-dir=${userDataRoot}`];
+    if (process.env.CI) electronArgs.push("--no-sandbox");
+    electronProcess = start(electron, electronArgs, env);
   }
 
   const health = await waitForJson(`${origin}/api/health`);
-  const expectedEngine = smokeMode === "ai" ? "ai" : "preview";
   if (
     health.status !== "ok" ||
     health.version !== serviceVersion ||
-    health.activeEngine !== expectedEngine ||
-    (packaged && smokeMode === "ai" && (
-      health.device !== "mps" ||
-      health.startupState !== "ready" ||
-      health.providers?.refinement?.available !== true ||
-      !health.providers?.refinement?.warning?.includes("PowerPaint will load and run on CPU")
-    ))
+    health.activeEngine !== "preview" ||
+    health.device !== "cpu"
   ) {
     throw new Error(`Unexpected service health: ${JSON.stringify(health)}`);
   }
@@ -224,13 +211,10 @@ async function main() {
   if (electronProcess.exitCode !== null) {
     throw new Error(`Electron exited during the smoke test with ${electronProcess.exitCode}.`);
   }
-  if (packagedApp) {
-    run("codesign", ["--verify", "--deep", "--strict", packagedApp], "Post-launch code signature check");
-  }
   console.log(
     packaged
-      ? `Packaged Apple Silicon app smoke test passed (arm64, persistent signature, DMG, ZIP, Electron, ${expectedEngine} service, PowerPaint CPU fallback, and sample workflow).`
-      : "Apple Silicon development smoke test passed (renderer, Electron, service, and sample workflow).",
+      ? "Packaged x64 Linux app smoke test passed (ELF, AppImage, deb, Electron, CPU service, PowerPaint CPU fallback, and sample workflow)."
+      : "x64 Linux development smoke test passed (renderer, Electron, service, and sample workflow).",
   );
 }
 

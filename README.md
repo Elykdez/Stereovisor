@@ -38,9 +38,11 @@ This app finds the objects in the frame, cuts them out, works out how far away e
 
 **Apple Silicon macOS** - double-click `Run Stereovisor.command`.
 
+**x64 Linux** - run `./Run\ Stereovisor.sh`, or download the AppImage and mark it executable.
+
 - The first launch shows a preparation screen while it installs the local AI runtime and downloads model weights. Later launches go straight to the editor.
 
-- Just looking around? `Run Stereovisor Preview.cmd` / `.command` starts a lightweight sample-only engine that downloads no weights at all.
+- Just looking around? The platform preview launcher starts a lightweight sample-only engine that downloads no weights at all.
 
 ## Architecture
 
@@ -62,4 +64,3 @@ Code license: [MIT](LICENSE)
 (Yes, I made the entire project to demonstrate some shaders, and to show the concept.)
 
 The models the app downloads on first launch are licensed separately by their authors; check each one in Technical References before redistributing or building a product on it. Every model and its source is listed in [Technical References](docs/DESIGN.md#9-technical-references).
-

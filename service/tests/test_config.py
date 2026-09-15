@@ -13,6 +13,9 @@ def test_managed_python_path_is_native_to_each_platform(tmp_path: Path) -> None:
     assert managed_python_path(tmp_path, ".venv-ai", "darwin") == (
         tmp_path / ".venv-ai" / "bin" / "python"
     )
+    assert managed_python_path(tmp_path, ".venv-ai", "linux") == (
+        tmp_path / ".venv-ai" / "bin" / "python"
+    )
     assert managed_python_path(tmp_path, ".venv-ai", "win32") == (
         tmp_path / ".venv-ai" / "Scripts" / "python.exe"
     )
