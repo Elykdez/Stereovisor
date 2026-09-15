@@ -1,0 +1,200 @@
+# Build, package, and release Stereovisor on its supported desktop platforms.
+
+name: CI/CD
+
+env:
+  NODE_VERSION: "22"
+  PYTHON_VERSION: "3.12"
+  NAME: "Stereovisor"
+  PIP_NO_CACHE_DIR: "1"
+
+on:
+  push:
+    branches: [main, dev]
+    tags:
+      - "v*"
+      - "client-v*"
+      - "service-v*"
+  pull_request:
+    branches: [main, dev]
+  workflow_dispatch:
+    inputs:
+      package_platform:
+        description: "Build and smoke-test release artifacts without publishing"
+        required: true
+        default: "none"
+        type: choice
+        options:
+          - none
+          - all
+          - windows
+          - macos
+          - linux
+
+jobs:
+  client:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - run: npm ci
+      - run: npm run version:check
+      - run: npm run i18n:check
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+
+  service:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - run: pip install -r service/requirements-core.txt
+      - run: python -m pytest service/tests
+        env:
+          STEREOVISOR_MODE: preview
+
+  package-windows:
+    if: startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/client-v') || (github.event_name == 'workflow_dispatch' && (inputs.package_platform == 'all' || inputs.package_platform == 'windows'))
+    needs: [client, service]
+    runs-on: windows-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - name: Verify tagged version
+        if: startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/client-v')
+        shell: pwsh
+        run: |
+          $versions = Get-Content versions.json -Raw | ConvertFrom-Json
+          $tagged = "${{ github.ref_name }}" -replace "^(client-)?v", ""
+          if ($versions.client -ne $tagged) {
+            throw "Tag ${{ github.ref_name }} does not match client version $($versions.client)."
+          }
+      - run: npm ci
+      - run: npm run package:win
+      - uses: actions/upload-artifact@v5
+        with:
+          name: ${{ env.NAME }}-windows-x64
+          path: |
+            release/${{ env.NAME }}-*-setup.exe
+            release/${{ env.NAME }}-*-portable.exe
+          if-no-files-found: error
+          overwrite: true
+
+  package-macos:
+    if: startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/client-v') || (github.event_name == 'workflow_dispatch' && (inputs.package_platform == 'all' || inputs.package_platform == 'macos'))
+    needs: [client, service]
+    runs-on: macos-15
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Verify Apple Silicon runner
+        run: test "$(uname -m)" = arm64
+      - name: Verify tagged version
+        if: startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/client-v')
+        run: |
+          TAG_VERSION=${GITHUB_REF_NAME#client-}
+          test "${TAG_VERSION#v}" = "$(node -p "require('./versions.json').client")"
+      - run: npm ci
+      - run: npm run package:mac
+      - run: npm run smoke:package:mac
+        env:
+          STEREOVISOR_SMOKE_MODE: preview
+      - uses: actions/upload-artifact@v5
+        with:
+          name: ${{ env.NAME }}-mac-arm64
+          path: |
+            release/${{ env.NAME }}-*-mac-arm64.dmg
+            release/${{ env.NAME }}-*-mac-arm64.zip
+          if-no-files-found: error
+          overwrite: true
+
+  package-linux:
+    if: github.ref == 'refs/heads/dev' || startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/client-v') || (github.event_name == 'workflow_dispatch' && (inputs.package_platform == 'all' || inputs.package_platform == 'linux'))
+    needs: [client, service]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Install desktop test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y file libasound2t64 libgbm1 libgtk-3-0 libnss3 xvfb
+      - name: Verify tagged version
+        if: startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/client-v')
+        run: |
+          TAG_VERSION=${GITHUB_REF_NAME#client-}
+          test "${TAG_VERSION#v}" = "$(node -p "require('./versions.json').client")"
+      - run: npm ci
+      - run: npm run package:linux
+      - run: xvfb-run -a npm run smoke:package:linux
+      - uses: actions/upload-artifact@v5
+        with:
+          name: ${{ env.NAME }}-linux-x64
+          path: |
+            release/${{ env.NAME }}-*-linux-x64.AppImage
+            release/${{ env.NAME }}-*-linux-x64.deb
+          if-no-files-found: error
+          overwrite: true
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/client-v')
+    needs: [package-windows, package-macos, package-linux]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v5
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Resolve versions
+        id: version
+        run: |
+          echo "client=$(node -p "require('./versions.json').client")" >> "$GITHUB_OUTPUT"
+          echo "service=$(node -p "require('./versions.json').service")" >> "$GITHUB_OUTPUT"
+      - name: Create release
+        uses: softprops/action-gh-release@v3
+        with:
+          name: ${{ env.NAME }} ${{ steps.version.outputs.client }}
+          body: |
+            Client ${{ steps.version.outputs.client }}, service ${{ steps.version.outputs.service }}.
+
+            Windows x64, Apple Silicon macOS, and Linux x64 release.
+
+            Model weights download on first launch. Windows downloads its Python
+            runtime on first launch; macOS and Linux include their Python runtime.
+            The Linux release uses CPU inference by default.
+          fail_on_unmatched_files: true
+          files: |
+            artifacts/${{ env.NAME }}-*-setup.exe
+            artifacts/${{ env.NAME }}-*-portable.exe
+            artifacts/${{ env.NAME }}-*-mac-arm64.dmg
+            artifacts/${{ env.NAME }}-*-mac-arm64.zip
+            artifacts/${{ env.NAME }}-*-linux-x64.AppImage
+            artifacts/${{ env.NAME }}-*-linux-x64.deb

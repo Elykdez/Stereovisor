@@ -17,6 +17,9 @@ detail see [`client/docs/README.md`](README.md) and
 **Apple Silicon macOS** - double-click `Run Stereovisor.command`, or open the
 `.dmg` and drag the app to Applications.
 
+**x64 Linux** - run `./Run\ Stereovisor.sh`, install the `.deb`, or mark the
+AppImage executable and launch it.
+
 The first launch shows the **Local AI startup** screen while the local AI runtime
 is prepared and model weights are downloaded. Five providers report readiness:
 
@@ -32,7 +35,7 @@ Each reports **Ready**, **Needs setup**, or **Unavailable**. The editor unlocks
 when the required providers are ready. Keep the window open; the first download
 can take several minutes and later launches go straight to the editor.
 
-Just looking around? `Run Stereovisor Preview.cmd` / `.command` starts the
+Just looking around? `Run Stereovisor Preview.cmd` / `.command` / `.sh` starts the
 **Preview engine**, a sample-only mode that downloads no weights and does no AI
 work. The header badge always says which engine is running: **Local AI** or
 **Preview engine**.
@@ -44,6 +47,10 @@ connection and enough free disk space for that first setup, later launches reuse
 what was downloaded, and an interrupted download resumes on the next launch.
 Closing the app stops setup. The build is unsigned, so Windows SmartScreen may
 warn on first run.
+
+The macOS and Linux packages include their Python runtime and AI libraries;
+model weights still download on first launch. Linux release builds use CPU
+inference by default and warn that PowerPaint cannot use GPU when CUDA is absent.
 
 ## 2. The Window
 

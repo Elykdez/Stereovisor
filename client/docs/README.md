@@ -252,8 +252,8 @@ Silicon Mac. The build downloads and checksum-verifies a pinned relocatable
 Python 3.12 runtime into `.python-runtime`, installs the service, AI, and
 isolated PowerPaint dependencies into it, and creates:
 
-- `release/Stereovisor-0.1.0-mac-arm64.dmg`
-- `release/Stereovisor-0.1.0-mac-arm64.zip`
+- `release/Stereovisor-<version>-mac-arm64.dmg`
+- `release/Stereovisor-<version>-mac-arm64.zip`
 
 Only arm64 Electron, Python, and native dependencies are included; Intel and
 universal builds are intentionally excluded. Model weights still download to the
@@ -267,11 +267,33 @@ Validate the built app, archive structure, bundled service, and sample workflow:
 npm run smoke:package:mac
 ```
 
+### Linux
+
+Run `./Build\ Stereovisor.sh` or `npm run package` on x64 Linux. The build
+checksum-verifies a pinned relocatable Python 3.12 runtime, installs CPU PyTorch
+and the isolated PowerPaint dependencies, and creates:
+
+- `release/Stereovisor-<version>-linux-x64.AppImage`
+- `release/Stereovisor-<version>-linux-x64.deb`
+
+The AppImage is portable after `chmod +x`; the deb integrates with Debian and
+Ubuntu desktops. Model weights download to the per-user application-data folder
+on first launch. Linux inference uses CPU by default. Source builds can select a
+compatible PyTorch CUDA wheel index with `STEREOVISOR_TORCH_INDEX_URL` before
+running setup.
+
+Validate both archives, the bundled Python/PowerPaint runtime, Electron, the
+local service, and the sample workflow under an X server:
+
+```bash
+xvfb-run -a npm run smoke:package:linux
+```
+
 ## Smoke Tests
 
-`npm run smoke` runs an isolated launch smoke test against the project-managed
-`.venv-ai` CUDA runtime and existing model cache, using temporary project and
-Electron user-data folders so saved projects and settings are untouched.
+`npm run smoke` runs an isolated platform-native launch smoke test using
+temporary project, model, and Electron user-data folders so saved projects and
+settings are untouched.
 
 `npm run smoke -- -Preview` exercises a completely empty model folder and the
 locked first-launch screen, drives a bootstrap status through the launcher

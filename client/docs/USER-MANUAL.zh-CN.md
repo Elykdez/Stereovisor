@@ -16,6 +16,9 @@ Stereovisor 把一张照片变成可用相机穿行的分层 2.5D 场景，全�
 **Apple Silicon macOS** - 双击 `Run Stereovisor.command`，或打开 `.dmg` 并把应用
 拖到"应用程序"。
 
+**x64 Linux** - 运行 `./Run\ Stereovisor.sh`、安装 `.deb`，或为 AppImage 添加可执行
+权限后启动。
+
 首次启动会显示**本地 AI 启动**界面，期间准备本地 AI 运行时并下载模型权重。五个
 提供程序会各自报告就绪状态：
 
@@ -30,7 +33,7 @@ Stereovisor 把一张照片变成可用相机穿行的分层 2.5D 场景，全�
 每项显示**已就绪**、**需要设置**或**不可用**。所需提供程序就绪后编辑器解锁。请保持
 窗口打开；首次下载可能需要几分钟，之后的启动会直接进入编辑器。
 
-只想先看看？`Run Stereovisor Preview.cmd` / `.command` 会启动**预览引擎**：仅示例
+只想先看看？`Run Stereovisor Preview.cmd` / `.command` / `.sh` 会启动**预览引擎**：仅示例
 模式，不下载任何权重，也不执行 AI 处理。顶部徽标始终标明当前引擎是**本地 AI** 还是
 **预览引擎**。
 
@@ -39,6 +42,9 @@ Stereovisor 把一张照片变成可用相机穿行的分层 2.5D 场景，全�
 安装时都需要联网并留有足够磁盘空间，之后的启动会复用已下载的内容，中断的下载会在下次
 启动时续传。关闭应用即会停止安装。该构建未签名，因此 Windows SmartScreen 首次运行时
 可能发出警告。
+
+macOS 与 Linux 安装包已包含 Python 运行时和 AI 库，模型权重仍会在首次启动时下载。
+Linux 发行版默认使用 CPU 推理；没有 CUDA 时会提示 PowerPaint 无法使用 GPU。
 
 ## 2. 界面布局
 

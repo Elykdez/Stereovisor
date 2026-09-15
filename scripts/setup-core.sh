@@ -3,11 +3,17 @@ set -eu
 
 project_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 venv_path="$project_root/.venv"
+system_name=$(uname -s)
+machine_name=$(uname -m)
 
-if [ "$(uname -s)" != "Darwin" ] || [ "$(uname -m)" != "arm64" ]; then
-  echo "This setup script supports Apple Silicon macOS only." >&2
-  exit 2
-fi
+case "$system_name:$machine_name" in
+  Darwin:arm64) platform_name="Apple Silicon macOS" ;;
+  Linux:x86_64) platform_name="x64 Linux" ;;
+  *)
+    echo "This setup script supports Apple Silicon macOS and x64 Linux only." >&2
+    exit 2
+    ;;
+esac
 
 python_command=${STEREOVISOR_SYSTEM_PYTHON:-}
 if [ -z "$python_command" ]; then
@@ -19,8 +25,10 @@ if [ -z "$python_command" ]; then
 fi
 "$python_command" -c 'import sys; assert sys.version_info[:2] == (3, 12), "Stereovisor requires Python 3.12"'
 
-if [ -d "$venv_path" ] && [ ! -x "$venv_path/bin/python" ]; then
-  echo "Replacing a non-macOS .venv with the Apple Silicon environment."
+if [ -d "$venv_path" ] && ! "$venv_path/bin/python" -c \
+  'import platform, sys; sys.exit(0 if platform.system() == sys.argv[1] and platform.machine() == sys.argv[2] else 1)' \
+  "$system_name" "$machine_name" >/dev/null 2>&1; then
+  echo "Replacing an incompatible .venv with the $platform_name environment."
   rm -rf "$venv_path"
 fi
 if [ ! -x "$venv_path/bin/python" ]; then
@@ -33,8 +41,13 @@ cd "$project_root"
 npm install
 node "$project_root/node_modules/electron/install.js"
 
-if [ ! -x "$project_root/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron" ]; then
-  echo "The Apple Silicon Electron runtime was not installed." >&2
+if [ "$system_name" = "Darwin" ]; then
+  electron_path="$project_root/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron"
+else
+  electron_path="$project_root/node_modules/electron/dist/electron"
+fi
+if [ ! -x "$electron_path" ]; then
+  echo "The $platform_name Electron runtime was not installed." >&2
   exit 1
 fi
-echo "Stereovisor core environment is ready for Apple Silicon."
+echo "Stereovisor core environment is ready for $platform_name."

@@ -4,6 +4,7 @@
   "private": true,
   "description": "Local-first desktop studio that puts a camera inside a single photograph",
   "author": "Stereovisor",
+  "homepage": "https://github.com/Elykdez/Stereovisor",
   "license": "MIT",
   "main": "client/dist-electron/main.js",
   "scripts": {
@@ -23,6 +24,7 @@
     "build": "tsc -p client/tsconfig.electron.json && vite build --config client/vite.config.mts",
     "package": "node scripts/package.mjs",
     "package:mac": "sh scripts/prepare-macos-runtime.sh && npm run build && electron-builder --mac dmg zip --arm64",
+    "package:linux": "sh scripts/prepare-linux-runtime.sh && npm run build && electron-builder --linux AppImage deb --x64",
     "package:win": "npm run build && electron-builder --win nsis portable",
     "package:installer": "npm run build && electron-builder --win nsis",
     "package:portable": "npm run build && electron-builder --win portable",
@@ -31,6 +33,7 @@
     "test:service": "node scripts/platform-runner.mjs test-service",
     "smoke": "node scripts/platform-runner.mjs smoke",
     "smoke:package:mac": "node scripts/smoke-test-macos.mjs --packaged",
+    "smoke:package:linux": "node scripts/smoke-test-linux.mjs --packaged",
     "setup": "node scripts/platform-runner.mjs setup-core",
     "openapi": "node scripts/platform-runner.mjs openapi",
     "check": "npm run version:check && npm run i18n:check && npm run typecheck && npm test && npm run test:service && npm run build",
@@ -125,6 +128,29 @@
       "entitlements": "build/entitlements.mac.plist",
       "entitlementsInherit": "build/entitlements.mac.plist",
       "artifactName": "Stereovisor-${version}-mac-arm64.${ext}",
+      "extraResources": [
+        {
+          "from": ".cache/vendor",
+          "to": ".cache/vendor",
+          "filter": ["**/*", "!**/.git{,/**}"]
+        },
+        {
+          "from": ".python-runtime",
+          "to": ".python-runtime",
+          "filter": ["**/*", "!**/__pycache__{,/**}", "!**/*.pyc"]
+        }
+      ]
+    },
+    "linux": {
+      "target": [
+        { "target": "AppImage", "arch": ["x64"] },
+        { "target": "deb", "arch": ["x64"] }
+      ],
+      "category": "Graphics",
+      "icon": "client/public/app-icon.png",
+      "executableName": "stereovisor",
+      "maintainer": "Stereovisor",
+      "artifactName": "Stereovisor-${version}-linux-x64.${ext}",
       "extraResources": [
         {
           "from": ".cache/vendor",

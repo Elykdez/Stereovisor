@@ -102,6 +102,10 @@ function resourceRoot(): string {
   return app.isPackaged ? process.resourcesPath : appRoot();
 }
 
+function usesBundledPosixRuntime(): boolean {
+  return app.isPackaged && process.platform !== "win32";
+}
+
 function runtimeRoot(): string {
   return app.isPackaged && process.platform === "win32"
     ? path.join(app.getPath("userData"), "runtime")
@@ -191,7 +195,7 @@ function startPackagedModelPreparation(showConsole: boolean): void {
     root,
     "service",
     "scripts",
-    process.platform === "darwin"
+    process.platform !== "win32"
       ? "prepare-packaged-ai.py"
       : "prepare-packaged-ai.ps1",
   );
@@ -200,10 +204,10 @@ function startPackagedModelPreparation(showConsole: boolean): void {
     return;
   }
   const python =
-    process.platform === "darwin"
+    process.platform !== "win32"
       ? path.join(root, ".python-runtime", "bin", "python3")
       : managedPythonPath(root, ".venv-ai");
-  if (process.platform === "darwin" && !existsSync(python)) {
+  if (process.platform !== "win32" && !existsSync(python)) {
     console.error("[Stereovisor][electron] Packaged AI runtime is missing", python);
     return;
   }
@@ -227,13 +231,13 @@ function startPackagedModelPreparation(showConsole: boolean): void {
   };
   delete environment.PYTHONHOME;
   delete environment.PYTHONPATH;
-  if (process.platform === "darwin") {
-    // Python bytecode written inside Contents/Resources invalidates the sealed app.
+  if (process.platform !== "win32") {
+    // Packaged POSIX resources are signed or read-only, so bytecode belongs nowhere inside them.
     environment.PYTHONDONTWRITEBYTECODE = "1";
   }
-  const command = process.platform === "darwin" ? python : "powershell.exe";
+  const command = process.platform !== "win32" ? python : "powershell.exe";
   const spawnArguments =
-    process.platform === "darwin"
+    process.platform !== "win32"
       ? [script, "--resource-root", root, "--model-root", modelRoot]
       : [
           "-NoProfile",
@@ -324,7 +328,7 @@ async function startService(
   if (appIsQuitting) return;
   const root = resourceRoot();
   const managedPython =
-    app.isPackaged && process.platform === "darwin"
+    usesBundledPosixRuntime()
       ? path.join(root, ".python-runtime", "bin", "python3")
       : managedPythonPath(runtimeRoot(), app.isPackaged ? ".venv-ai" : ".venv");
   const python =
@@ -344,8 +348,8 @@ async function startService(
   if (process.platform === "darwin") {
     environment.PYTORCH_ENABLE_MPS_FALLBACK =
       process.env.PYTORCH_ENABLE_MPS_FALLBACK ?? "1";
-    if (app.isPackaged) environment.PYTHONDONTWRITEBYTECODE = "1";
   }
+  if (usesBundledPosixRuntime()) environment.PYTHONDONTWRITEBYTECODE = "1";
   if (app.isPackaged) {
     environment.PYTHONNOUSERSITE = "1";
     delete environment.PYTHONHOME;
@@ -353,10 +357,10 @@ async function startService(
     environment.STEREOVISOR_PROJECT_ROOT = path.join(packagedDataRoot, "projects");
     environment.STEREOVISOR_MODEL_ROOT = findPackagedModelRoot();
     environment.STEREOVISOR_POWERPAINT_PYTHON =
-      process.platform === "darwin"
+      process.platform !== "win32"
         ? managedPython
         : managedPythonPath(runtimeRoot(), ".venv-powerpaint");
-    if (process.platform === "darwin") {
+    if (process.platform !== "win32") {
       environment.STEREOVISOR_POWERPAINT_PACKAGES = path.join(
         root,
         ".python-runtime",
@@ -365,7 +369,7 @@ async function startService(
     }
     environment.STEREOVISOR_POWERPAINT_VENDOR = path.join(runtimeRoot(), ".cache", "vendor", "PowerPaint");
   }
-  // macOS GUI applications do not own a console window to inherit. Keep the
+  // POSIX GUI applications do not own the Windows console lifecycle. Keep the
   // bundled service attached so closing the app cannot leave an orphan behind.
   const launchPolicy = serviceLaunchPolicy(
     process.platform === "win32" && showConsole,

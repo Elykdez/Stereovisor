@@ -46,7 +46,7 @@ if ($LASTEXITCODE -eq 0) {
 } else {
   gh release create "client-v$client" --repo $Repo `
     --title "Stereovisor $client" `
-    --notes "Client $client, service $service. Windows only." `
+    --notes "Client $client, service $service. CI publishes Windows x64, Apple Silicon macOS, and Linux x64 assets." `
     $setup $portable
   if ($LASTEXITCODE -ne 0) { throw "Release creation failed." }
 }

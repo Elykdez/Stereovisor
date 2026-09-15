@@ -5,14 +5,20 @@ const target =
     ? "package:mac"
     : process.platform === "win32"
       ? "package:win"
+      : process.platform === "linux"
+        ? "package:linux"
       : null;
 
 if (!target) {
-  console.error("Stereovisor packaging is supported on Windows and Apple Silicon macOS.");
+  console.error("Stereovisor packaging is supported on Windows, Apple Silicon macOS, and x64 Linux.");
   process.exit(2);
 }
 if (process.platform === "darwin" && process.arch !== "arm64") {
   console.error("The macOS package target supports Apple Silicon only.");
+  process.exit(2);
+}
+if (process.platform === "linux" && process.arch !== "x64") {
+  console.error("The Linux package target supports x64 only.");
   process.exit(2);
 }
 
