@@ -54,7 +54,6 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
-          cache: pip
       - run: pip install -r service/requirements-core.txt
       - run: python -m pytest service/tests
         env:
@@ -81,7 +80,27 @@ jobs:
             throw "Tag ${{ github.ref_name }} does not match client version $($versions.client)."
           }
       - run: npm ci
-      - run: npm run package:win
+      - name: Package Windows
+        run: npm run package:win
+        env:
+          WIN_CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
+          WIN_CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
+      - name: Verify Windows signatures when configured
+        shell: pwsh
+        env:
+          WIN_CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:WIN_CSC_LINK)) {
+            Write-Host "WIN_CSC_LINK is not configured; artifacts are unsigned."
+            exit 0
+          }
+          $artifacts = Get-ChildItem release/Stereovisor-*.exe
+          foreach ($artifact in $artifacts) {
+            $signature = Get-AuthenticodeSignature $artifact.FullName
+            if ($signature.Status -ne "Valid") {
+              throw "$($artifact.Name) has signature status $($signature.Status)."
+            }
+          }
       - uses: actions/upload-artifact@v5
         with:
           name: ${{ env.NAME }}-windows-x64
@@ -113,7 +132,10 @@ jobs:
           TAG_VERSION=${GITHUB_REF_NAME#client-}
           test "${TAG_VERSION#v}" = "$(node -p "require('./versions.json').client")"
       - run: npm ci
-      - run: npm run package:mac
+      - name: Package Apple Silicon app
+        run: |
+          ulimit -n 65536
+          npm run package:mac
       - run: npm run smoke:package:mac
         env:
           STEREOVISOR_SMOKE_MODE: preview

@@ -1,6 +1,6 @@
 {
   "name": "stereovisor",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "private": true,
   "description": "Local-first desktop studio that puts a camera inside a single photograph",
   "author": "Stereovisor",
@@ -23,9 +23,9 @@
     "prebuild": "npm run version:generate && npm run i18n:generate",
     "build": "tsc -p client/tsconfig.electron.json && vite build --config client/vite.config.mts",
     "package": "node scripts/package.mjs",
-    "package:mac": "sh scripts/prepare-macos-runtime.sh && npm run build && electron-builder --mac dmg zip --arm64",
-    "package:linux": "sh scripts/prepare-linux-runtime.sh && npm run build && electron-builder --linux AppImage deb --x64",
-    "package:win": "npm run build && electron-builder --win nsis portable",
+    "package:mac": "sh scripts/prepare-macos-runtime.sh && npm run build && electron-builder --mac dmg zip --arm64 --publish never",
+    "package:linux": "sh scripts/prepare-linux-runtime.sh && npm run build && electron-builder --linux AppImage deb --x64 --publish never",
+    "package:win": "npm run build && electron-builder --win nsis portable --publish never",
     "package:installer": "npm run build && electron-builder --win nsis",
     "package:portable": "npm run build && electron-builder --win portable",
     "typecheck": "tsc -p client/tsconfig.json --noEmit && tsc -p client/tsconfig.electron.json --noEmit",
@@ -73,7 +73,6 @@
     "directories": {
       "output": "release"
     },
-    "electronDist": "node_modules/electron/dist",
     "files": [
       "client/dist/**/*",
       "client/dist-electron/**/*",
@@ -114,8 +113,8 @@
         "portable"
       ],
       "icon": "client/public/app-icon.png",
-      "signAndEditExecutable": false,
-      "signExecutable": false
+      "requestedExecutionLevel": "asInvoker",
+      "signAndEditExecutable": true
     },
     "mac": {
       "target": [

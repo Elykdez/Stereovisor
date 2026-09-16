@@ -242,8 +242,12 @@ Prefer the installed shortcut for daily use. Both Windows variants need an
 internet connection and sufficient disk space for the first setup. Later launches
 reuse the downloaded runtime. Interrupted downloads resume on the next launch.
 
-The package is unsigned, so Windows SmartScreen may warn on first run. This is
-expected for a locally built executable.
+Windows executable resources include the Stereovisor icon and metadata, and the
+application runs at the current user's privilege level. Set `WIN_CSC_LINK` to a
+trusted code-signing certificate and `WIN_CSC_KEY_PASSWORD` to its password when
+packaging to sign the executable and installers. The CI release job uses the same
+names as repository secrets and verifies the resulting signatures when they are
+configured. Unsigned local builds can still trigger Windows SmartScreen.
 
 ### Apple Silicon
 

@@ -45,8 +45,8 @@ the Python runtime, AI libraries, and model weights are fetched on first launch.
 No system Python, Git, or npm is required. Both Windows variants need an internet
 connection and enough free disk space for that first setup, later launches reuse
 what was downloaded, and an interrupted download resumes on the next launch.
-Closing the app stops setup. The build is unsigned, so Windows SmartScreen may
-warn on first run.
+Closing the app stops setup. Official builds can be certificate-signed; locally
+built unsigned executables may trigger Windows SmartScreen on first run.
 
 The macOS and Linux packages include their Python runtime and AI libraries;
 model weights still download on first launch. Linux release builds use CPU
@@ -278,7 +278,7 @@ network.
 | The demo exports as WebM instead of MP4 | The runtime has no MP4 recorder; WebM is the intended fallback |
 | A job was still running when the app was closed | The editor restores the running job's progress and `Cancel` on the next launch. Reloading never cancels server-owned work. |
 | The first launch takes a long time before the editor opens | On Windows the runtime and model weights are downloaded then. Leave it open; an interrupted download resumes on the next launch. |
-| Windows SmartScreen warns on first run | Expected for a locally built, unsigned executable |
+| Windows SmartScreen warns on first run | Use a certificate-signed release; locally built unsigned executables can trigger this warning |
 | The processing effects are distracting | Turn on `Reduce graphic effects`, or `Reduce motion` |
 | A refine made the mask worse | `Undo` restores the previous alpha. Refinement reads the original proposal, so a second pass does not compound the first. |
 

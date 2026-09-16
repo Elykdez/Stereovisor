@@ -163,9 +163,12 @@ async function main() {
     chmodSync(artifacts.appImage, 0o755);
     const extractionRoot = path.join(temporaryRoot, "appimage");
     mkdirSync(extractionRoot);
-    run(artifacts.appImage, ["--appimage-extract"], "AppImage verification", {
+    run(artifacts.appImage, ["--appimage-extract", "AppRun"], "AppImage verification", {
       cwd: extractionRoot,
     });
+    if (!existsSync(path.join(extractionRoot, "squashfs-root", "AppRun"))) {
+      throw new Error("The AppImage did not contain its AppRun entry point.");
+    }
     const powerpaintInfo = run(
       artifacts.runtimePython,
       [
